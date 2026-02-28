@@ -1,8 +1,8 @@
-Leader,,,,,,
-Live Amazon scrape date,2026-02-28,,,,,Prices in CAD from Amazon listing pages or live Amazon search result cards.
-Product Name,Quantity Needed,Amazon/Amazon.ca Link,Unit Price (CAD),Shipping (CAD),Line Total (CAD),Notes
-6X 7.4V STS3215 Servos for SO-ARM100 Robotic Arm 19KG High Torque Intelligent Bus Servo TTL with FE-URT-1,1,https://www.amazon.ca/Kikolufy-STS3215-SO-ARM100-Intelligent-FE-URT-1/dp/B0FQCT2LK1,185.8,5.54,=B4*D4+E4,Amazon-only SO-ARM100 leader bundle. Repo requires 3x C046 + 2x C044 + 1x C001; listing does not expose the ratio split.
-"Serial Bus Servo Driver Board, Integrates Servo Power Supply and Control Circuit, for ST/SC Series Serial Bus Servos, Supports 253 ST/SC Series Serial Bus Servos at The Same Time",1,https://www.amazon.ca/Wonrabai-Waveshare-Integrates-Control-Supports/dp/B0CTMM4LWK,15.35,5.05,=B5*D5+E5,Exact ST/SC serial bus board used for LeRobot-style USB control.
-"etguuds Blue USB C Cable 6.6ft, 2-Pack USB to USB C Cable 3A Fast Charging Type C Cable Braided Data Cord",1,https://www.amazon.ca/Charging-etguuds-Charger-Braided-Compatible/dp/B0B8NWLLW2,12.59,0,=B6*D6+E6,Use one cable for the leader control board.
-5V 5A Power Adapter 25W AC 100-240V to DC Wall Power Supply Converter with 5.5x2.5mm/2.1mm Plug,1,https://www.amazon.ca/MTDZKJG-100-240V-Converter-5-5x2-5mm-Security/dp/B0CJHQNFMG,24.54,5.51,=B7*D7+E7,Chosen to match the repo's 5V leader-side power recommendation while keeping 5.5x2.1mm compatibility.
-TOTAL: Leader (CAD),,,,,=SUM(F4:F7),
+Leader,,,,,,,
+Live Amazon scrape date,2026-02-28,,,,,,
+Section,Product Name,Quantity Needed,Amazon/Amazon.ca Link,Unit Price (CAD),Shipping (CAD),Line Total (CAD),Notes
+Leader,6X 7.4V STS3215 Servos for SO-ARM100 Robotic Arm 19KG High Torque Intelligent Bus Servo TTL with FE-URT-1,1,https://www.amazon.ca/Kikolufy-STS3215-SO-ARM100-Intelligent-FE-URT-1/dp/B0FQCT2LK1,185.8,5.54,=C4*E4+F4,Amazon-only SO-ARM100 leader bundle. Repo requires 3x C046 + 2x C044 + 1x C001; listing does not expose the ratio split.
+Leader,"Serial Bus Servo Driver Board, Integrates Servo Power Supply and Control Circuit, for ST/SC Series Serial Bus Servos, Supports 253 ST/SC Series Serial Bus Servos at The Same Time",1,https://www.amazon.ca/Wonrabai-Waveshare-Integrates-Control-Supports/dp/B0CTMM4LWK,15.35,5.05,=C5*E5+F5,Exact ST/SC serial bus board for the leader arm.
+Leader,"etguuds Blue USB C Cable 6.6ft, 2-Pack USB to USB C Cable 3A Fast Charging Type C Cable Braided Data Cord",1,https://www.amazon.ca/Charging-etguuds-Charger-Braided-Compatible/dp/B0B8NWLLW2,12.59,0,=C6*E6+F6,Use one cable for the leader control board.
+Leader,5V 5A Power Adapter 25W AC 100-240V to DC Wall Power Supply Converter with 5.5x2.5mm/2.1mm Plug,1,https://www.amazon.ca/MTDZKJG-100-240V-Converter-5-5x2-5mm-Security/dp/B0CJHQNFMG,26.41,5.51,=C7*E7+F7,Leader-side power supply with 5.5x2.1mm compatibility.
+TOTAL: Leader (CAD),,,,,,=SUM(G4:G7),
