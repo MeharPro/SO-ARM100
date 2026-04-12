@@ -13,6 +13,9 @@ DEFAULT_POWER_LOG_DIR = "~/lekiwi-power-logs"
 DEFAULT_POWER_VOLTAGE_V_PER_RAW = 0.1
 # STS3215 memory-table references commonly document 6.5mA per current-count.
 DEFAULT_POWER_CURRENT_MA_PER_RAW = 6.5
+DEFAULT_BATTERY_EMPTY_V = 9.6
+DEFAULT_BATTERY_FULL_V = 12.6
+DEFAULT_BATTERY_SMOOTHING_ALPHA = 0.2
 
 
 def add_power_monitor_args(parser: Any) -> Any:
@@ -23,6 +26,9 @@ def add_power_monitor_args(parser: Any) -> Any:
     parser.add_argument("--power-num-retry", type=int, default=1)
     parser.add_argument("--power-voltage-v-per-raw", type=float, default=DEFAULT_POWER_VOLTAGE_V_PER_RAW)
     parser.add_argument("--power-current-ma-per-raw", type=float, default=DEFAULT_POWER_CURRENT_MA_PER_RAW)
+    parser.add_argument("--battery-empty-v", type=float, default=DEFAULT_BATTERY_EMPTY_V)
+    parser.add_argument("--battery-full-v", type=float, default=DEFAULT_BATTERY_FULL_V)
+    parser.add_argument("--battery-smoothing-alpha", type=float, default=DEFAULT_BATTERY_SMOOTHING_ALPHA)
     return parser
 
 
@@ -45,6 +51,12 @@ class PowerTelemetryLogger:
         self.current_ma_per_raw = float(
             getattr(args, "power_current_ma_per_raw", DEFAULT_POWER_CURRENT_MA_PER_RAW)
         )
+        self.battery_empty_v = float(getattr(args, "battery_empty_v", DEFAULT_BATTERY_EMPTY_V))
+        self.battery_full_v = float(getattr(args, "battery_full_v", DEFAULT_BATTERY_FULL_V))
+        self.battery_smoothing_alpha = min(
+            max(float(getattr(args, "battery_smoothing_alpha", DEFAULT_BATTERY_SMOOTHING_ALPHA)), 0.0),
+            1.0,
+        )
         self.csv_file = None
         self.csv_writer = None
         self.csv_path: Path | None = None
@@ -53,6 +65,13 @@ class PowerTelemetryLogger:
         self.last_sample: dict[str, Any] | None = None
         self._sync_read_warning_state: dict[str, bool] = {}
         self._read_warning_state: dict[tuple[str, str], bool] = {}
+        self._battery_voltage_filtered_v: float | None = None
+
+    def _estimate_battery_percent(self, voltage_v: float) -> float:
+        if self.battery_full_v <= self.battery_empty_v:
+            return 0.0
+        pct = 100.0 * (voltage_v - self.battery_empty_v) / (self.battery_full_v - self.battery_empty_v)
+        return min(max(pct, 0.0), 100.0)
 
     def start(self) -> None:
         if not self.enabled:
@@ -82,6 +101,8 @@ class PowerTelemetryLogger:
     def maybe_sample(self, *, force: bool = False) -> None:
         if not self.enabled or self.csv_writer is None:
             return
+        if not getattr(self.robot.bus, "is_connected", False):
+            return
 
         now = time.monotonic()
         if not force and now < self.next_sample_s:
@@ -109,6 +130,9 @@ class PowerTelemetryLogger:
             "avg_voltage_v",
             "min_voltage_v",
             "max_voltage_v",
+            "battery_voltage_v_est",
+            "battery_percent_est",
+            "battery_percent_smoothed_est",
             "total_current_ma_est",
             "total_power_w_est",
             "max_temp_c",
@@ -130,6 +154,8 @@ class PowerTelemetryLogger:
         return fields
 
     def _read_metric(self, data_name: str) -> dict[str, int | None]:
+        if not getattr(self.robot.bus, "is_connected", False):
+            return {motor: None for motor in self.motors}
         try:
             values = self.robot.bus.sync_read(data_name, self.motors, normalize=False, num_retry=self.num_retry)
             self._sync_read_warning_state[data_name] = False
@@ -202,9 +228,26 @@ class PowerTelemetryLogger:
                 hottest_motor = motor
 
         row["motors_reporting"] = motors_reporting
-        row["avg_voltage_v"] = round(sum(voltages_v) / len(voltages_v), 3) if voltages_v else ""
+        avg_voltage_v = (sum(voltages_v) / len(voltages_v)) if voltages_v else None
+        row["avg_voltage_v"] = round(avg_voltage_v, 3) if avg_voltage_v is not None else ""
         row["min_voltage_v"] = round(min(voltages_v), 3) if voltages_v else ""
         row["max_voltage_v"] = round(max(voltages_v), 3) if voltages_v else ""
+        if avg_voltage_v is not None:
+            if self._battery_voltage_filtered_v is None:
+                self._battery_voltage_filtered_v = avg_voltage_v
+            else:
+                alpha = self.battery_smoothing_alpha
+                self._battery_voltage_filtered_v += alpha * (avg_voltage_v - self._battery_voltage_filtered_v)
+            row["battery_voltage_v_est"] = round(self._battery_voltage_filtered_v, 3)
+            row["battery_percent_est"] = round(self._estimate_battery_percent(avg_voltage_v), 2)
+            row["battery_percent_smoothed_est"] = round(
+                self._estimate_battery_percent(self._battery_voltage_filtered_v),
+                2,
+            )
+        else:
+            row["battery_voltage_v_est"] = ""
+            row["battery_percent_est"] = ""
+            row["battery_percent_smoothed_est"] = ""
         row["total_current_ma_est"] = round(sum(currents_ma), 3) if currents_ma else ""
         row["total_power_w_est"] = round(sum(powers_w), 3) if powers_w else ""
         row["max_temp_c"] = round(max_temp_c, 1) if hottest_motor else ""
@@ -225,11 +268,20 @@ class PowerTelemetryLogger:
             pieces.append(
                 f"voltage≈{sample['avg_voltage_v']:.2f}V ({sample['min_voltage_v']:.2f}-{sample['max_voltage_v']:.2f})"
             )
+        if sample["battery_percent_smoothed_est"] != "":
+            pieces.append(f"battery≈{sample['battery_percent_smoothed_est']:.0f}%")
         if sample["peak_current_motor"]:
             pieces.append(
                 f"peak={sample['peak_current_motor']}@{sample['peak_current_ma_est'] / 1000.0:.2f}A"
             )
         if sample["hottest_motor"]:
             pieces.append(f"hottest={sample['hottest_motor']}@{sample['max_temp_c']:.0f}C")
+        temperatures = []
+        for motor in self.motors:
+            temperature_c = sample.get(f"{motor}.temperature_c")
+            if temperature_c != "":
+                temperatures.append(f"{motor}@{float(temperature_c):.0f}C")
+        if temperatures:
+            pieces.append(f"temps={','.join(temperatures)}")
 
         return " ".join(pieces)

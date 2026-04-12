@@ -1,0 +1,42 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - paragraph [ref=e6]: Robot Arm Console
+      - heading "Robert" [level=1] [ref=e7]
+      - paragraph [ref=e8]: Start control, record motion, replay saved moves, and watch the robot processes from one place.
+    - figure "Cute yellow robot avatar" [ref=e9]
+    - generic [ref=e16]:
+      - generic [ref=e17]: "Pi: offline"
+      - generic [ref=e18]: "Leader: missing"
+      - generic [ref=e19]: "Host: idle"
+      - generic [ref=e20]: "Teleop: idle"
+    - navigation [ref=e21]:
+      - button "Overview" [ref=e22] [cursor=pointer]
+      - button "Recordings" [ref=e23] [cursor=pointer]
+      - button "Pinned Moves" [ref=e24] [cursor=pointer]
+      - button "Settings" [ref=e25] [cursor=pointer]
+      - button "Logs" [ref=e26] [cursor=pointer]
+    - generic [ref=e27]:
+      - strong [ref=e28]: Leader check
+      - generic [ref=e29]: Checking leader status...
+  - generic [ref=e30]:
+    - banner [ref=e31]:
+      - generic [ref=e32]:
+        - paragraph [ref=e33]: Dashboard
+        - heading "Overview" [level=2] [ref=e34]
+      - paragraph [ref=e35]: Start or stop control, watch live output, and confirm the robot and leader are both ready.
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]:
+          - paragraph [ref=e40]: Quick Actions
+          - heading "Connect and Control" [level=2] [ref=e41]
+        - paragraph [ref=e42]: The backend retries the Pi five times, checks the leader-arm port first, and streams the action output below.
+      - generic [ref=e43]:
+        - button "Start Control" [ref=e44] [cursor=pointer]
+        - button "Stop Control" [ref=e45] [cursor=pointer]
+        - button "Emergency Stop + Torque Off" [ref=e46] [cursor=pointer]
+      - generic [ref=e47]:
+        - generic [ref=e48]:
+          - heading "Live Console" [level=3] [ref=e49]
+          - generic [ref=e50]: idle
+        - generic [ref=e51]: No action output yet.

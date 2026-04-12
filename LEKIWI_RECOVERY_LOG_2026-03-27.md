@@ -364,6 +364,61 @@ cd /Users/meharkhanna/lerobot
 python examples/lekiwi/teleoperate.py
 ```
 
+## Record And Replay Exact Follower Motion
+
+These trajectory tools are intended to run on the Pi.
+
+The source files live locally at:
+- `/Users/meharkhanna/robot-arm/scripts/lekiwi_record_trajectory.py`
+- `/Users/meharkhanna/robot-arm/scripts/lekiwi_replay_trajectory.py`
+
+Copy them onto the Pi first if the `robot-arm` repo is not already checked out there.
+
+### Record
+
+Run the recorder on the Pi instead of the normal host. It behaves like the host, accepts teleop from the Mac, and also records the follower's exact observed servo motion to disk.
+
+Pi:
+
+```bash
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
+cd ~/robot-arm
+python scripts/lekiwi_record_trajectory.py \
+  --robot.id=follow-mobile \
+  --host.connection_time_s=3600 \
+  --output ~/lekiwi-trajectories/demo.json
+```
+
+Mac:
+
+```zsh
+source /Users/meharkhanna/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
+cd /Users/meharkhanna/lerobot
+python examples/lekiwi/teleoperate.py
+```
+
+The saved file is the follower's observed state, not just the leader commands.
+
+### Replay
+
+Replay the exact recorded follower trajectory locally from the Pi:
+
+```bash
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
+cd ~/robot-arm
+python scripts/lekiwi_replay_trajectory.py \
+  --robot.id=follow-mobile \
+  --input ~/lekiwi-trajectories/demo.json
+```
+
+Useful flags:
+- `--include-base` to replay the recorded base velocities too.
+- `--speed 0.5` for half-speed replay.
+- `--speed 2.0` for double-speed replay.
+
 ## Extra Notes
 
 - The Pi-side `configure()` path was hardened during debugging with `num_retry=10` on torque/config writes.

@@ -1,0 +1,3 @@
+bb915af128b0d9857b9f23e1fe22f59dc0fec7e5ca9ed1fb933db2c7a3d34f03  /home/pi/lekiwi-preserved/manual-control-20260328-153605/lekiwi_host.py
+b14e26d2b652c31cafb403a0409e60c2818647459d104ab0214696e92d0ce9eb  /home/pi/lekiwi-preserved/manual-control-20260328-153605/lekiwi.py
+1539fafbd4894169d26f0303c1e1b78dd7fcb967935092aae267b0b0cd32b040  /home/pi/lekiwi-preserved/manual-control-20260328-153605/config_lekiwi.py

@@ -11,17 +11,12 @@ from pathlib import Path
 import cv2
 import zmq
 
-from lekiwi_runtime import (
-    TorqueLimitFileWatcher,
-    add_torque_limit_args,
-    apply_torque_limits,
-    normalize_arm_action,
-    parse_torque_limits_json,
-)
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
 
 logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger("lekiwi_host")
+logger = logging.getLogger("lekiwi_free_teach_host")
+
+BASE_ACTION_KEYS = ("x.vel", "y.vel", "theta.vel")
 
 if "PowerTelemetryLogger" not in globals():
     helper_path = Path(__file__).with_name("lekiwi_power.py")
@@ -33,43 +28,19 @@ if "PowerTelemetryLogger" not in globals():
         raise RuntimeError("Power telemetry helper is unavailable.")
 
 
-def parse_bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise argparse.ArgumentTypeError("expected true or false")
-
-
-def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
-    fields = getattr(LeKiwiConfig, "__dataclass_fields__", {})
-    kwargs = {
-        "id": args.robot_id,
-        "port": args.robot_port,
-    }
-    optional_values = {
-        "use_degrees": args.use_degrees,
-        "base_max_raw_velocity": args.base_max_raw_velocity,
-        "base_wheel_torque_limit": args.base_wheel_torque_limit,
-        "enable_base": args.enable_base,
-    }
-    for name, value in optional_values.items():
-        if name in fields:
-            kwargs[name] = value
-
-    return LeKiwiConfig(**kwargs)
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="LeKiwi host with power telemetry.")
+    parser = argparse.ArgumentParser(
+        description="LeKiwi host with arm torque disabled for free-teach recording."
+    )
     parser.add_argument("--robot-id", "--robot.id", dest="robot_id", default="follow")
     parser.add_argument("--robot-port", "--robot.port", dest="robot_port", default="/dev/ttyACM0")
-    parser.add_argument("--robot-cameras-json", "--robot.cameras", dest="robot_cameras_json", default="{}")
-    parser.add_argument("--use-degrees", "--robot.use_degrees", dest="use_degrees", type=parse_bool, default=True)
-    parser.add_argument("--base-max-raw-velocity", "--robot.base_max_raw_velocity", dest="base_max_raw_velocity", type=int, default=3000)
-    parser.add_argument("--base-wheel-torque-limit", "--robot.base_wheel_torque_limit", dest="base_wheel_torque_limit", type=int, default=None)
-    parser.add_argument("--enable-base", "--robot.enable_base", dest="enable_base", type=parse_bool, default=True)
+    parser.add_argument(
+        "--robot-cameras-json",
+        "--robot.cameras",
+        dest="robot_cameras_json",
+        default="default",
+        help="Use 'default' to keep the built-in front and wrist cameras enabled, or '{}' to disable them.",
+    )
     parser.add_argument("--port-zmq-cmd", "--host.port_zmq_cmd", dest="port_zmq_cmd", type=int, default=5555)
     parser.add_argument(
         "--port-zmq-observations", "--host.port_zmq_observations", dest="port_zmq_observations", type=int, default=5556
@@ -79,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         "--watchdog-timeout-ms", "--host.watchdog_timeout_ms", dest="watchdog_timeout_ms", type=int, default=500
     )
     parser.add_argument("--loop-hz", "--host.max_loop_freq_hz", dest="loop_hz", type=float, default=30.0)
-    add_torque_limit_args(parser)
+    parser.add_argument("--disable-base-torque", action="store_true", help="Also disable base wheel torque.")
     add_power_monitor_args(parser)
     return parser.parse_args()
 
@@ -97,18 +68,24 @@ def configure_cameras(robot_config: LeKiwiConfig, cameras_json: str) -> None:
     raise SystemExit("Only '{}' or 'default' are currently supported for --robot-cameras-json.")
 
 
+def extract_base_action(action: dict[str, float]) -> dict[str, float]:
+    return {key: float(action.get(key, 0.0)) for key in BASE_ACTION_KEYS}
+
+
 def main() -> None:
     args = parse_args()
 
-    robot_config = build_robot_config(args)
+    robot_config = LeKiwiConfig(id=args.robot_id, port=args.robot_port)
     configure_cameras(robot_config, args.robot_cameras_json)
     robot = LeKiwi(robot_config)
     robot.connect()
-    apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
-    torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
-    torque_watcher.poll(robot, force=True)
 
-    power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_host")
+    passive_motors = list(robot.arm_motors)
+    if args.disable_base_torque:
+        passive_motors.extend(robot.base_motors)
+    robot.bus.disable_torque(passive_motors, num_retry=10)
+
+    power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_free_teach_host")
     power_logger.start()
 
     ctx = zmq.Context()
@@ -124,9 +101,12 @@ def main() -> None:
     watchdog_active = False
 
     print(
-        f"LeKiwi host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
+        f"LeKiwi free-teach host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
         flush=True,
     )
+    print("Arm torque is disabled. You can hand-guide the arm directly.", flush=True)
+    if args.disable_base_torque:
+        print("Base torque is also disabled. Wheels will not respond to commands.", flush=True)
 
     start = time.perf_counter()
     try:
@@ -135,8 +115,9 @@ def main() -> None:
 
             try:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
-                action = normalize_arm_action(dict(json.loads(msg)))
-                robot.send_action(action)
+                action = dict(json.loads(msg))
+                base_action = extract_base_action(action)
+                robot.send_action(base_action)
                 last_cmd_time = time.time()
                 watchdog_active = False
             except zmq.Again:
@@ -153,8 +134,6 @@ def main() -> None:
                 )
                 robot.stop_base()
                 watchdog_active = True
-
-            torque_watcher.poll(robot)
 
             observation = robot.get_observation()
             for cam_key in robot.cameras:
@@ -173,7 +152,7 @@ def main() -> None:
             elapsed = time.time() - loop_start
             time.sleep(max(1.0 / args.loop_hz - elapsed, 0.0))
     except KeyboardInterrupt:
-        print("\nStopping LeKiwi host", flush=True)
+        print("\nStopping LeKiwi free-teach host", flush=True)
     finally:
         try:
             robot.disconnect()

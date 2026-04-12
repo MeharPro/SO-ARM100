@@ -1,0 +1,8 @@
+ M src/lerobot/robots/lekiwi/lekiwi.py
+ M src/lerobot/robots/lekiwi/lekiwi_host.py
+?? minimal.py
+?? scripts/
+?? servov4.py
+?? src/lerobot/robots/lekiwi/lekiwi_smooth_host.py
+?? test_one_servo.py
+?? testv2_one_servo.py

@@ -1,0 +1,2 @@
+2a96ea8865f1f1b824dc9ae672d76cdb8eb3a1cb7edeae5b11d40d8c643ff350  /Users/meharkhanna/robot-arm/preserved/manual-control-20260328-153604/mac/teleoperate.py
+63fac66666df689d17cdaf243318abd083ef4037acfed6d35683fbee0ddcf989  /Users/meharkhanna/robot-arm/preserved/manual-control-20260328-153604/mac/lekiwi.py
