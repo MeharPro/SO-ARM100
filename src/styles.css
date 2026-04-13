@@ -46,7 +46,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -94,7 +96,9 @@ button.danger {
   color: white;
 }
 
-input {
+input,
+select,
+textarea {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--line);
@@ -104,7 +108,13 @@ input {
   color: var(--ink);
 }
 
-input:focus {
+textarea {
+  resize: vertical;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
   outline: 3px solid rgba(15, 159, 110, 0.18);
   border-color: var(--accent);
 }
@@ -743,6 +753,11 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+.recording-live-waiting {
+  font-size: 0.96rem;
+  line-height: 1.2;
+}
+
 .recording-live-meta {
   color: var(--ink-soft);
   text-align: right;
@@ -814,6 +829,24 @@ code {
   align-items: end;
   padding: 0 0 1rem;
   border-bottom: 1px solid var(--line);
+}
+
+.recording-trim-editor {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.trim-editor-actions {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.trim-editor-actions .card-note {
+  margin: 0;
 }
 
 .pin-builder {
@@ -1001,6 +1034,11 @@ label {
   .button-cluster,
   .button-cluster.inline {
     flex-direction: column;
+  }
+
+  .trim-editor-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .button-cluster button {

@@ -4,8 +4,12 @@ import type {
   AppSettings,
   DashboardState,
   PinnedMove,
+  ReplayTarget,
   RecordingEntry,
   RenameRecordingRequest,
+  TrainingArtifact,
+  TrainingProfile,
+  TrimRecordingRequest,
 } from "./types";
 
 const POLL_MS = 2500;
@@ -13,6 +17,7 @@ const SECTIONS = [
   { key: "overview", label: "Overview" },
   { key: "recordings", label: "Recordings" },
   { key: "pins", label: "Pinned Moves" },
+  { key: "training", label: "Training" },
   { key: "settings", label: "Settings" },
   { key: "logs", label: "Logs" },
 ] as const;
@@ -42,6 +47,7 @@ const TORQUE_LIMIT_MAX = 1000;
 const DEFAULT_ARM_TORQUE_LIMITS = Object.fromEntries(
   ARM_SERVO_IDS.map((id) => [id, TORQUE_LIMIT_MAX]),
 ) as Record<string, number>;
+const LOCAL_TRAINING_ROOT = "/Users/meharkhanna/robot-arm/output";
 
 interface ServoTemperature {
   id: string;
@@ -112,6 +118,24 @@ function formatElapsedSince(startedAt: string | null, nowMs: number): string {
   }
 
   return formatClockDuration((nowMs - startedMs) / 1000);
+}
+
+function parseLocalLogTimestamp(line: string): number | null {
+  const match = line.match(/^(\d{1,2}):(\d{2}):(\d{2})\s(AM|PM)\b/);
+  if (!match) {
+    return null;
+  }
+
+  let hours = Number(match[1]) % 12;
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  if (match[4] === "PM") {
+    hours += 12;
+  }
+
+  const now = new Date();
+  now.setHours(hours, minutes, seconds, 0);
+  return now.getTime();
 }
 
 function normalizeHotkeyText(value: string): string {
@@ -198,6 +222,84 @@ function labelServo(id: string | null): string {
     return "n/a";
   }
   return SERVO_LABELS[id] ?? id.replace(/^arm_/, "").replace(/_/g, " ");
+}
+
+function isLocalLeaderCaptureMode(captureMode: TrainingProfile["captureMode"] | null | undefined): boolean {
+  return captureMode === "leader-as-follower";
+}
+
+function describeCaptureMode(profile: TrainingProfile | null | undefined): string {
+  if (!profile) {
+    return "Select a training profile first.";
+  }
+  if (profile.captureMode === "leader-as-follower") {
+    return "Leader-as-follower mode on the Mac. The leader arm is recorded locally as an arm-only LeKiwi-compatible stand-in.";
+  }
+  if (profile.captureMode === "free-teach") {
+    return "Free-teach mode on the Pi with follower torque disabled.";
+  }
+  return "Leader mode on the Pi using the follower arm plus the Mac-attached leader arm.";
+}
+
+function captureModeLabel(captureMode: TrainingProfile["captureMode"]): string {
+  if (captureMode === "leader-as-follower") {
+    return "leader as follower";
+  }
+  return captureMode;
+}
+
+function replayTargetLabel(target: ReplayTarget): string {
+  return target === "leader" ? "Leader arm" : "Pi follower";
+}
+
+function emptyTrainingArtifact(): TrainingArtifact {
+  return {
+    datasetEpisodeCount: null,
+    datasetCameraKeys: [],
+    lastDatasetEpisodeIndex: null,
+    lastDatasetSyncAt: null,
+    lastTrainingStartedAt: null,
+    lastTrainingCompletedAt: null,
+    lastCheckpointPath: null,
+    availableCheckpointPaths: [],
+    deployedCheckpointPath: null,
+    deployedAt: null,
+    latestEvalDatasetPath: null,
+    latestEvalAt: null,
+    benchmark: null,
+  };
+}
+
+function createTrainingDraft(base?: TrainingProfile | null): TrainingProfile {
+  if (base) {
+    return {
+      ...base,
+      id: "",
+      name: `${base.name} Copy`,
+      selectedCheckpointPath: "",
+      artifacts: emptyTrainingArtifact(),
+    };
+  }
+
+  return {
+    id: "",
+    name: "New Task",
+    task: "Pick up the wooden piece from the table, close the gripper around it, and lift it.",
+    captureMode: "leader",
+    numEpisodes: 50,
+    episodeTimeS: 20,
+    resetTimeS: 10,
+    fps: 30,
+    camerasMode: "default",
+    policyType: "act",
+    piDatasetPath: "/home/pi/lerobot-datasets/new-task",
+    macDatasetPath: `${LOCAL_TRAINING_ROOT}/training-datasets/new-task`,
+    macTrainOutputDir: `${LOCAL_TRAINING_ROOT}/training-runs/new-task`,
+    selectedCheckpointPath: "",
+    piDeployPath: "/home/pi/lerobot-training/new-task/deployed-policy",
+    piEvalDatasetPath: "/home/pi/lerobot-eval/new-task",
+    artifacts: emptyTrainingArtifact(),
+  };
 }
 
 function parsePowerTelemetry(
@@ -447,13 +549,18 @@ export default function App() {
   const [activeSection, setActiveSection] = useState<SectionKey>("overview");
   const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
+  const [trainingDraft, setTrainingDraft] = useState<TrainingProfile | null>(null);
+  const [trainingDirty, setTrainingDirty] = useState(false);
   const [recordLabel, setRecordLabel] = useState("");
   const [selectedRecording, setSelectedRecording] = useState<string>("");
   const [recordingNameDraft, setRecordingNameDraft] = useState("");
+  const [trimStartDraft, setTrimStartDraft] = useState("0");
+  const [trimEndDraft, setTrimEndDraft] = useState("");
   const [pinName, setPinName] = useState("");
   const [pinHotkey, setPinHotkey] = useState("");
   const [pinSpeed, setPinSpeed] = useState(1);
   const [pinHoldFinal, setPinHoldFinal] = useState(0.5);
+  const [replayTarget, setReplayTarget] = useState<ReplayTarget>("pi");
   const [torqueDraft, setTorqueDraft] = useState<Record<string, number>>({});
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [toast, setToast] = useState<string>("");
@@ -550,10 +657,33 @@ export default function App() {
     () => state?.recordings.find((item) => item.path === selectedRecording),
     [selectedRecording, state?.recordings],
   );
+  const selectedTrainingProfile = state?.training.selectedProfile ?? null;
 
   useEffect(() => {
     setRecordingNameDraft(selectedRecordingEntry?.name ?? "");
   }, [selectedRecordingEntry?.name, selectedRecordingEntry?.path]);
+
+  useEffect(() => {
+    setTrimStartDraft("0");
+    setTrimEndDraft(
+      selectedRecordingEntry?.durationS !== null && selectedRecordingEntry?.durationS !== undefined
+        ? String(selectedRecordingEntry.durationS)
+        : "",
+    );
+  }, [selectedRecordingEntry?.durationS, selectedRecordingEntry?.path]);
+
+  useEffect(() => {
+    if (!selectedTrainingProfile) {
+      setTrainingDraft(null);
+      setTrainingDirty(false);
+      return;
+    }
+
+    if (!trainingDirty || trainingDraft?.id !== selectedTrainingProfile.id) {
+      setTrainingDraft(selectedTrainingProfile);
+      setTrainingDirty(false);
+    }
+  }, [selectedTrainingProfile, trainingDirty, trainingDraft?.id]);
 
   const recordingService = state?.services.host ?? null;
   const isRecordingActive = Boolean(
@@ -561,6 +691,18 @@ export default function App() {
       recordingService.startedAt &&
       ["starting", "running", "stopping"].includes(recordingService.state),
   );
+  const recordingStartedLog = useMemo(
+    () =>
+      recordingService?.logs.find((line) =>
+        line.includes("First leader command received. Recording started."),
+      ) ?? null,
+    [recordingService?.logs],
+  );
+  const recordingStartedMs = useMemo(
+    () => (recordingStartedLog ? parseLocalLogTimestamp(recordingStartedLog) : null),
+    [recordingStartedLog],
+  );
+  const recordingHasCapturedMotion = Boolean(recordingStartedLog);
 
   useEffect(() => {
     if (!isRecordingActive) {
@@ -577,11 +719,12 @@ export default function App() {
   const selectedMovePayload = useMemo(
     () => ({
       trajectoryPath: selectedRecording,
+      target: replayTarget,
       includeBase: false,
       speed: pinSpeed,
       holdFinalS: pinHoldFinal,
     }),
-    [pinHoldFinal, pinSpeed, selectedRecording],
+    [pinHoldFinal, pinSpeed, replayTarget, selectedRecording],
   );
 
   const liveConsoleLines = useMemo(() => {
@@ -597,6 +740,12 @@ export default function App() {
         latestLogLines(state.services.replay.logs, 30),
         latestLogLines(state.services.piCalibration.logs, 30),
         latestLogLines(state.services.macCalibration.logs, 30),
+        latestLogLines(state.services.datasetCapture.logs, 30),
+        latestLogLines(state.services.datasetSync.logs, 30),
+        latestLogLines(state.services.training.logs, 30),
+        latestLogLines(state.services.deployment.logs, 30),
+        latestLogLines(state.services.policyBenchmark.logs, 30),
+        latestLogLines(state.services.policyEval.logs, 30),
       ],
       100,
     );
@@ -631,6 +780,12 @@ export default function App() {
             state.services.replay,
             state.services.piCalibration,
             state.services.macCalibration,
+            state.services.datasetCapture,
+            state.services.datasetSync,
+            state.services.training,
+            state.services.deployment,
+            state.services.policyBenchmark,
+            state.services.policyEval,
           ]
         : [],
     [state],
@@ -728,6 +883,97 @@ export default function App() {
     }
   };
 
+  const updateTrainingField = <K extends keyof TrainingProfile>(
+    field: K,
+    value: TrainingProfile[K],
+  ) => {
+    setTrainingDraft((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        [field]: value,
+      };
+    });
+    setTrainingDirty(true);
+  };
+
+  const handleSaveTrainingProfile = async () => {
+    if (!trainingDraft) {
+      flashToast("Create or select a training profile first.");
+      return;
+    }
+
+    const next = await mutate("save-training-profile", "/api/training/profiles", {
+      method: "POST",
+      body: JSON.stringify(trainingDraft),
+    });
+
+    if (next) {
+      setTrainingDraft(next.training.selectedProfile);
+      setTrainingDirty(false);
+      flashToast("Training profile saved.");
+    }
+  };
+
+  const handleCreateTrainingProfile = () => {
+    setTrainingDraft(createTrainingDraft(selectedTrainingProfile));
+    setTrainingDirty(true);
+    setActiveSection("training");
+  };
+
+  const handleDeleteTrainingProfile = async () => {
+    if (!selectedTrainingProfile) {
+      flashToast("Select a training profile first.");
+      return;
+    }
+
+    const next = await mutate(
+      "delete-training-profile",
+      `/api/training/profiles/${selectedTrainingProfile.id}`,
+      { method: "DELETE" },
+    );
+
+    if (next) {
+      setTrainingDraft(next.training.selectedProfile);
+      setTrainingDirty(false);
+      flashToast("Training profile removed.");
+    }
+  };
+
+  const handleSelectTrainingProfile = async (profileId: string) => {
+    const next = await mutate("select-training-profile", "/api/training/profiles/select", {
+      method: "POST",
+      body: JSON.stringify({ id: profileId }),
+    });
+
+    if (next) {
+      setTrainingDraft(next.training.selectedProfile);
+      setTrainingDirty(false);
+    }
+  };
+
+  const mutateTrainingProfileAction = async (
+    label: string,
+    url: string,
+    successMessage: string,
+  ) => {
+    if (!selectedTrainingProfile) {
+      flashToast("Save and select a training profile first.");
+      return;
+    }
+
+    const next = await mutate(label, url, {
+      method: "POST",
+      body: JSON.stringify({ profileId: selectedTrainingProfile.id }),
+    });
+
+    if (next) {
+      flashToast(successMessage);
+    }
+  };
+
   const sendTorqueLimit = async (servoId: string, value: number) => {
     try {
       const next = await request<DashboardState>("/api/robot/torque-limits", {
@@ -789,6 +1035,41 @@ export default function App() {
 
     if (next) {
       flashToast("Recording name saved.");
+    }
+  };
+
+  const handleTrimRecording = async () => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const trimStartS = Number(trimStartDraft);
+    const trimEndS = Number(trimEndDraft);
+    if (!Number.isFinite(trimStartS) || !Number.isFinite(trimEndS) || trimStartS < 0 || trimEndS <= trimStartS) {
+      flashToast("Trim end must be greater than trim start.");
+      return;
+    }
+
+    const payload: TrimRecordingRequest = {
+      path: selectedRecordingEntry.path,
+      trimStartS,
+      trimEndS,
+    };
+    const next = await mutate("trim-recording", "/api/recordings/trim", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    if (next) {
+      const updatedRecording = next.recordings.find((item) => item.path === selectedRecordingEntry.path);
+      setTrimStartDraft("0");
+      setTrimEndDraft(
+        updatedRecording?.durationS !== null && updatedRecording?.durationS !== undefined
+          ? String(updatedRecording.durationS)
+          : "",
+      );
+      flashToast("Recording trimmed.");
     }
   };
 
@@ -882,6 +1163,8 @@ export default function App() {
               "Record follower motion on the Pi, replay saved trajectories, and pin them for reuse."}
             {activeSection === "pins" &&
               "Launch saved movements instantly from the dashboard or with keyboard shortcuts."}
+            {activeSection === "training" &&
+              "Create task profiles, capture either on the Pi or directly from the leader arm on the Mac, train ACT locally, then deploy and benchmark policies on the Pi."}
             {activeSection === "settings" &&
               "Adjust connection defaults. The expected hotspot stays visible here as a reference only."}
             {activeSection === "logs" &&
@@ -1188,13 +1471,23 @@ export default function App() {
                 <div className="recording-live-strip" role="status" aria-live="polite">
                   <div className="recording-live-status">
                     <span className="recording-live-dot" />
-                    <span className="recording-live-label">REC</span>
-                    <strong className="recording-live-timer">
-                      {formatElapsedSince(recordingService.startedAt, recordingClockMs)}
-                    </strong>
+                    <span className="recording-live-label">
+                      {recordingHasCapturedMotion ? "REC" : "ARMED"}
+                    </span>
+                    {recordingHasCapturedMotion ? (
+                      <strong className="recording-live-timer">
+                        {recordingStartedMs
+                          ? formatClockDuration((recordingClockMs - recordingStartedMs) / 1000)
+                          : formatElapsedSince(recordingService.startedAt, recordingClockMs)}
+                      </strong>
+                    ) : (
+                      <strong className="recording-live-waiting">Waiting for leader input</strong>
+                    )}
                   </div>
                   <span className="recording-live-meta">
-                    Started {prettyTimestamp(recordingService.startedAt)}
+                    {recordingHasCapturedMotion
+                      ? `Started ${prettyTimestamp(recordingService.startedAt)}`
+                      : "Recorder is armed and ready."}
                   </span>
                 </div>
               ) : null}
@@ -1257,7 +1550,64 @@ export default function App() {
                       Save Name
                     </button>
                   </div>
+                  <div className="recording-trim-editor">
+                    <div className="form-grid compact">
+                      <label>
+                        Trim Start (s)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={trimStartDraft}
+                          disabled={!selectedRecordingEntry}
+                          onChange={(event) => setTrimStartDraft(event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Trim End (s)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={trimEndDraft}
+                          disabled={!selectedRecordingEntry}
+                          onChange={(event) => setTrimEndDraft(event.target.value)}
+                        />
+                      </label>
+                    </div>
+                    <div className="trim-editor-actions">
+                      <p className="card-note">
+                        Keep only the action window. This updates the selected recording in place.
+                      </p>
+                      <button
+                        disabled={
+                          disabled ||
+                          !selectedRecordingEntry ||
+                          !trimEndDraft.trim() ||
+                          !Number.isFinite(Number(trimStartDraft)) ||
+                          !Number.isFinite(Number(trimEndDraft)) ||
+                          Number(trimStartDraft) < 0 ||
+                          Number(trimEndDraft) <= Number(trimStartDraft)
+                        }
+                        onClick={() => void handleTrimRecording()}
+                      >
+                        Trim Selected
+                      </button>
+                    </div>
+                  </div>
                   <div className="form-grid compact">
+                    <label>
+                      Replay target
+                      <select
+                        value={replayTarget}
+                        onChange={(event) =>
+                          setReplayTarget(event.target.value === "leader" ? "leader" : "pi")
+                        }
+                      >
+                        <option value="pi">Pi follower</option>
+                        <option value="leader">Leader arm</option>
+                      </select>
+                    </label>
                     <label>
                       Speed
                       <input
@@ -1290,7 +1640,7 @@ export default function App() {
                         })
                       }
                     >
-                      Replay Selected
+                      {replayTarget === "leader" ? "Replay on Leader" : "Replay Selected"}
                     </button>
                     <button
                       disabled={disabled}
@@ -1357,7 +1707,7 @@ export default function App() {
                         <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
                       </div>
                       <p className="pin-meta">
-                        Speed {move.speed} • Hold {move.holdFinalS}s • Arm only
+                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • Arm only
                       </p>
                       <div className="button-cluster inline">
                         <button
@@ -1385,6 +1735,396 @@ export default function App() {
                     Pin your frequent motions here so you can replay them with one click or a hotkey.
                   </div>
                 )}
+              </div>
+            </section>
+          )}
+
+          {activeSection === "training" && (
+            <section className="card stage-panel">
+              <div className="card-head">
+                <div>
+                  <p className="card-kicker">Training</p>
+                  <h2>Pi and Leader Training Workflow</h2>
+                </div>
+                <p className="card-note">
+                  Save profile edits before capture, sync, training, deploy, or evaluation.
+                </p>
+              </div>
+
+              <div className="recordings-layout">
+                <div className="recordings-list">
+                  {state?.training.profiles.length ? (
+                    state.training.profiles.map((profile) => (
+                      <button
+                        key={profile.id}
+                        className={`recording-row ${profile.id === selectedTrainingProfile?.id ? "active" : ""}`}
+                        onClick={() => void handleSelectTrainingProfile(profile.id)}
+                      >
+                        <span className="recording-name">{profile.name}</span>
+                        <span className="recording-meta">{captureModeLabel(profile.captureMode)}</span>
+                        <span>
+                          {profile.artifacts.datasetEpisodeCount ?? 0} episode
+                          {(profile.artifacts.datasetEpisodeCount ?? 0) === 1 ? "" : "s"}
+                        </span>
+                        <span>{profile.artifacts.benchmark?.passed ? "benchmark pass" : "benchmark pending"}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="empty-state">
+                      No training profiles yet. Create one to start dataset capture on the Pi or on the leader arm.
+                    </div>
+                  )}
+                </div>
+
+                <div className="replay-panel">
+                  <div className="card-head">
+                    <div>
+                      <p className="card-kicker">Profiles</p>
+                      <h3>{trainingDraft?.name || "Training profile"}</h3>
+                    </div>
+                    <div className="button-cluster inline">
+                      <button onClick={handleCreateTrainingProfile} disabled={disabled}>
+                        New Profile
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={disabled || !trainingDraft}
+                        onClick={() => void handleSaveTrainingProfile()}
+                      >
+                        Save Profile
+                      </button>
+                      <button
+                        disabled={disabled || !selectedTrainingProfile}
+                        onClick={() => void handleDeleteTrainingProfile()}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+
+                  {trainingDraft ? (
+                    <>
+                      <div className="form-grid">
+                        <label>
+                          Name
+                          <input
+                            value={trainingDraft.name}
+                            onChange={(event) => updateTrainingField("name", event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Capture mode
+                          <select
+                            value={trainingDraft.captureMode}
+                            onChange={(event) =>
+                              updateTrainingField(
+                                "captureMode",
+                                event.target.value === "free-teach"
+                                  ? "free-teach"
+                                  : event.target.value === "leader-as-follower"
+                                    ? "leader-as-follower"
+                                    : "leader",
+                              )
+                            }
+                          >
+                            <option value="leader">Leader</option>
+                            <option value="free-teach">Free-teach</option>
+                            <option value="leader-as-follower">Leader as follower (Mac)</option>
+                          </select>
+                        </label>
+                        <label>
+                          Episode count
+                          <input
+                            type="number"
+                            min="1"
+                            value={trainingDraft.numEpisodes}
+                            onChange={(event) => updateTrainingField("numEpisodes", Number(event.target.value))}
+                          />
+                        </label>
+                        <label>
+                          Episode time (s)
+                          <input
+                            type="number"
+                            min="1"
+                            value={trainingDraft.episodeTimeS}
+                            onChange={(event) => updateTrainingField("episodeTimeS", Number(event.target.value))}
+                          />
+                        </label>
+                        <label>
+                          Reset time (s)
+                          <input
+                            type="number"
+                            min="0"
+                            value={trainingDraft.resetTimeS}
+                            onChange={(event) => updateTrainingField("resetTimeS", Number(event.target.value))}
+                          />
+                        </label>
+                        <label>
+                          Capture FPS
+                          <input
+                            type="number"
+                            min="1"
+                            value={trainingDraft.fps}
+                            onChange={(event) => updateTrainingField("fps", Number(event.target.value))}
+                          />
+                        </label>
+                        <label>
+                          Cameras
+                          <input
+                            value={trainingDraft.camerasMode}
+                            onChange={(event) => updateTrainingField("camerasMode", event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Pi dataset path
+                          <input
+                            value={trainingDraft.piDatasetPath}
+                            onChange={(event) => updateTrainingField("piDatasetPath", event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Mac dataset path
+                          <input
+                            value={trainingDraft.macDatasetPath}
+                            onChange={(event) => updateTrainingField("macDatasetPath", event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Mac train output
+                          <input
+                            value={trainingDraft.macTrainOutputDir}
+                            onChange={(event) => updateTrainingField("macTrainOutputDir", event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Selected checkpoint
+                          <select
+                            value={trainingDraft.selectedCheckpointPath}
+                            onChange={(event) =>
+                              updateTrainingField("selectedCheckpointPath", event.target.value)
+                            }
+                          >
+                            <option value="">Latest discovered checkpoint</option>
+                            {(selectedTrainingProfile?.artifacts.availableCheckpointPaths ?? []).map((checkpoint) => (
+                              <option key={checkpoint} value={checkpoint}>
+                                {checkpoint}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Pi deploy path
+                          <input
+                            value={trainingDraft.piDeployPath}
+                            onChange={(event) => updateTrainingField("piDeployPath", event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Pi eval root
+                          <input
+                            value={trainingDraft.piEvalDatasetPath}
+                            onChange={(event) => updateTrainingField("piEvalDatasetPath", event.target.value)}
+                          />
+                        </label>
+                      </div>
+
+                      <label>
+                        Task instruction
+                        <textarea
+                          value={trainingDraft.task}
+                          onChange={(event) => updateTrainingField("task", event.target.value)}
+                          rows={3}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="status-grid">
+                <article className="status-card">
+                  <div className="status-card-head">
+                    <h3>Capture Dataset</h3>
+                    <span className={`status-pill ${statusTone(state?.services.datasetCapture.state ?? "idle")}`}>
+                      {state?.services.datasetCapture.state ?? "idle"}
+                    </span>
+                  </div>
+                  <p>
+                    {describeCaptureMode(selectedTrainingProfile)}
+                  </p>
+                  <p className="pin-meta">
+                    Episodes {selectedTrainingProfile?.artifacts.datasetEpisodeCount ?? 0}
+                    {" • "}
+                    Last episode {selectedTrainingProfile?.artifacts.lastDatasetEpisodeIndex ?? "n/a"}
+                  </p>
+                  <div className="button-cluster inline">
+                    <button
+                      className="primary"
+                      disabled={disabled || trainingDirty || !selectedTrainingProfile}
+                      onClick={() =>
+                        void mutateTrainingProfileAction(
+                          "training-capture-start",
+                          "/api/training/capture/start",
+                          "Dataset capture started.",
+                        )
+                      }
+                    >
+                      Start Capture
+                    </button>
+                    <button
+                      disabled={disabled}
+                      onClick={() =>
+                        void mutate("training-capture-stop", "/api/training/capture/stop", {
+                          method: "POST",
+                        })
+                      }
+                    >
+                      Stop Capture
+                    </button>
+                  </div>
+                </article>
+
+                <article className="status-card">
+                  <div className="status-card-head">
+                    <h3>Train on Mac</h3>
+                    <span className={`status-pill ${statusTone(state?.services.training.state ?? "idle")}`}>
+                      {state?.services.training.state ?? "idle"}
+                    </span>
+                  </div>
+                  <p>
+                    {isLocalLeaderCaptureMode(selectedTrainingProfile?.captureMode)
+                      ? "The dataset is already local on the Mac in leader-as-follower mode. Refresh metadata here, then launch ACT training on Apple silicon with MPS."
+                      : "Sync the Pi dataset locally, then launch ACT training on Apple silicon with MPS."}
+                  </p>
+                  <p className="pin-meta">
+                    Last sync {selectedTrainingProfile?.artifacts.lastDatasetSyncAt ? prettyTimestamp(selectedTrainingProfile.artifacts.lastDatasetSyncAt) : "not yet"}
+                  </p>
+                  <div className="button-cluster inline">
+                    <button
+                      disabled={disabled || trainingDirty || !selectedTrainingProfile}
+                      onClick={() =>
+                        void mutateTrainingProfileAction(
+                          "training-sync-start",
+                          "/api/training/sync/start",
+                          isLocalLeaderCaptureMode(selectedTrainingProfile?.captureMode)
+                            ? "Local dataset metadata refreshed."
+                            : "Dataset sync finished.",
+                        )
+                      }
+                    >
+                      {isLocalLeaderCaptureMode(selectedTrainingProfile?.captureMode)
+                        ? "Refresh Local Dataset"
+                        : "Sync Dataset"}
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={disabled || trainingDirty || !selectedTrainingProfile}
+                      onClick={() =>
+                        void mutateTrainingProfileAction(
+                          "training-run-start",
+                          "/api/training/run/start",
+                          "Training started.",
+                        )
+                      }
+                    >
+                      Start Training
+                    </button>
+                    <button
+                      disabled={disabled}
+                      onClick={() => void mutate("training-run-stop", "/api/training/run/stop", { method: "POST" })}
+                    >
+                      Stop Training
+                    </button>
+                  </div>
+                  <p className="card-note">
+                    Latest checkpoint: {selectedTrainingProfile?.artifacts.lastCheckpointPath ?? "none yet"}
+                  </p>
+                </article>
+
+                <article className="status-card">
+                  <div className="status-card-head">
+                    <h3>Deploy & Benchmark</h3>
+                    <span className={`status-pill ${statusTone(state?.services.policyBenchmark.state ?? "idle")}`}>
+                      {selectedTrainingProfile?.artifacts.benchmark?.passed ? "ready" : state?.services.policyBenchmark.state ?? "idle"}
+                    </span>
+                  </div>
+                  <p>
+                    Deploy the chosen checkpoint to the Pi, then gate autonomous runs on the benchmark result.
+                  </p>
+                  <p className="pin-meta">
+                    {selectedTrainingProfile?.artifacts.benchmark
+                      ? `${selectedTrainingProfile.artifacts.benchmark.effectiveFps.toFixed(2)} fps effective • avg ${selectedTrainingProfile.artifacts.benchmark.averageLatencyMs.toFixed(2)} ms`
+                      : "No benchmark result yet."}
+                  </p>
+                  <div className="button-cluster inline">
+                    <button
+                      disabled={disabled || trainingDirty || !selectedTrainingProfile}
+                      onClick={() =>
+                        void mutateTrainingProfileAction(
+                          "training-deploy",
+                          "/api/training/deploy",
+                          "Checkpoint deployed to the Pi.",
+                        )
+                      }
+                    >
+                      Deploy Checkpoint
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={disabled || trainingDirty || !selectedTrainingProfile}
+                      onClick={() =>
+                        void mutateTrainingProfileAction(
+                          "training-benchmark",
+                          "/api/training/benchmark",
+                          "Policy benchmark completed.",
+                        )
+                      }
+                    >
+                      Run Benchmark
+                    </button>
+                  </div>
+                </article>
+
+                <article className="status-card">
+                  <div className="status-card-head">
+                    <h3>Evaluate on Pi</h3>
+                    <span className={`status-pill ${statusTone(state?.services.policyEval.state ?? "idle")}`}>
+                      {state?.services.policyEval.state ?? "idle"}
+                    </span>
+                  </div>
+                  <p>
+                    Autonomous evaluation runs entirely on the Pi and writes eval datasets back to the Pi.
+                  </p>
+                  <p className="pin-meta">
+                    Last eval root {selectedTrainingProfile?.artifacts.latestEvalDatasetPath ?? "not yet"}
+                  </p>
+                  <div className="button-cluster inline">
+                    <button
+                      className="primary"
+                      disabled={
+                        disabled ||
+                        trainingDirty ||
+                        !selectedTrainingProfile ||
+                        !selectedTrainingProfile.artifacts.benchmark?.passed
+                      }
+                      onClick={() =>
+                        void mutateTrainingProfileAction(
+                          "training-eval-start",
+                          "/api/training/eval/start",
+                          "Policy evaluation started.",
+                        )
+                      }
+                    >
+                      Start Eval
+                    </button>
+                    <button
+                      disabled={disabled}
+                      onClick={() => void mutate("training-eval-stop", "/api/training/eval/stop", { method: "POST" })}
+                    >
+                      Stop Eval
+                    </button>
+                  </div>
+                </article>
               </div>
             </section>
           )}

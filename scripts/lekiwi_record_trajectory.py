@@ -193,10 +193,12 @@ def main() -> None:
         flush=True,
     )
     print(f"Recording exact follower motion to {output_path}", flush=True)
+    print("Waiting for the first leader command before recording samples.", flush=True)
 
-    started_at = time.perf_counter()
+    session_started_at = time.perf_counter()
+    recording_started_at = None
     try:
-        while time.perf_counter() - started_at < args.connection_time_s:
+        while time.perf_counter() - session_started_at < args.connection_time_s:
             loop_start = time.time()
 
             try:
@@ -205,6 +207,9 @@ def main() -> None:
                 robot.send_action(action)
                 last_cmd_time = time.time()
                 watchdog_active = False
+                if recording_started_at is None:
+                    recording_started_at = time.perf_counter()
+                    print("First leader command received. Recording started.", flush=True)
             except zmq.Again:
                 if not watchdog_active:
                     logger.warning("No command available")
@@ -223,10 +228,11 @@ def main() -> None:
             torque_watcher.poll(robot)
 
             observation = robot.get_observation()
-            sample = build_sample(observation, time.perf_counter() - started_at)
-            samples.append(sample)
-            if len(samples) == 1 or len(samples) % args.print_every == 0:
-                print(f"[{len(samples):05d}] t={sample['t_s']:7.3f}s {summarize_sample(sample)}", flush=True)
+            if recording_started_at is not None:
+                sample = build_sample(observation, time.perf_counter() - recording_started_at)
+                samples.append(sample)
+                if len(samples) == 1 or len(samples) % args.print_every == 0:
+                    print(f"[{len(samples):05d}] t={sample['t_s']:7.3f}s {summarize_sample(sample)}", flush=True)
             power_logger.maybe_sample()
 
             encoded_observation = dict(observation)
@@ -251,11 +257,14 @@ def main() -> None:
                 power_logger.maybe_sample(force=True)
             except Exception as exc:
                 print(f"power telemetry: {exc}", flush=True)
-        try:
-            write_trajectory(output_path, args, samples)
-            print(f"Saved {len(samples)} samples to {output_path}", flush=True)
-        except Exception as exc:
-            print(f"save trajectory: {exc}", flush=True)
+        if samples:
+            try:
+                write_trajectory(output_path, args, samples)
+                print(f"Saved {len(samples)} samples to {output_path}", flush=True)
+            except Exception as exc:
+                print(f"save trajectory: {exc}", flush=True)
+        else:
+            print("No leader-driven motion was recorded, so nothing was saved.", flush=True)
         try:
             robot.disconnect()
         except Exception as exc:

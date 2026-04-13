@@ -1,14 +1,23 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { AppSettings, PinnedMove, StoredConfig } from "./types.js";
+import type {
+  AppSettings,
+  PinnedMove,
+  StoredConfig,
+  TrainingConfig,
+} from "./types.js";
+import { normalizeTrainingConfig } from "./trainingUtils.js";
 
 export class ConfigStore {
   private readonly configDir: string;
   private readonly configPath: string;
+  private readonly rootDir: string;
   private config: StoredConfig;
 
   constructor(private readonly defaults: StoredConfig, rootDir: string) {
+    this.rootDir = rootDir;
     this.configDir = path.join(rootDir, ".lekiwi-ui");
     this.configPath = path.join(this.configDir, "config.json");
     this.config = this.load();
@@ -31,6 +40,15 @@ export class ConfigStore {
     this.config = {
       ...this.config,
       pinnedMoves: structuredClone(pinnedMoves),
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  saveTraining(training: TrainingConfig): StoredConfig {
+    this.config = {
+      ...this.config,
+      training: structuredClone(training),
     };
     this.persist();
     return this.getConfig();
@@ -68,11 +86,27 @@ export class ConfigStore {
             ...raw.settings?.trajectories,
           },
         },
-        pinnedMoves: Array.isArray(raw.pinnedMoves) ? raw.pinnedMoves : this.defaults.pinnedMoves,
+        pinnedMoves: Array.isArray(raw.pinnedMoves)
+          ? raw.pinnedMoves.map((move) => this.normalizePinnedMove(move))
+          : this.defaults.pinnedMoves,
+        training: normalizeTrainingConfig(raw.training, this.rootDir),
       };
     } catch {
       return this.defaults;
     }
+  }
+
+  private normalizePinnedMove(raw: Partial<PinnedMove> | undefined): PinnedMove {
+    return {
+      id: typeof raw?.id === "string" ? raw.id : crypto.randomUUID(),
+      name: typeof raw?.name === "string" ? raw.name : "Pinned move",
+      trajectoryPath: typeof raw?.trajectoryPath === "string" ? raw.trajectoryPath : "",
+      target: raw?.target === "leader" ? "leader" : "pi",
+      speed: Number(raw?.speed) > 0 ? Number(raw?.speed) : 1,
+      includeBase: Boolean(raw?.includeBase),
+      holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
+      keyBinding: typeof raw?.keyBinding === "string" ? raw.keyBinding : "",
+    };
   }
 
   private persist(): void {

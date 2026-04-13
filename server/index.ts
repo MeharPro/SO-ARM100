@@ -5,10 +5,20 @@ import path from "node:path";
 import { RobotController } from "./robotController.js";
 import type {
   AppSettings,
+  BenchmarkPolicyRequest,
   CalibrationInputRequest,
   CreatePinnedMoveRequest,
+  DeployTrainingCheckpointRequest,
+  DeleteTrainingProfileRequest,
   RenameRecordingRequest,
   ReplayRequest,
+  SelectTrainingProfileRequest,
+  StartPolicyEvalRequest,
+  StartTrainingCaptureRequest,
+  StartTrainingRunRequest,
+  StartTrainingSyncRequest,
+  TrainingProfile,
+  TrimRecordingRequest,
   TorqueLimitsRequest,
 } from "./types.js";
 
@@ -146,6 +156,13 @@ app.post(
 );
 
 app.post(
+  "/api/recordings/trim",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.trimRecording(req.body as TrimRecordingRequest));
+  }),
+);
+
+app.post(
   "/api/replays/start",
   asyncRoute(async (req, res) => {
     res.json(await controller.startReplay(req.body as ReplayRequest));
@@ -179,6 +196,91 @@ app.post(
   asyncRoute(async (req, res) => {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     res.json(await controller.triggerPinnedMove(id));
+  }),
+);
+
+app.post(
+  "/api/training/profiles",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.saveTrainingProfile(req.body as TrainingProfile));
+  }),
+);
+
+app.post(
+  "/api/training/profiles/select",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.selectTrainingProfile(req.body as SelectTrainingProfileRequest));
+  }),
+);
+
+app.delete(
+  "/api/training/profiles/:id",
+  asyncRoute(async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    res.json(await controller.deleteTrainingProfile({ id } as DeleteTrainingProfileRequest));
+  }),
+);
+
+app.post(
+  "/api/training/capture/start",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startTrainingCapture(req.body as StartTrainingCaptureRequest));
+  }),
+);
+
+app.post(
+  "/api/training/capture/stop",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.stopTrainingCapture());
+  }),
+);
+
+app.post(
+  "/api/training/sync/start",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startTrainingSync(req.body as StartTrainingSyncRequest));
+  }),
+);
+
+app.post(
+  "/api/training/run/start",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startTrainingRun(req.body as StartTrainingRunRequest));
+  }),
+);
+
+app.post(
+  "/api/training/run/stop",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.stopTrainingRun());
+  }),
+);
+
+app.post(
+  "/api/training/deploy",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.deployTrainingCheckpoint(req.body as DeployTrainingCheckpointRequest));
+  }),
+);
+
+app.post(
+  "/api/training/benchmark",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.runPolicyBenchmark(req.body as BenchmarkPolicyRequest));
+  }),
+);
+
+app.post(
+  "/api/training/eval/start",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startPolicyEval(req.body as StartPolicyEvalRequest));
+  }),
+);
+
+app.post(
+  "/api/training/eval/stop",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.stopPolicyEval());
   }),
 );
 

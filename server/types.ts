@@ -34,6 +34,71 @@ export interface TrajectorySettings {
   defaultHoldFinalS: number;
 }
 
+export type TrainingCaptureMode = "leader" | "free-teach" | "leader-as-follower";
+
+export type ReplayTarget = "pi" | "leader";
+
+export interface PolicyBenchmarkResult {
+  targetFps: number;
+  measuredAt: string;
+  iterations: number;
+  averageLatencyMs: number;
+  p95LatencyMs: number;
+  maxLatencyMs: number;
+  effectiveFps: number;
+  peakRssMb: number | null;
+  passed: boolean;
+}
+
+export interface TrainingArtifact {
+  datasetEpisodeCount: number | null;
+  datasetCameraKeys: string[];
+  lastDatasetEpisodeIndex: number | null;
+  lastDatasetSyncAt: string | null;
+  lastTrainingStartedAt: string | null;
+  lastTrainingCompletedAt: string | null;
+  lastCheckpointPath: string | null;
+  availableCheckpointPaths: string[];
+  deployedCheckpointPath: string | null;
+  deployedAt: string | null;
+  latestEvalDatasetPath: string | null;
+  latestEvalAt: string | null;
+  benchmark: PolicyBenchmarkResult | null;
+}
+
+export interface TrainingProfile {
+  id: string;
+  name: string;
+  task: string;
+  captureMode: TrainingCaptureMode;
+  numEpisodes: number;
+  episodeTimeS: number;
+  resetTimeS: number;
+  fps: number;
+  camerasMode: string;
+  policyType: "act";
+  piDatasetPath: string;
+  macDatasetPath: string;
+  macTrainOutputDir: string;
+  selectedCheckpointPath: string;
+  piDeployPath: string;
+  piEvalDatasetPath: string;
+  artifacts: TrainingArtifact;
+}
+
+export interface TrainingSettings {
+  defaultPolicyType: "act";
+  localDevice: "mps";
+  benchmarkIterations: number;
+  deployBenchmarkMargin: number;
+}
+
+export interface TrainingConfig {
+  settings: TrainingSettings;
+  profiles: TrainingProfile[];
+  selectedProfileId: string | null;
+}
+
 export interface AppSettings {
   hotspot: HotspotSettings;
   pi: PiSettings;
@@ -46,6 +111,7 @@ export interface PinnedMove {
   id: string;
   name: string;
   trajectoryPath: string;
+  target: ReplayTarget;
   speed: number;
   includeBase: boolean;
   holdFinalS: number;
@@ -55,6 +121,7 @@ export interface PinnedMove {
 export interface StoredConfig {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
+  training: TrainingConfig;
 }
 
 export type ServiceState = "idle" | "starting" | "running" | "stopping" | "error";
@@ -100,6 +167,9 @@ export interface LeaderStatus {
 export interface DashboardState {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
+  training: TrainingConfig & {
+    selectedProfile: TrainingProfile | null;
+  };
   wifi: WifiStatus;
   piReachable: boolean;
   resolvedPiHost: string | null;
@@ -113,11 +183,18 @@ export interface DashboardState {
     replay: ServiceSnapshot;
     piCalibration: ServiceSnapshot;
     macCalibration: ServiceSnapshot;
+    datasetCapture: ServiceSnapshot;
+    datasetSync: ServiceSnapshot;
+    training: ServiceSnapshot;
+    deployment: ServiceSnapshot;
+    policyBenchmark: ServiceSnapshot;
+    policyEval: ServiceSnapshot;
   };
 }
 
 export interface ReplayRequest {
   trajectoryPath: string;
+  target: ReplayTarget;
   speed: number;
   includeBase: boolean;
   holdFinalS: number;
@@ -133,10 +210,48 @@ export interface RenameRecordingRequest {
   label: string;
 }
 
+export interface TrimRecordingRequest {
+  path: string;
+  trimStartS: number;
+  trimEndS: number;
+}
+
 export interface TorqueLimitsRequest {
   limits: Record<string, number>;
 }
 
 export interface CalibrationInputRequest {
   input: "enter" | "c";
+}
+
+export interface SelectTrainingProfileRequest {
+  id: string;
+}
+
+export interface DeleteTrainingProfileRequest {
+  id: string;
+}
+
+export interface StartTrainingCaptureRequest {
+  profileId: string;
+}
+
+export interface StartTrainingSyncRequest {
+  profileId: string;
+}
+
+export interface StartTrainingRunRequest {
+  profileId: string;
+}
+
+export interface DeployTrainingCheckpointRequest {
+  profileId: string;
+}
+
+export interface BenchmarkPolicyRequest {
+  profileId: string;
+}
+
+export interface StartPolicyEvalRequest {
+  profileId: string;
 }

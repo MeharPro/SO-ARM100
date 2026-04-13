@@ -1,4 +1,5 @@
 import type { StoredConfig } from "./types.js";
+import { createDefaultTrainingConfig } from "./trainingUtils.js";
 
 export const defaultConfig: StoredConfig = {
   settings: {
@@ -42,4 +43,5 @@ export const defaultConfig: StoredConfig = {
     },
   },
   pinnedMoves: [],
+  training: createDefaultTrainingConfig(process.cwd()),
 };

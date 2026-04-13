@@ -1,27 +1,60 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 import { Client, type ConnectConfig, type SFTPWrapper } from "ssh2";
 
 import { ConfigStore } from "./configStore.js";
 import { defaultConfig } from "./defaultConfig.js";
-import { LocalProcessRunner, RemoteProcessRunner } from "./processRunners.js";
+import {
+  LocalProcessRunner,
+  RemoteProcessRunner,
+  TaskRunner,
+} from "./processRunners.js";
 import {
   getWifiStatus,
   isTcpReachable,
+  runZshScript,
   shellQuote,
   sleep,
 } from "./system.js";
+import {
+  buildMacTrainingCommand,
+  buildPiDatasetCaptureCommand,
+  buildPiPolicyBenchmarkCommand,
+  buildPiPolicyEvalCommand,
+} from "./trainingCommands.js";
+import {
+  benchmarkPasses,
+  createDefaultTrainingProfile,
+  deriveDatasetRepoId,
+  listCheckpointCandidates,
+  normalizeTrainingConfig,
+  normalizeTrainingProfile,
+  validateTrainingProfile,
+} from "./trainingUtils.js";
 import type {
   AppSettings,
+  BenchmarkPolicyRequest,
   CreatePinnedMoveRequest,
   DashboardState,
+  DeployTrainingCheckpointRequest,
+  DeleteTrainingProfileRequest,
   LeaderStatus,
   PinnedMove,
   RenameRecordingRequest,
   RecordingEntry,
   ReplayRequest,
+  SelectTrainingProfileRequest,
   ServiceSnapshot,
+  StartPolicyEvalRequest,
+  StartTrainingCaptureRequest,
+  StartTrainingRunRequest,
+  StartTrainingSyncRequest,
+  TrainingArtifact,
+  TrainingConfig,
+  TrainingProfile,
+  TrimRecordingRequest,
   TorqueLimitsRequest,
 } from "./types.js";
 
@@ -32,9 +65,25 @@ const RUNTIME_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_runtime.py");
 const RECORD_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_record_trajectory.py");
 const REPLAY_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_replay_trajectory.py");
 const UI_TELEOP_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_ui_teleop.py");
+const DATASET_CAPTURE_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_record_dataset_host.py");
+const LOCAL_LEADER_CAPTURE_SCRIPT = path.join(
+  ROOT_DIR,
+  "scripts",
+  "lekiwi_local_leader_dataset_capture.py",
+);
+const LOCAL_LEADER_REPLAY_SCRIPT = path.join(
+  ROOT_DIR,
+  "scripts",
+  "lekiwi_local_leader_replay.py",
+);
+const POLICY_BENCHMARK_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_benchmark_policy.py");
+const POLICY_EVAL_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_run_policy_eval.py");
+const LOCAL_LEADER_REPLAY_DIR = path.join(ROOT_DIR, ".tmp", "leader-replay");
+const LOCAL_LEADER_ROBOT_ID = "leader";
 const MAX_ACTIVITY_LINES = 220;
 const HOST_READY_TIMEOUT_MS = 15000;
 const HOST_READY_PORTS = [5555, 5556];
+const TRAINING_METADATA_REFRESH_MS = 15000;
 const ARM_MOTORS = [
   "arm_shoulder_pan",
   "arm_shoulder_lift",
@@ -88,6 +137,7 @@ function normalizeReplayRequest(
 ): ReplayRequest {
   return {
     trajectoryPath: payload.trajectoryPath.trim(),
+    target: payload.target === "leader" ? "leader" : "pi",
     speed: payload.speed > 0 ? payload.speed : defaults.defaultReplaySpeed,
     includeBase: false,
     holdFinalS:
@@ -100,11 +150,20 @@ export class RobotController {
   private readonly hostRunner = new RemoteProcessRunner("Pi host");
   private readonly teleopRunner = new LocalProcessRunner("Mac teleop");
   private readonly replayRunner = new RemoteProcessRunner("Replay");
+  private readonly localReplayRunner = new LocalProcessRunner("Leader replay");
   private readonly piCalibrationRunner = new RemoteProcessRunner("Pi calibration");
   private readonly macCalibrationRunner = new LocalProcessRunner("Mac calibration");
+  private readonly datasetCaptureRunner = new RemoteProcessRunner("Dataset capture");
+  private readonly localDatasetCaptureRunner = new LocalProcessRunner("Mac dataset capture");
+  private readonly datasetSyncRunner = new TaskRunner("Dataset sync");
+  private readonly trainingRunner = new LocalProcessRunner("Training");
+  private readonly deploymentRunner = new TaskRunner("Deployment");
+  private readonly policyBenchmarkRunner = new TaskRunner("Policy benchmark");
+  private readonly policyEvalRunner = new RemoteProcessRunner("Policy eval");
   private lastError: string | null = null;
   private cachedRecordings: RecordingEntry[] = [];
   private lastRecordingRefresh = 0;
+  private lastTrainingMetadataRefresh = 0;
   private lastResolvedHost: string | null = null;
   private activityLog: string[] = [];
   private queue: Promise<void> = Promise.resolve();
@@ -112,7 +171,7 @@ export class RobotController {
   private readonly remoteTorqueCache = new Map<string, string>();
 
   async getState(): Promise<DashboardState> {
-    const { settings, pinnedMoves } = this.configStore.getConfig();
+    const { settings, pinnedMoves, training } = this.configStore.getConfig();
     const wifi = await getWifiStatus();
     const resolvedPiHost = await this.findReachablePiHost(settings);
     const piReachable = Boolean(resolvedPiHost);
@@ -128,9 +187,26 @@ export class RobotController {
       }
     }
 
+    let trainingConfig = training;
+    if (Date.now() - this.lastTrainingMetadataRefresh > TRAINING_METADATA_REFRESH_MS) {
+      try {
+        trainingConfig = await this.refreshTrainingArtifacts(trainingConfig, settings, resolvedPiHost);
+        this.lastTrainingMetadataRefresh = Date.now();
+      } catch (error) {
+        this.noteError(error);
+      }
+    }
+
+    const selectedProfile =
+      trainingConfig.profiles.find((profile) => profile.id === trainingConfig.selectedProfileId) ?? null;
+
     return {
       settings,
       pinnedMoves,
+      training: {
+        ...trainingConfig,
+        selectedProfile,
+      },
       wifi,
       piReachable,
       resolvedPiHost,
@@ -141,9 +217,21 @@ export class RobotController {
       services: {
         host: this.hostRunner.getSnapshot(),
         teleop: this.teleopRunner.getSnapshot(),
-        replay: this.replayRunner.getSnapshot(),
+        replay: this.pickServiceSnapshot(
+          this.replayRunner.getSnapshot(),
+          this.localReplayRunner.getSnapshot(),
+        ),
         piCalibration: this.piCalibrationRunner.getSnapshot(),
         macCalibration: this.macCalibrationRunner.getSnapshot(),
+        datasetCapture: this.pickServiceSnapshot(
+          this.datasetCaptureRunner.getSnapshot(),
+          this.localDatasetCaptureRunner.getSnapshot(),
+        ),
+        datasetSync: this.datasetSyncRunner.getSnapshot(),
+        training: this.trainingRunner.getSnapshot(),
+        deployment: this.deploymentRunner.getSnapshot(),
+        policyBenchmark: this.policyBenchmarkRunner.getSnapshot(),
+        policyEval: this.policyEvalRunner.getSnapshot(),
       },
     };
   }
@@ -152,6 +240,427 @@ export class RobotController {
     return this.runExclusive(async () => {
       this.logActivity("Saving updated dashboard settings.");
       this.configStore.saveSettings(settings);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async saveTrainingProfile(payload: TrainingProfile): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const normalized = normalizeTrainingProfile(payload, ROOT_DIR);
+      validateTrainingProfile(normalized);
+
+      const existing = config.training.profiles.find((profile) => profile.id === normalized.id);
+      const nextProfile: TrainingProfile = {
+        ...normalized,
+        artifacts: existing?.artifacts ?? normalized.artifacts,
+      };
+
+      const profiles = existing
+        ? config.training.profiles.map((profile) =>
+            profile.id === nextProfile.id ? nextProfile : profile,
+          )
+        : [...config.training.profiles, nextProfile];
+
+      this.logActivity(`Saved training profile ${nextProfile.name}.`);
+      this.saveTrainingConfig({
+        ...config.training,
+        profiles,
+        selectedProfileId: nextProfile.id,
+      });
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async selectTrainingProfile(payload: SelectTrainingProfileRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const profile = this.requireTrainingProfile(config.training, payload.id);
+      this.logActivity(`Selected training profile ${profile.name}.`);
+      this.saveTrainingConfig({
+        ...config.training,
+        selectedProfileId: profile.id,
+      });
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async deleteTrainingProfile(payload: DeleteTrainingProfileRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const profiles = config.training.profiles.filter((profile) => profile.id !== payload.id);
+      const nextProfiles =
+        profiles.length > 0 ? profiles : [createDefaultTrainingProfile(ROOT_DIR, "Training Task")];
+      const nextSelectedId =
+        nextProfiles.find((profile) => profile.id === config.training.selectedProfileId)?.id ??
+        nextProfiles[0]?.id ??
+        null;
+
+      this.logActivity("Deleted a training profile.");
+      this.saveTrainingConfig({
+        ...config.training,
+        profiles: nextProfiles,
+        selectedProfileId: nextSelectedId,
+      });
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async startTrainingCapture(payload: StartTrainingCaptureRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, training } = this.configStore.getConfig();
+      const profile = this.requireTrainingProfile(training, payload.profileId);
+      validateTrainingProfile(profile);
+
+      this.logActivity(`Training dataset capture requested for ${profile.name}.`);
+      await this.stopRobotExclusiveProcesses("Training dataset capture needs the robot exclusively.");
+      await this.datasetCaptureRunner.stop("Restarting training dataset capture.");
+      await this.localDatasetCaptureRunner.stop("Restarting training dataset capture.");
+
+      if (profile.captureMode === "leader-as-follower") {
+        const leader = await this.ensureLeaderConnected(settings);
+        assertHelperExists(LOCAL_LEADER_CAPTURE_SCRIPT);
+
+        await this.localDatasetCaptureRunner.start(
+          this.buildLocalLeaderDatasetCaptureScript(settings, profile, leader),
+          "training-capture",
+          {
+            profileId: profile.id,
+            captureMode: profile.captureMode,
+            leaderPort: leader.expectedPort,
+            macDatasetPath: profile.macDatasetPath,
+          },
+        );
+      } else {
+        const host = await this.preparePi(settings, "start training capture");
+        const leader =
+          profile.captureMode === "leader" ? await this.ensureLeaderConnected(settings) : null;
+
+        assertHelperExists(DATASET_CAPTURE_SCRIPT);
+        assertHelperExists(POWER_SCRIPT);
+        assertHelperExists(RUNTIME_SCRIPT);
+        await this.ensureRemoteHelpers(settings, host);
+        await this.writeRemoteTorqueLimits(settings, host);
+
+        await this.datasetCaptureRunner.start(
+          buildPiDatasetCaptureCommand(
+            settings,
+            profile,
+            this.getRemoteTorqueLimitsPath(settings),
+          ),
+          this.toConnectConfig(settings, host),
+          "training-capture",
+          {
+            host,
+            profileId: profile.id,
+            captureMode: profile.captureMode,
+            piDatasetPath: profile.piDatasetPath,
+          },
+        );
+
+        try {
+          await this.waitForHostReady(host, "Dataset capture host", this.datasetCaptureRunner);
+          if (leader) {
+            await this.teleopRunner.start(
+              this.buildTeleopScript(settings, host, leader),
+              "training-capture",
+              {
+                profileId: profile.id,
+                leaderPort: leader.expectedPort,
+              },
+            );
+          }
+        } catch (error) {
+          await this.datasetCaptureRunner.stop("Training dataset capture failed to launch.");
+          throw error;
+        }
+      }
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async stopTrainingCapture(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, training } = this.configStore.getConfig();
+      const remoteCapture = this.datasetCaptureRunner.getSnapshot();
+      const localCapture = this.localDatasetCaptureRunner.getSnapshot();
+      const activeProfileId =
+        typeof localCapture.meta.profileId === "string"
+          ? String(localCapture.meta.profileId)
+          : typeof remoteCapture.meta.profileId === "string"
+            ? String(remoteCapture.meta.profileId)
+            : training.selectedProfileId;
+
+      if (this.teleopRunner.getSnapshot().mode === "training-capture") {
+        await this.teleopRunner.stop("Stopping training teleop relay.");
+      }
+      await this.datasetCaptureRunner.stop("Stopping training dataset capture.");
+      await this.localDatasetCaptureRunner.stop("Stopping training dataset capture.");
+
+      const profile = activeProfileId
+        ? training.profiles.find((item) => item.id === activeProfileId)
+        : null;
+      if (profile) {
+        const summary =
+          profile.captureMode === "leader-as-follower"
+            ? await this.inspectLocalDataset(profile, settings)
+            : await (async () => {
+                const host = await this.findReachablePiHost(settings);
+                if (!host) {
+                  return null;
+                }
+                return this.fetchRemoteDatasetSummary(settings, host, profile);
+              })();
+
+        if (summary) {
+          this.updateTrainingProfile(profile.id, (current) => ({
+            ...current,
+            artifacts: {
+              ...current.artifacts,
+              datasetEpisodeCount: summary.episodeCount,
+              datasetCameraKeys: summary.cameraKeys,
+              lastDatasetEpisodeIndex: summary.lastEpisodeIndex,
+            },
+          }));
+        }
+      }
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async startTrainingSync(payload: StartTrainingSyncRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, training } = this.configStore.getConfig();
+      const profile = this.requireTrainingProfile(training, payload.profileId);
+
+      await this.datasetSyncRunner.run("dataset-sync", { profileId: profile.id }, async (log) => {
+        if (profile.captureMode === "leader-as-follower") {
+          log("system", `Dataset already lives on the Mac at ${profile.macDatasetPath}. Skipping Pi download.`);
+          return;
+        }
+
+        const host = await this.preparePi(settings, "sync training dataset");
+        log("system", `Syncing ${profile.piDatasetPath} to ${profile.macDatasetPath}.`);
+        await this.syncRemoteDirectoryToLocal(settings, host, profile.piDatasetPath, profile.macDatasetPath, log);
+      });
+
+      const now = new Date().toISOString();
+      const localSummary = await this.inspectLocalDataset(profile, settings);
+      this.updateTrainingProfile(profile.id, (current) => ({
+        ...current,
+        artifacts: {
+          ...current.artifacts,
+          datasetEpisodeCount: localSummary.episodeCount,
+          datasetCameraKeys: localSummary.cameraKeys,
+          lastDatasetEpisodeIndex: localSummary.lastEpisodeIndex,
+          lastDatasetSyncAt: now,
+        },
+      }));
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async startTrainingRun(payload: StartTrainingRunRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, training } = this.configStore.getConfig();
+      const profile = this.requireTrainingProfile(training, payload.profileId);
+      validateTrainingProfile(profile);
+      if (!fs.existsSync(profile.macDatasetPath)) {
+        throw new Error(`Training dataset does not exist on the Mac: ${profile.macDatasetPath}`);
+      }
+
+      fs.mkdirSync(profile.macTrainOutputDir, { recursive: true });
+      const now = new Date().toISOString();
+      this.logActivity(`Training run requested for ${profile.name}.`);
+      this.updateTrainingProfile(profile.id, (current) => ({
+        ...current,
+        artifacts: {
+          ...current.artifacts,
+          lastTrainingStartedAt: now,
+        },
+      }));
+
+      await this.trainingRunner.start(
+        buildMacTrainingCommand(settings, profile),
+        "training",
+        { profileId: profile.id },
+      );
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async stopTrainingRun(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      await this.trainingRunner.stop("Stopping the training run.");
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async deployTrainingCheckpoint(
+    payload: DeployTrainingCheckpointRequest,
+  ): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, training } = this.configStore.getConfig();
+      const profile = this.requireTrainingProfile(training, payload.profileId);
+      const checkpointPath =
+        profile.selectedCheckpointPath.trim() ||
+        profile.artifacts.lastCheckpointPath ||
+        profile.artifacts.availableCheckpointPaths.at(-1) ||
+        "";
+      const configPath = path.join(checkpointPath, "config.json");
+      if (!checkpointPath || !fs.existsSync(configPath)) {
+        throw new Error("Choose a valid trained checkpoint before deploying to the Pi.");
+      }
+
+      const host = await this.preparePi(settings, "deploy policy checkpoint");
+      await this.deploymentRunner.run("deploy", { profileId: profile.id }, async (log) => {
+        log("system", `Uploading ${checkpointPath} to ${profile.piDeployPath}.`);
+        await this.syncLocalDirectoryToRemote(
+          settings,
+          host,
+          checkpointPath,
+          profile.piDeployPath,
+          log,
+        );
+        await this.writeRemoteDeployManifest(settings, host, profile, checkpointPath);
+      });
+
+      const now = new Date().toISOString();
+      this.updateTrainingProfile(profile.id, (current) => ({
+        ...current,
+        selectedCheckpointPath: checkpointPath,
+        artifacts: {
+          ...current.artifacts,
+          deployedCheckpointPath: current.piDeployPath,
+          deployedAt: now,
+          benchmark: null,
+        },
+      }));
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async runPolicyBenchmark(payload: BenchmarkPolicyRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, training } = this.configStore.getConfig();
+      const profile = this.requireTrainingProfile(training, payload.profileId);
+      if (!profile.artifacts.deployedCheckpointPath) {
+        throw new Error("Deploy a checkpoint to the Pi before running the benchmark.");
+      }
+
+      const host = await this.preparePi(settings, "benchmark deployed policy");
+      await this.ensureRemoteHelpers(settings, host);
+      await this.stopRobotExclusiveProcesses("Policy benchmark needs the robot exclusively.");
+
+      let benchmarkResult: TrainingArtifact["benchmark"] = null;
+      await this.policyBenchmarkRunner.run(
+        "policy-benchmark",
+        { profileId: profile.id },
+        async (log) => {
+          const stdout = await this.execRemoteScript(
+            buildPiPolicyBenchmarkCommand(
+              settings,
+              profile,
+              training.settings.benchmarkIterations,
+            ),
+            host,
+            settings,
+          );
+          benchmarkResult = JSON.parse(stdout.stdout) as TrainingArtifact["benchmark"];
+          if (!benchmarkResult) {
+            throw new Error("The policy benchmark returned no result.");
+          }
+          benchmarkResult.passed = benchmarkPasses(
+            benchmarkResult,
+            training.settings.deployBenchmarkMargin,
+          );
+          log(
+            "system",
+            `Benchmark complete: ${benchmarkResult.effectiveFps.toFixed(2)} fps effective, ` +
+              `avg ${benchmarkResult.averageLatencyMs.toFixed(2)} ms, ` +
+              `${benchmarkResult.passed ? "PASS" : "FAIL"}.`,
+          );
+        },
+      );
+
+      if (!benchmarkResult) {
+        throw new Error("The policy benchmark did not produce a result.");
+      }
+
+      this.updateTrainingProfile(profile.id, (current) => ({
+        ...current,
+        artifacts: {
+          ...current.artifacts,
+          benchmark: benchmarkResult,
+        },
+      }));
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async startPolicyEval(payload: StartPolicyEvalRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, training } = this.configStore.getConfig();
+      const profile = this.requireTrainingProfile(training, payload.profileId);
+      const benchmark = profile.artifacts.benchmark;
+      if (!profile.artifacts.deployedCheckpointPath) {
+        throw new Error("Deploy a checkpoint to the Pi before starting policy evaluation.");
+      }
+      if (!benchmark?.passed) {
+        throw new Error("Run and pass the Pi policy benchmark before starting evaluation.");
+      }
+
+      const host = await this.preparePi(settings, "start policy evaluation");
+      await this.ensureRemoteHelpers(settings, host);
+      await this.stopRobotExclusiveProcesses("Policy evaluation needs the robot exclusively.");
+      await this.policyEvalRunner.stop("Restarting policy evaluation.");
+
+      const evalDatasetPath = `${profile.piEvalDatasetPath.replace(/\/$/, "")}/run-${formatFileTimestamp()}`;
+      await this.policyEvalRunner.start(
+        buildPiPolicyEvalCommand(settings, profile, benchmark, evalDatasetPath),
+        this.toConnectConfig(settings, host),
+        "policy-eval",
+        {
+          host,
+          profileId: profile.id,
+          evalDatasetPath,
+        },
+      );
+
+      this.updateTrainingProfile(profile.id, (current) => ({
+        ...current,
+        artifacts: {
+          ...current.artifacts,
+          latestEvalDatasetPath: evalDatasetPath,
+          latestEvalAt: new Date().toISOString(),
+        },
+      }));
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async stopPolicyEval(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      await this.policyEvalRunner.stop("Stopping policy evaluation.");
       this.lastError = null;
       return this.getState();
     });
@@ -171,6 +680,10 @@ export class RobotController {
       await this.writeRemoteTorqueLimits(settings, host);
 
       await this.replayRunner.stop("Stopping replay before live control.");
+      await this.localReplayRunner.stop("Stopping replay before live control.");
+      await this.datasetCaptureRunner.stop("Live control needs the robot exclusively.");
+      await this.localDatasetCaptureRunner.stop("Live control needs the robot exclusively.");
+      await this.policyEvalRunner.stop("Live control needs the robot exclusively.");
       await this.teleopRunner.stop("Restarting teleop.");
       await this.hostRunner.stop("Restarting Pi host.");
       await this.piCalibrationRunner.stop("Live control needs the robot exclusively.");
@@ -213,9 +726,13 @@ export class RobotController {
 
       await this.teleopRunner.stop("Emergency stop requested.");
       await this.replayRunner.stop("Emergency stop requested.");
+      await this.localReplayRunner.stop("Emergency stop requested.");
       await this.hostRunner.stop("Emergency stop requested.");
       await this.piCalibrationRunner.stop("Emergency stop requested.");
       await this.macCalibrationRunner.stop("Emergency stop requested.");
+      await this.datasetCaptureRunner.stop("Emergency stop requested.");
+      await this.localDatasetCaptureRunner.stop("Emergency stop requested.");
+      await this.policyEvalRunner.stop("Emergency stop requested.");
       await this.execRemoteScript(this.buildStopAllScript(settings), host, settings);
 
       this.lastError = null;
@@ -257,6 +774,10 @@ export class RobotController {
       await this.teleopRunner.stop("Pi calibration needs the robot exclusively.");
       await this.replayRunner.stop("Pi calibration needs the robot exclusively.");
       await this.hostRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.datasetCaptureRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.localDatasetCaptureRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.localReplayRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.policyEvalRunner.stop("Pi calibration needs the robot exclusively.");
       await this.piCalibrationRunner.stop("Restarting Pi calibration.");
 
       await this.piCalibrationRunner.start(
@@ -280,6 +801,10 @@ export class RobotController {
       await this.teleopRunner.stop("Mac calibration needs the leader arm exclusively.");
       await this.replayRunner.stop("Mac calibration requested.");
       await this.hostRunner.stop("Mac calibration requested.");
+      await this.datasetCaptureRunner.stop("Mac calibration requested.");
+      await this.localDatasetCaptureRunner.stop("Mac calibration requested.");
+      await this.localReplayRunner.stop("Mac calibration requested.");
+      await this.policyEvalRunner.stop("Mac calibration requested.");
       await this.macCalibrationRunner.stop("Restarting Mac calibration.");
 
       await this.macCalibrationRunner.start(
@@ -340,10 +865,14 @@ export class RobotController {
       await this.writeRemoteTorqueLimits(settings, host);
 
       await this.replayRunner.stop("Recording takes over the robot.");
+      await this.localReplayRunner.stop("Recording takes over the robot.");
       await this.teleopRunner.stop("Restarting teleop for recording.");
       await this.hostRunner.stop("Replacing the live host with the recorder.");
       await this.piCalibrationRunner.stop("Recording needs the robot exclusively.");
       await this.macCalibrationRunner.stop("Recording needs the leader arm exclusively.");
+      await this.datasetCaptureRunner.stop("Recording needs the robot exclusively.");
+      await this.localDatasetCaptureRunner.stop("Recording needs the robot exclusively.");
+      await this.policyEvalRunner.stop("Recording needs the robot exclusively.");
 
       const timestamp = formatFileTimestamp();
       const trajectoryPath = `${settings.trajectories.remoteDir}/trajectory-${timestamp}.json`;
@@ -431,6 +960,35 @@ export class RobotController {
     });
   }
 
+  async trimRecording(payload: TrimRecordingRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+      const trimStartS = Number(payload.trimStartS);
+      const trimEndS = Number(payload.trimEndS);
+
+      if (!recordingPath) {
+        throw new Error("Choose a recording before trimming it.");
+      }
+      if (!Number.isFinite(trimStartS) || !Number.isFinite(trimEndS)) {
+        throw new Error("Trim start and end must be valid numbers.");
+      }
+      if (trimStartS < 0 || trimEndS <= trimStartS) {
+        throw new Error("Trim end must be greater than trim start.");
+      }
+
+      this.logActivity(
+        `Trimming recording ${recordingPath} to ${trimStartS.toFixed(2)}s-${trimEndS.toFixed(2)}s.`,
+      );
+      const host = await this.preparePi(settings, "trim recording");
+      await this.trimRecordingRange(settings, host, recordingPath, trimStartS, trimEndS);
+      this.cachedRecordings = await this.fetchRecordings(settings, host);
+      this.lastRecordingRefresh = Date.now();
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
   async startReplay(payload: ReplayRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
@@ -438,26 +996,54 @@ export class RobotController {
       if (!replay.trajectoryPath) {
         throw new Error("Choose a saved trajectory before starting replay.");
       }
-      this.logActivity(`Starting replay for ${replay.trajectoryPath}.`);
-      const host = await this.preparePi(settings, "start replay");
-
-      assertHelperExists(REPLAY_SCRIPT);
-      assertHelperExists(RUNTIME_SCRIPT);
-      await this.ensureRemoteHelpers(settings, host);
-      await this.writeRemoteTorqueLimits(settings, host);
+      this.logActivity(
+        `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}.`,
+      );
 
       await this.teleopRunner.stop("Replay takes control away from teleop.");
       await this.hostRunner.stop("Replay needs exclusive access.");
       await this.replayRunner.stop("Restarting replay.");
+      await this.localReplayRunner.stop("Restarting replay.");
       await this.piCalibrationRunner.stop("Replay needs the robot exclusively.");
       await this.macCalibrationRunner.stop("Replay requested.");
+      await this.datasetCaptureRunner.stop("Replay needs the robot exclusively.");
+      await this.localDatasetCaptureRunner.stop("Replay needs the robot exclusively.");
+      await this.policyEvalRunner.stop("Replay needs the robot exclusively.");
 
-      await this.replayRunner.start(
-        this.buildReplayScript(settings, replay),
-        this.toConnectConfig(settings, host),
-        "replay",
-        { ...replay },
-      );
+      if (replay.target === "leader") {
+        const leader = await this.ensureLeaderConnected(settings);
+        const host = await this.preparePi(settings, "download replay recording");
+        assertHelperExists(LOCAL_LEADER_REPLAY_SCRIPT);
+        const localTrajectoryPath = await this.downloadRemoteRecordingToLocal(
+          settings,
+          host,
+          replay.trajectoryPath,
+        );
+
+        await this.localReplayRunner.start(
+          this.buildLocalLeaderReplayScript(settings, replay, leader, localTrajectoryPath),
+          "replay",
+          {
+            ...replay,
+            leaderPort: leader.expectedPort,
+            localTrajectoryPath,
+          },
+        );
+      } else {
+        const host = await this.preparePi(settings, "start replay");
+
+        assertHelperExists(REPLAY_SCRIPT);
+        assertHelperExists(RUNTIME_SCRIPT);
+        await this.ensureRemoteHelpers(settings, host);
+        await this.writeRemoteTorqueLimits(settings, host);
+
+        await this.replayRunner.start(
+          this.buildReplayScript(settings, replay),
+          this.toConnectConfig(settings, host),
+          "replay",
+          { ...replay },
+        );
+      }
 
       this.lastError = null;
       return this.getState();
@@ -468,6 +1054,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       this.logActivity("Stop replay requested.");
       await this.replayRunner.stop("Stopping replay.");
+      await this.localReplayRunner.stop("Stopping replay.");
       this.lastError = null;
       return this.getState();
     });
@@ -578,7 +1165,11 @@ export class RobotController {
     return null;
   }
 
-  private async waitForHostReady(host: string, label: string): Promise<void> {
+  private async waitForHostReady(
+    host: string,
+    label: string,
+    runner: RemoteProcessRunner = this.hostRunner,
+  ): Promise<void> {
     this.logActivity(`Waiting for ${label} ports on ${host}.`);
     const startedAt = Date.now();
 
@@ -591,13 +1182,13 @@ export class RobotController {
         return;
       }
 
-      const exited = await this.hostRunner.waitForExit(250);
+      const exited = await runner.waitForExit(250);
       if (exited) {
         throw new Error(this.formatStartupExit(label, exited));
       }
     }
 
-    const exited = await this.hostRunner.waitForExit(0);
+    const exited = await runner.waitForExit(0);
     if (exited) {
       throw new Error(this.formatStartupExit(label, exited));
     }
@@ -628,6 +1219,27 @@ export class RobotController {
     const motorId = cleaned.match(/id_=(\d+)/)?.[1];
     const motorName = motorId ? LEKIWI_MOTOR_NAMES_BY_ID[motorId] : null;
     return motorName ? `${cleaned} Motor id ${motorId} is ${motorName}.` : cleaned;
+  }
+
+  private pickServiceSnapshot(...snapshots: ServiceSnapshot[]): ServiceSnapshot {
+    return snapshots
+      .slice()
+      .sort((left, right) => {
+        const leftRunning = left.state !== "idle" ? 1 : 0;
+        const rightRunning = right.state !== "idle" ? 1 : 0;
+        if (leftRunning !== rightRunning) {
+          return leftRunning - rightRunning;
+        }
+        return this.snapshotActivityAt(left) - this.snapshotActivityAt(right);
+      })
+      .at(-1) ?? snapshots[0];
+  }
+
+  private snapshotActivityAt(snapshot: ServiceSnapshot): number {
+    const startedAt = snapshot.startedAt ? Date.parse(snapshot.startedAt) : Number.NEGATIVE_INFINITY;
+    const stoppedAt = snapshot.stoppedAt ? Date.parse(snapshot.stoppedAt) : Number.NEGATIVE_INFINITY;
+    const activityAt = Math.max(startedAt, stoppedAt);
+    return Number.isFinite(activityAt) ? activityAt : 0;
   }
 
   private toConnectConfig(settings: AppSettings, host: string): ConnectConfig {
@@ -891,6 +1503,44 @@ JSON
     ].join("\n");
   }
 
+  private buildLocalLeaderDatasetCaptureScript(
+    settings: AppSettings,
+    profile: TrainingProfile,
+    leader: LeaderStatus,
+  ): string {
+    return [
+      this.buildMacActivation(settings),
+      `mkdir -p ${shellQuote(profile.macDatasetPath)}`,
+      `python ${shellQuote(LOCAL_LEADER_CAPTURE_SCRIPT)} \\`,
+      `  --robot-id ${shellQuote(LOCAL_LEADER_ROBOT_ID)} \\`,
+      `  --robot-port ${shellQuote(leader.expectedPort ?? "auto")} \\`,
+      `  --dataset-repo-id ${shellQuote(deriveDatasetRepoId(profile))} \\`,
+      `  --dataset-root ${shellQuote(profile.macDatasetPath)} \\`,
+      `  --task ${shellQuote(profile.task)} \\`,
+      `  --fps ${profile.fps} \\`,
+      `  --num-episodes ${profile.numEpisodes} \\`,
+      `  --episode-time-s ${profile.episodeTimeS} \\`,
+      `  --reset-time-s ${profile.resetTimeS}`,
+    ].join("\n");
+  }
+
+  private buildLocalLeaderReplayScript(
+    settings: AppSettings,
+    replay: ReplayRequest,
+    leader: LeaderStatus,
+    localTrajectoryPath: string,
+  ): string {
+    return [
+      this.buildMacActivation(settings),
+      `python ${shellQuote(LOCAL_LEADER_REPLAY_SCRIPT)} \\`,
+      `  --robot-id ${shellQuote(LOCAL_LEADER_ROBOT_ID)} \\`,
+      `  --robot-port ${shellQuote(leader.expectedPort ?? "auto")} \\`,
+      `  --input ${shellQuote(localTrajectoryPath)} \\`,
+      `  --speed ${replay.speed} \\`,
+      `  --hold-final-s ${replay.holdFinalS}`,
+    ].join("\n");
+  }
+
   private buildStopAllScript(settings: AppSettings): string {
     return `
 export LEKIWI_ROBOT_PORT=${shellQuote(settings.pi.robotPort)}
@@ -984,6 +1634,9 @@ fi
         this.fastPut(sftp, RUNTIME_SCRIPT, `${helperDir}/lekiwi_runtime.py`),
         this.fastPut(sftp, RECORD_SCRIPT, `${helperDir}/lekiwi_record_trajectory.py`),
         this.fastPut(sftp, REPLAY_SCRIPT, `${helperDir}/lekiwi_replay_trajectory.py`),
+        this.fastPut(sftp, DATASET_CAPTURE_SCRIPT, `${helperDir}/lekiwi_record_dataset_host.py`),
+        this.fastPut(sftp, POLICY_BENCHMARK_SCRIPT, `${helperDir}/lekiwi_benchmark_policy.py`),
+        this.fastPut(sftp, POLICY_EVAL_SCRIPT, `${helperDir}/lekiwi_run_policy_eval.py`),
       ]);
     });
 
@@ -1031,6 +1684,12 @@ if root.exists():
                 raw_duration = payload.get("duration_s")
                 if isinstance(raw_duration, (int, float)):
                     duration_s = round(float(raw_duration), 3)
+                elif isinstance(payload.get("samples"), list) and payload["samples"]:
+                    last_sample = payload["samples"][-1]
+                    if isinstance(last_sample, dict):
+                        sample_duration = last_sample.get("t_s")
+                        if isinstance(sample_duration, (int, float)):
+                            duration_s = round(float(sample_duration), 3)
         except Exception:
             pass
         records.append(
@@ -1050,6 +1709,23 @@ PY
 
     const { stdout } = await this.execRemoteScript(script, host, settings);
     return JSON.parse(stdout) as RecordingEntry[];
+  }
+
+  private async downloadRemoteRecordingToLocal(
+    settings: AppSettings,
+    host: string,
+    remotePath: string,
+  ): Promise<string> {
+    await fs.promises.mkdir(LOCAL_LEADER_REPLAY_DIR, { recursive: true });
+    const localPath = path.join(
+      LOCAL_LEADER_REPLAY_DIR,
+      `${path.basename(remotePath, ".json")}-${formatFileTimestamp()}.json`,
+    );
+    await this.withSftp(settings, host, async (sftp) => {
+      await this.fastGet(sftp, remotePath, localPath);
+    });
+    this.logActivity(`Downloaded ${remotePath} to ${localPath} for leader replay.`);
+    return localPath;
   }
 
   private async execRemoteScript(
@@ -1145,6 +1821,22 @@ PY
     });
   }
 
+  private async fastGet(
+    sftp: SFTPWrapper,
+    remotePath: string,
+    localPath: string,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      sftp.fastGet(remotePath, localPath, (error?: Error | null) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
   private async computeRemoteHelperFingerprint(settings: AppSettings): Promise<string> {
     const localScripts = [
       HOST_SCRIPT,
@@ -1152,6 +1844,9 @@ PY
       RUNTIME_SCRIPT,
       RECORD_SCRIPT,
       REPLAY_SCRIPT,
+      DATASET_CAPTURE_SCRIPT,
+      POLICY_BENCHMARK_SCRIPT,
+      POLICY_EVAL_SCRIPT,
     ];
     const parts = await Promise.all(
       localScripts.map(async (localScript) => {
@@ -1195,6 +1890,435 @@ if not isinstance(payload, dict):
 payload["label"] = label
 path.write_text(json.dumps(payload, indent=2) + "\\n")
 PY
+`.trim();
+
+    await this.execRemoteScript(script, host, settings);
+  }
+
+  private async trimRecordingRange(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+    trimStartS: number,
+    trimEndS: number,
+  ): Promise<void> {
+    const script = `
+export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
+export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+export LEKIWI_TRIM_START_S=${shellQuote(String(trimStartS))}
+export LEKIWI_TRIM_END_S=${shellQuote(String(trimEndS))}
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
+path = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser().resolve()
+trim_start_s = float(os.environ["LEKIWI_TRIM_START_S"])
+trim_end_s = float(os.environ["LEKIWI_TRIM_END_S"])
+
+if root not in path.parents:
+    raise SystemExit("Recording path is outside the trajectory directory.")
+if not path.is_file():
+    raise SystemExit(f"Recording does not exist: {path}")
+if trim_start_s < 0 or trim_end_s <= trim_start_s:
+    raise SystemExit("Trim end must be greater than trim start.")
+
+payload = json.loads(path.read_text())
+samples = payload.get("samples")
+if not isinstance(samples, list) or not samples:
+    raise SystemExit("Recording does not contain any samples.")
+
+trimmed = []
+for sample in samples:
+    if not isinstance(sample, dict):
+        continue
+    sample_t_s = sample.get("t_s")
+    if not isinstance(sample_t_s, (int, float)):
+        continue
+    sample_t_s = float(sample_t_s)
+    if trim_start_s <= sample_t_s <= trim_end_s:
+        trimmed.append(
+            {
+                **sample,
+                "t_s": round(sample_t_s - trim_start_s, 6),
+            }
+        )
+
+if not trimmed:
+    raise SystemExit("Trim range does not include any recorded samples.")
+
+payload["samples"] = trimmed
+payload["duration_s"] = round(float(trimmed[-1]["t_s"]), 6)
+path.write_text(json.dumps(payload, indent=2) + "\\n")
+PY
+`.trim();
+
+    await this.execRemoteScript(script, host, settings);
+  }
+
+  private requireTrainingProfile(training: TrainingConfig, id: string | null): TrainingProfile {
+    const profile = training.profiles.find((item) => item.id === id);
+    if (!profile) {
+      throw new Error("Training profile not found.");
+    }
+    return profile;
+  }
+
+  private saveTrainingConfig(training: TrainingConfig): TrainingConfig {
+    const normalized = normalizeTrainingConfig(training, ROOT_DIR);
+    this.configStore.saveTraining(normalized);
+    return normalized;
+  }
+
+  private updateTrainingProfile(
+    profileId: string,
+    updater: (profile: TrainingProfile) => TrainingProfile,
+  ): TrainingConfig {
+    const config = this.configStore.getConfig();
+    const nextProfiles = config.training.profiles.map((profile) =>
+      profile.id === profileId ? normalizeTrainingProfile(updater(profile), ROOT_DIR) : profile,
+    );
+    return this.saveTrainingConfig({
+      ...config.training,
+      profiles: nextProfiles,
+      selectedProfileId:
+        config.training.selectedProfileId && nextProfiles.some((profile) => profile.id === config.training.selectedProfileId)
+          ? config.training.selectedProfileId
+          : nextProfiles[0]?.id ?? null,
+    });
+  }
+
+  private async refreshTrainingArtifacts(
+    training: TrainingConfig,
+    settings: AppSettings,
+    resolvedPiHost: string | null,
+  ): Promise<TrainingConfig> {
+    let next = normalizeTrainingConfig(training, ROOT_DIR);
+    let changed = false;
+
+    const trainingSnapshot = this.trainingRunner.getSnapshot();
+    next = {
+      ...next,
+      profiles: next.profiles.map((profile) => {
+        const checkpoints = listCheckpointCandidates(profile);
+        const latestCheckpoint = checkpoints.at(-1) ?? null;
+        const nextProfile: TrainingProfile = {
+          ...profile,
+          selectedCheckpointPath:
+            profile.selectedCheckpointPath || latestCheckpoint || "",
+          artifacts: {
+            ...profile.artifacts,
+            availableCheckpointPaths: checkpoints,
+            lastCheckpointPath: latestCheckpoint,
+            lastTrainingCompletedAt:
+              trainingSnapshot.meta.profileId === profile.id && trainingSnapshot.stoppedAt
+                ? trainingSnapshot.stoppedAt
+                : profile.artifacts.lastTrainingCompletedAt,
+          },
+        };
+
+        if (JSON.stringify(nextProfile) !== JSON.stringify(profile)) {
+          changed = true;
+        }
+        return nextProfile;
+      }),
+    };
+
+    if (next.selectedProfileId) {
+      const selectedProfile = this.requireTrainingProfile(next, next.selectedProfileId);
+      let summary:
+        | {
+            episodeCount: number | null;
+            cameraKeys: string[];
+            lastEpisodeIndex: number | null;
+          }
+        | null = null;
+
+      if (selectedProfile.captureMode === "leader-as-follower" && fs.existsSync(selectedProfile.macDatasetPath)) {
+        summary = await this.inspectLocalDataset(selectedProfile, settings).catch(() => null);
+      } else if (resolvedPiHost) {
+        summary = await this.fetchRemoteDatasetSummary(settings, resolvedPiHost, selectedProfile).catch(
+          () => null,
+        );
+      } else if (fs.existsSync(selectedProfile.macDatasetPath)) {
+        summary = await this.inspectLocalDataset(selectedProfile, settings).catch(() => null);
+      }
+
+      if (summary) {
+        next = {
+          ...next,
+          profiles: next.profiles.map((profile) =>
+            profile.id === selectedProfile.id
+              ? {
+                  ...profile,
+                  artifacts: {
+                    ...profile.artifacts,
+                    datasetEpisodeCount: summary.episodeCount,
+                    datasetCameraKeys: summary.cameraKeys,
+                    lastDatasetEpisodeIndex: summary.lastEpisodeIndex,
+                  },
+                }
+              : profile,
+          ),
+        };
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      next = this.saveTrainingConfig(next);
+    }
+    return next;
+  }
+
+  private async stopRobotExclusiveProcesses(reason: string): Promise<void> {
+    await this.teleopRunner.stop(reason);
+    await this.replayRunner.stop(reason);
+    await this.localReplayRunner.stop(reason);
+    await this.hostRunner.stop(reason);
+    await this.piCalibrationRunner.stop(reason);
+    await this.macCalibrationRunner.stop(reason);
+    await this.datasetCaptureRunner.stop(reason);
+    await this.localDatasetCaptureRunner.stop(reason);
+    await this.policyEvalRunner.stop(reason);
+  }
+
+  private async inspectLocalDataset(
+    profile: TrainingProfile,
+    settings: AppSettings,
+  ): Promise<{
+    episodeCount: number | null;
+    cameraKeys: string[];
+    lastEpisodeIndex: number | null;
+  }> {
+    if (!fs.existsSync(profile.macDatasetPath)) {
+      return {
+        episodeCount: null,
+        cameraKeys: [],
+        lastEpisodeIndex: null,
+      };
+    }
+
+    const script = [
+      `export LEKIWI_DATASET_ROOT=${shellQuote(profile.macDatasetPath)}`,
+      `export LEKIWI_DATASET_REPO_ID=${shellQuote(deriveDatasetRepoId(profile))}`,
+      `source ${shellQuote(settings.mac.condaScript)}`,
+      "conda activate lerobot",
+      "python - <<'PY'",
+      "import json",
+      "import os",
+      "from pathlib import Path",
+      "from lerobot.datasets.lerobot_dataset import LeRobotDataset",
+      "root = Path(os.environ['LEKIWI_DATASET_ROOT']).expanduser()",
+      "repo_id = os.environ['LEKIWI_DATASET_REPO_ID']",
+      "summary = {'episodeCount': None, 'cameraKeys': [], 'lastEpisodeIndex': None}",
+      "if root.exists():",
+      "    dataset = LeRobotDataset(repo_id, root=root)",
+      "    summary['episodeCount'] = int(dataset.num_episodes)",
+      "    summary['cameraKeys'] = list(getattr(dataset.meta, 'camera_keys', []))",
+      "    summary['lastEpisodeIndex'] = dataset.num_episodes - 1 if dataset.num_episodes > 0 else None",
+      "print(json.dumps(summary))",
+      "PY",
+    ].join("\n");
+
+    const { stdout } = await runZshScript(script);
+    return JSON.parse(stdout.trim()) as {
+      episodeCount: number | null;
+      cameraKeys: string[];
+      lastEpisodeIndex: number | null;
+    };
+  }
+
+  private async fetchRemoteDatasetSummary(
+    settings: AppSettings,
+    host: string,
+    profile: TrainingProfile,
+  ): Promise<{
+    episodeCount: number | null;
+    cameraKeys: string[];
+    lastEpisodeIndex: number | null;
+  }> {
+    const script = [
+      `export LEKIWI_DATASET_ROOT=${shellQuote(profile.piDatasetPath)}`,
+      `export LEKIWI_DATASET_REPO_ID=${shellQuote(deriveDatasetRepoId(profile))}`,
+      `source ${shellQuote(settings.pi.condaScript)}`,
+      "conda activate lerobot",
+      "python - <<'PY'",
+      "import json",
+      "import os",
+      "from pathlib import Path",
+      "from lerobot.datasets.lerobot_dataset import LeRobotDataset",
+      "root = Path(os.environ['LEKIWI_DATASET_ROOT']).expanduser()",
+      "repo_id = os.environ['LEKIWI_DATASET_REPO_ID']",
+      "summary = {'episodeCount': None, 'cameraKeys': [], 'lastEpisodeIndex': None}",
+      "if root.exists():",
+      "    dataset = LeRobotDataset(repo_id, root=root)",
+      "    summary['episodeCount'] = int(dataset.num_episodes)",
+      "    summary['cameraKeys'] = list(getattr(dataset.meta, 'camera_keys', []))",
+      "    summary['lastEpisodeIndex'] = dataset.num_episodes - 1 if dataset.num_episodes > 0 else None",
+      "print(json.dumps(summary))",
+      "PY",
+    ].join("\n");
+
+    const result = await this.execRemoteScript(script, host, settings);
+    return JSON.parse(result.stdout) as {
+      episodeCount: number | null;
+      cameraKeys: string[];
+      lastEpisodeIndex: number | null;
+    };
+  }
+
+  private async syncRemoteDirectoryToLocal(
+    settings: AppSettings,
+    host: string,
+    remoteDir: string,
+    localDir: string,
+    log: (stream: "stdout" | "stderr" | "system", line: string) => void,
+  ): Promise<void> {
+    await fs.promises.rm(localDir, { recursive: true, force: true });
+    await fs.promises.mkdir(localDir, { recursive: true });
+
+    const connection = this.toConnectConfig(settings, host);
+    await new Promise<void>((resolve, reject) => {
+      const client = new Client();
+      client.once("ready", () => {
+        const remoteCommand = [
+          `if [ ! -d ${shellQuote(remoteDir)} ]; then`,
+          `  echo "Missing directory: ${remoteDir}" >&2`,
+          "  exit 1",
+          "fi",
+          `tar -C ${shellQuote(remoteDir)} -czf - .`,
+        ].join("\n");
+
+        client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
+          if (error) {
+            client.end();
+            reject(error);
+            return;
+          }
+
+          const untar = spawn("/usr/bin/tar", ["-xzf", "-", "-C", localDir], {
+            stdio: ["pipe", "ignore", "pipe"],
+          });
+
+          channel.stderr.on("data", (chunk: Buffer) => {
+            log("stderr", chunk.toString("utf8").trim());
+          });
+          untar.stderr.on("data", (chunk: Buffer) => {
+            log("stderr", chunk.toString("utf8").trim());
+          });
+
+          channel.pipe(untar.stdin);
+
+          untar.once("close", (code) => {
+            client.end();
+            if (code && code !== 0) {
+              reject(new Error(`Local tar extraction failed with code ${code}.`));
+              return;
+            }
+            resolve();
+          });
+
+          channel.once("close", (code: number | undefined | null) => {
+            if (code && code !== 0) {
+              client.end();
+              reject(new Error(`Remote dataset archive failed with code ${code}.`));
+            }
+          });
+        });
+      });
+
+      client.once("error", reject);
+      client.connect(connection);
+    });
+  }
+
+  private async syncLocalDirectoryToRemote(
+    settings: AppSettings,
+    host: string,
+    localDir: string,
+    remoteDir: string,
+    log: (stream: "stdout" | "stderr" | "system", line: string) => void,
+  ): Promise<void> {
+    if (!fs.existsSync(localDir)) {
+      throw new Error(`Local directory does not exist: ${localDir}`);
+    }
+
+    const connection = this.toConnectConfig(settings, host);
+    await new Promise<void>((resolve, reject) => {
+      const client = new Client();
+      client.once("ready", () => {
+        const remoteCommand = [
+          `rm -rf ${shellQuote(remoteDir)}`,
+          `mkdir -p ${shellQuote(remoteDir)}`,
+          `tar -xzf - -C ${shellQuote(remoteDir)}`,
+        ].join("\n");
+
+        client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
+          if (error) {
+            client.end();
+            reject(error);
+            return;
+          }
+
+          const tarProcess = spawn("/usr/bin/tar", ["-czf", "-", "-C", localDir, "."], {
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+
+          tarProcess.stderr.on("data", (chunk: Buffer) => {
+            log("stderr", chunk.toString("utf8").trim());
+          });
+          channel.stderr.on("data", (chunk: Buffer) => {
+            log("stderr", chunk.toString("utf8").trim());
+          });
+
+          tarProcess.stdout.pipe(channel);
+
+          tarProcess.once("close", (code) => {
+            if (code && code !== 0) {
+              client.end();
+              reject(new Error(`Local tar archive failed with code ${code}.`));
+            }
+          });
+
+          channel.once("close", (code: number | undefined | null) => {
+            client.end();
+            if (code && code !== 0) {
+              reject(new Error(`Remote extract failed with code ${code}.`));
+              return;
+            }
+            resolve();
+          });
+        });
+      });
+
+      client.once("error", reject);
+      client.connect(connection);
+    });
+  }
+
+  private async writeRemoteDeployManifest(
+    settings: AppSettings,
+    host: string,
+    profile: TrainingProfile,
+    sourceCheckpointPath: string,
+  ): Promise<void> {
+    const payload = {
+      profileId: profile.id,
+      name: profile.name,
+      sourceCheckpointPath,
+      deployedCheckpointPath: profile.piDeployPath,
+      deployedAt: new Date().toISOString(),
+      task: profile.task,
+      policyType: profile.policyType,
+    };
+    const manifestPath = path.posix.join(profile.piDeployPath, "deploy-manifest.json");
+    const script = `
+mkdir -p ${shellQuote(profile.piDeployPath)}
+cat > ${shellQuote(manifestPath)} <<'JSON'
+${JSON.stringify(payload, null, 2)}
+JSON
 `.trim();
 
     await this.execRemoteScript(script, host, settings);

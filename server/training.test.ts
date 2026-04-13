@@ -1,0 +1,111 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { ConfigStore } from "./configStore.js";
+import { defaultConfig } from "./defaultConfig.js";
+import {
+  buildMacTrainingCommand,
+  buildPiDatasetCaptureCommand,
+} from "./trainingCommands.js";
+import {
+  createDefaultTrainingProfile,
+  normalizeTrainingConfig,
+  validateTrainingProfile,
+} from "./trainingUtils.js";
+
+test("config store migrates older config files by adding training defaults", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
+  const configDir = path.join(tempRoot, ".lekiwi-ui");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      settings: defaultConfig.settings,
+      pinnedMoves: [],
+    }),
+  );
+
+  const store = new ConfigStore(defaultConfig, tempRoot);
+  const loaded = store.getConfig();
+
+  assert.ok(loaded.training);
+  assert.equal(loaded.training.settings.defaultPolicyType, "act");
+  assert.ok(loaded.training.profiles.length >= 1);
+  assert.ok(loaded.training.selectedProfileId);
+});
+
+test("config store defaults legacy pinned moves to Pi replay", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
+  const configDir = path.join(tempRoot, ".lekiwi-ui");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      settings: defaultConfig.settings,
+      pinnedMoves: [
+        {
+          id: "move-1",
+          name: "Legacy move",
+          trajectoryPath: "/home/pi/lekiwi-trajectories/legacy.json",
+          speed: 1,
+          includeBase: false,
+          holdFinalS: 0.5,
+          keyBinding: "SHIFT+1",
+        },
+      ],
+      training: defaultConfig.training,
+    }),
+  );
+
+  const store = new ConfigStore(defaultConfig, tempRoot);
+  const loaded = store.getConfig();
+
+  assert.equal(loaded.pinnedMoves[0]?.target, "pi");
+});
+
+test("training profile validation rejects unsupported camera modes", () => {
+  const profile = createDefaultTrainingProfile(process.cwd(), "Bad Cameras");
+  profile.camerasMode = "{}";
+
+  assert.throws(() => validateTrainingProfile(profile), /cameras mode/i);
+});
+
+test("training profile normalization preserves leader-as-follower capture mode", () => {
+  const normalized = normalizeTrainingConfig(
+    {
+      profiles: [
+        {
+          ...createDefaultTrainingProfile(process.cwd(), "Leader Local"),
+          captureMode: "leader-as-follower",
+        },
+      ],
+      selectedProfileId: "leader-local",
+    },
+    process.cwd(),
+  );
+
+  assert.equal(normalized.profiles[0]?.captureMode, "leader-as-follower");
+});
+
+test("training commands include Pi-safe ACT defaults", () => {
+  const training = normalizeTrainingConfig(defaultConfig.training, process.cwd());
+  const profile = training.profiles[0];
+
+  const macCommand = buildMacTrainingCommand(defaultConfig.settings, profile);
+  assert.match(macCommand, /--policy\.type=act/);
+  assert.match(macCommand, /--policy\.device='mps'/);
+  assert.match(macCommand, /--dataset\.root=/);
+
+  const captureCommand = buildPiDatasetCaptureCommand(
+    defaultConfig.settings,
+    profile,
+    "/home/pi/.lekiwi-ui/torque_limits.json",
+  );
+  assert.match(captureCommand, /--robot-cameras-json 'default'/);
+  assert.match(captureCommand, /--dataset-vcodec h264/);
+  assert.match(captureCommand, /--dataset-streaming-encoding false/);
+  assert.match(captureCommand, /--capture-mode 'leader'/);
+});

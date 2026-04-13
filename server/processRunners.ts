@@ -53,6 +53,9 @@ function logCommand(snapshot: ServiceSnapshot, script: string): void {
   }
 }
 
+type TaskLogStream = "stdout" | "stderr" | "system";
+type TaskLogger = (stream: TaskLogStream, line: string) => void;
+
 export class LocalProcessRunner {
   private child: ChildProcessWithoutNullStreams | null = null;
   private exitPromise: Promise<void> | null = null;
@@ -390,6 +393,53 @@ export class RemoteProcessRunner {
     if (this.stderrBuffer) {
       pushLog(this.snapshot, "stderr", this.stderrBuffer);
       this.stderrBuffer = "";
+    }
+  }
+}
+
+export class TaskRunner {
+  private snapshot: ServiceSnapshot;
+
+  constructor(label: string) {
+    this.snapshot = createSnapshot(label);
+  }
+
+  getSnapshot(): ServiceSnapshot {
+    return cloneSnapshot(this.snapshot);
+  }
+
+  async run(
+    mode: string,
+    meta: Record<string, unknown>,
+    task: (log: TaskLogger) => Promise<void>,
+  ): Promise<void> {
+    this.snapshot = {
+      ...createSnapshot(this.snapshot.label),
+      state: "starting",
+      detail: "Starting task.",
+      startedAt: new Date().toISOString(),
+      mode,
+      meta,
+    };
+    pushLog(this.snapshot, "system", `Starting ${this.snapshot.label}.`);
+
+    const log: TaskLogger = (stream, line) => {
+      pushLog(this.snapshot, stream, line);
+    };
+
+    try {
+      this.snapshot.state = "running";
+      this.snapshot.detail = "Running.";
+      await task(log);
+      this.snapshot.state = "idle";
+      this.snapshot.detail = "Completed.";
+    } catch (error) {
+      this.snapshot.state = "error";
+      this.snapshot.detail = error instanceof Error ? error.message : String(error);
+      pushLog(this.snapshot, "stderr", this.snapshot.detail);
+      throw error;
+    } finally {
+      this.snapshot.stoppedAt = new Date().toISOString();
     }
   }
 }

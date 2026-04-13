@@ -5,10 +5,11 @@ This app gives you a local dashboard on your Mac for:
 - starting and stopping the Pi host
 - starting and stopping local teleop
 - recording exact follower trajectories on the Pi
-- replaying saved trajectories
+- replaying saved trajectories on the Pi or on the Mac-attached leader arm
 - pinning saved moves to dashboard buttons and keyboard shortcuts
 - showing live backend and process output while actions run
 - checking whether the leader arm is actually connected on the port used by `teleoperate.py`
+- capturing a local training dataset on the Mac by using the leader arm as a follower stand-in
 
 ## Start It
 
@@ -72,7 +73,13 @@ http://localhost:4318
 
 - uploads the replay helper to the Pi if needed
 - stops live control
-- replays the selected saved trajectory on the Pi
+- replays the selected saved trajectory on the Pi, or downloads it locally first if you target the leader arm
+
+`Training > Capture Dataset`
+
+- `Leader` and `Free-teach` still capture on the Pi
+- `Leader as follower (Mac)` records a local arm-only dataset by using the leader arm as a free-taught follower stand-in
+- the Mac-side leader workflow writes directly to the configured Mac dataset path, so the sync button becomes a local metadata refresh instead of a Pi download
 
 `Pin Move to Dashboard`
 
