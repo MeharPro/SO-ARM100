@@ -1,56 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
-import glob
 import os
 import time
 
+from lekiwi_leader_support import (
+    connect_leader_noninteractive,
+    detect_leader_port,
+    disconnect_device_safely,
+)
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
 from lerobot.teleoperators.so_leader import SO100Leader, SO100LeaderConfig
 from lerobot.utils.robot_utils import precise_sleep
 
 FPS = 30
-
-
-def detect_leader_port(requested_port: str | None) -> str:
-    if requested_port and requested_port.lower() != "auto":
-        return requested_port
-
-    candidates = sorted(
-        set(glob.glob("/dev/tty.usbmodem*"))
-        | set(glob.glob("/dev/tty.usbserial*"))
-        | set(glob.glob("/dev/cu.usbmodem*"))
-        | set(glob.glob("/dev/cu.usbserial*"))
-    )
-    if not candidates:
-        raise SystemExit(
-            "No leader-arm serial port found. Plug in the leader arm and rerun start control."
-        )
-
-    grouped: dict[str, list[str]] = {}
-    for port in candidates:
-        name = os.path.basename(port)
-        if name.startswith("tty."):
-            key = name.removeprefix("tty.")
-        elif name.startswith("cu."):
-            key = name.removeprefix("cu.")
-        else:
-            key = name
-        grouped.setdefault(key, []).append(port)
-
-    deduped = []
-    for key in sorted(grouped):
-        options = sorted(grouped[key])
-        tty_port = next((item for item in options if os.path.basename(item).startswith("tty.")), None)
-        deduped.append(tty_port or options[0])
-
-    if len(deduped) == 1:
-        return deduped[0]
-
-    raise SystemExit(
-        "More than one leader-arm serial port was found. Pass --leader-port explicitly.\n"
-        + "\n".join(deduped)
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -134,7 +97,14 @@ def main() -> None:
     loop_idx = 0
     try:
         robot.connect()
-        leader.connect()
+        connect_leader_noninteractive(
+            leader,
+            calibrate_hint=(
+                "Run the dashboard's Mac calibration, or run "
+                "`lerobot-calibrate --teleop.type=so100_leader --teleop.port <port> --teleop.id "
+                f"{args.leader_id}`."
+            ),
+        )
 
         while True:
             t0 = time.perf_counter()
@@ -151,10 +121,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping UI teleop relay.", flush=True)
     finally:
-        if robot.is_connected:
-            robot.disconnect()
-        if leader.is_connected:
-            leader.disconnect()
+        disconnect_device_safely(robot, "LeKiwi client")
+        disconnect_device_safely(leader, "leader arm")
 
 
 if __name__ == "__main__":

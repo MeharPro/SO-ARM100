@@ -1,58 +1,23 @@
 #!/usr/bin/env python3
 
 import argparse
-import glob
 import json
 import os
 import time
 
 import zmq
 
+from lekiwi_leader_support import (
+    connect_leader_noninteractive,
+    detect_leader_port,
+    disconnect_device_safely,
+)
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 from lerobot.utils.robot_utils import precise_sleep
 
 FPS = 30
-
-
-def detect_leader_port() -> str:
-    candidates = sorted(
-        set(glob.glob("/dev/tty.usbmodem*"))
-        | set(glob.glob("/dev/tty.usbserial*"))
-        | set(glob.glob("/dev/cu.usbmodem*"))
-        | set(glob.glob("/dev/cu.usbserial*"))
-    )
-    if not candidates:
-        raise SystemExit(
-            "No leader-arm serial port found. Plug the leader arm into the Mac and rerun, "
-            "or pass --leader-port explicitly."
-        )
-
-    grouped: dict[str, list[str]] = {}
-    for path in candidates:
-        name = os.path.basename(path)
-        if name.startswith("tty."):
-            key = name.removeprefix("tty.")
-        elif name.startswith("cu."):
-            key = name.removeprefix("cu.")
-        else:
-            key = name
-        grouped.setdefault(key, []).append(path)
-
-    deduped = []
-    for key in sorted(grouped):
-        paths = sorted(grouped[key])
-        tty_path = next((p for p in paths if os.path.basename(p).startswith("tty.")), None)
-        deduped.append(tty_path or paths[0])
-
-    if len(deduped) == 1:
-        return deduped[0]
-
-    raise SystemExit(
-        "More than one leader-arm serial port was found. Re-run with --leader-port set to one of:\n"
-        + "\n".join(deduped)
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,13 +49,20 @@ def main() -> None:
     if not args.remote_host:
         raise SystemExit("--remote-host or LEKIWI_PI_HOST is required.")
 
-    leader_port = args.leader_port or detect_leader_port()
+    leader_port = detect_leader_port(args.leader_port)
     leader = SO101Leader(SO101LeaderConfig(port=leader_port, id=args.leader_id, use_degrees=False))
     # Reuse the stock LeKiwi keyboard mapping and speed-step logic without depending on the network client path.
     base_mapper = LeKiwiClient(LeKiwiClientConfig(remote_ip=args.remote_host, id="follow"))
     keyboard = KeyboardTeleop(KeyboardTeleopConfig(id=args.keyboard_id))
 
-    leader.connect()
+    connect_leader_noninteractive(
+        leader,
+        calibrate_hint=(
+            "Run the dashboard's Mac calibration, or run "
+            "`lerobot-calibrate --teleop.type=so101_leader --teleop.port <port> --teleop.id "
+            f"{args.leader_id}`."
+        ),
+    )
     keyboard.connect()
 
     ctx = zmq.Context()
@@ -122,8 +94,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping raw relay")
     finally:
-        keyboard.disconnect()
-        leader.disconnect()
+        disconnect_device_safely(keyboard, "keyboard teleop")
+        disconnect_device_safely(leader, "leader arm")
         sock.close()
         ctx.term()
 

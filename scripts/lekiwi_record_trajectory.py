@@ -137,15 +137,27 @@ def build_sample(observation: dict[str, float], t_s: float) -> dict[str, object]
     }
 
 
+def build_command_sample(action: dict[str, float], t_s: float) -> dict[str, object]:
+    return {
+        "t_s": round(t_s, 6),
+        "action": {key: float(action.get(key, 0.0)) for key in STATE_KEYS},
+    }
+
+
 def summarize_sample(sample: dict[str, object]) -> str:
     state = sample["state"]
     return " ".join(f"{key}={state[key]:7.2f}" for key in ARM_STATE_KEYS)
 
 
-def write_trajectory(path: Path, args: argparse.Namespace, samples: list[dict[str, object]]) -> None:
+def write_trajectory(
+    path: Path,
+    args: argparse.Namespace,
+    samples: list[dict[str, object]],
+    command_samples: list[dict[str, object]],
+) -> None:
     payload = {
         "format": "lekiwi-follower-trajectory",
-        "version": 1,
+        "version": 2,
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "recorded_on": "pi",
         "robot_id": args.robot_id,
@@ -156,6 +168,7 @@ def write_trajectory(path: Path, args: argparse.Namespace, samples: list[dict[st
         "arm_state_keys": list(ARM_STATE_KEYS),
         "base_state_keys": list(BASE_STATE_KEYS),
         "samples": samples,
+        "command_samples": command_samples,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -187,6 +200,7 @@ def main() -> None:
     last_cmd_time = time.time()
     watchdog_active = False
     samples: list[dict[str, object]] = []
+    command_samples: list[dict[str, object]] = []
 
     print(
         f"LeKiwi recording host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
@@ -204,12 +218,16 @@ def main() -> None:
             try:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
                 action = normalize_arm_action(dict(json.loads(msg)))
-                robot.send_action(action)
-                last_cmd_time = time.time()
-                watchdog_active = False
                 if recording_started_at is None:
                     recording_started_at = time.perf_counter()
                     print("First leader command received. Recording started.", flush=True)
+                    command_t_s = 0.0
+                else:
+                    command_t_s = time.perf_counter() - recording_started_at
+                command_samples.append(build_command_sample(action, command_t_s))
+                robot.send_action(action)
+                last_cmd_time = time.time()
+                watchdog_active = False
             except zmq.Again:
                 if not watchdog_active:
                     logger.warning("No command available")
@@ -259,7 +277,7 @@ def main() -> None:
                 print(f"power telemetry: {exc}", flush=True)
         if samples:
             try:
-                write_trajectory(output_path, args, samples)
+                write_trajectory(output_path, args, samples, command_samples)
                 print(f"Saved {len(samples)} samples to {output_path}", flush=True)
             except Exception as exc:
                 print(f"save trajectory: {exc}", flush=True)

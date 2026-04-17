@@ -10,6 +10,7 @@ import type {
   CreatePinnedMoveRequest,
   DeployTrainingCheckpointRequest,
   DeleteTrainingProfileRequest,
+  RecordingDetailRequest,
   RenameRecordingRequest,
   ReplayRequest,
   SelectTrainingProfileRequest,
@@ -56,6 +57,13 @@ app.post(
   "/api/robot/start-control",
   asyncRoute(async (_req, res) => {
     res.json(await controller.startControl());
+  }),
+);
+
+app.post(
+  "/api/robot/start-hotkeys",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.startKeyboardControl());
   }),
 );
 
@@ -145,6 +153,13 @@ app.post(
   "/api/recordings/refresh",
   asyncRoute(async (_req, res) => {
     res.json(await controller.refreshRecordings());
+  }),
+);
+
+app.post(
+  "/api/recordings/detail",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.getRecordingDetail(req.body as RecordingDetailRequest));
   }),
 );
 

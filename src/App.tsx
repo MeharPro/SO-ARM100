@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AppSettings,
   DashboardState,
   PinnedMove,
+  RecordingDetail,
+  RecordingDetailRequest,
   ReplayTarget,
   RecordingEntry,
   RenameRecordingRequest,
+  RecordingTimelinePoint,
+  ServiceSnapshot,
   TrainingArtifact,
   TrainingProfile,
   TrimRecordingRequest,
@@ -41,6 +45,14 @@ const ARM_SERVO_IDS = [
   "arm_wrist_roll",
   "arm_gripper",
 ] as const;
+const SERVO_TRACE_COLORS: Record<string, string> = {
+  arm_shoulder_pan: "#ea580c",
+  arm_shoulder_lift: "#ca8a04",
+  arm_elbow_flex: "#16a34a",
+  arm_wrist_flex: "#0891b2",
+  arm_wrist_roll: "#2563eb",
+  arm_gripper: "#c026d3",
+};
 
 const TORQUE_LIMIT_MIN = 0;
 const TORQUE_LIMIT_MAX = 1000;
@@ -107,6 +119,20 @@ function formatDurationSeconds(value: number | null): string {
   return value === null ? "n/a" : formatClockDuration(value);
 }
 
+function clampPlaybackTime(value: number, durationS: number): number {
+  if (!Number.isFinite(value) || durationS <= 0) {
+    return 0;
+  }
+  return Math.min(Math.max(value, 0), durationS);
+}
+
+function formatSecondsInput(value: number): string {
+  return Math.max(0, value)
+    .toFixed(2)
+    .replace(/\.00$/, "")
+    .replace(/(\.\d)0$/, "$1");
+}
+
 function formatElapsedSince(startedAt: string | null, nowMs: number): string {
   if (!startedAt) {
     return "00:00";
@@ -146,6 +172,60 @@ function normalizeHotkeyText(value: string): string {
   return raw.replace(/\s+/g, "").replace(/COMMAND/g, "META");
 }
 
+function keyboardEventPrimaryKey(event: KeyboardEvent): string {
+  const code = event.code;
+  if (/^Digit\d$/.test(code)) {
+    return code.slice(5);
+  }
+  if (/^Key[A-Z]$/.test(code)) {
+    return code.slice(3);
+  }
+  if (/^Numpad\d$/.test(code)) {
+    return `NUM${code.slice(6)}`;
+  }
+
+  const codeMap: Record<string, string> = {
+    Space: "SPACE",
+    Escape: "ESC",
+    Enter: "ENTER",
+    Tab: "TAB",
+    Backspace: "BACKSPACE",
+    ArrowUp: "UP",
+    ArrowDown: "DOWN",
+    ArrowLeft: "LEFT",
+    ArrowRight: "RIGHT",
+    Minus: "-",
+    Equal: "=",
+    BracketLeft: "[",
+    BracketRight: "]",
+    Backslash: "\\",
+    Semicolon: ";",
+    Quote: "'",
+    Comma: ",",
+    Period: ".",
+    Slash: "/",
+    Backquote: "`",
+    NumpadAdd: "NUM+",
+    NumpadSubtract: "NUM-",
+    NumpadMultiply: "NUM*",
+    NumpadDivide: "NUM/",
+    NumpadDecimal: "NUM.",
+    NumpadEnter: "NUMENTER",
+  };
+  if (codeMap[code]) {
+    return codeMap[code];
+  }
+
+  let key = event.key.toUpperCase();
+  if (key === " ") {
+    key = "SPACE";
+  }
+  if (key === "ESCAPE") {
+    key = "ESC";
+  }
+  return key;
+}
+
 function normalizeKeyboardEvent(event: KeyboardEvent): string {
   const parts: string[] = [];
   if (event.ctrlKey) {
@@ -161,13 +241,7 @@ function normalizeKeyboardEvent(event: KeyboardEvent): string {
     parts.push("SHIFT");
   }
 
-  let key = event.key.toUpperCase();
-  if (key === " ") {
-    key = "SPACE";
-  }
-  if (key === "ESCAPE") {
-    key = "ESC";
-  }
+  const key = keyboardEventPrimaryKey(event);
   if (["CONTROL", "META", "ALT", "SHIFT"].includes(key)) {
     return parts.join("+");
   }
@@ -300,6 +374,334 @@ function createTrainingDraft(base?: TrainingProfile | null): TrainingProfile {
     piEvalDatasetPath: "/home/pi/lerobot-eval/new-task",
     artifacts: emptyTrainingArtifact(),
   };
+}
+
+function findRecordingPoint(
+  points: RecordingTimelinePoint[],
+  targetS: number,
+): RecordingTimelinePoint | null {
+  if (!points.length) {
+    return null;
+  }
+
+  let low = 0;
+  let high = points.length - 1;
+  const safeTargetS = Math.max(0, targetS);
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const point = points[mid];
+    if (!point) {
+      break;
+    }
+    if (point.tS <= safeTargetS) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return points[Math.max(0, high)] ?? points[0] ?? null;
+}
+
+function evenlySampleTimeline(
+  points: RecordingTimelinePoint[],
+  maxPoints: number,
+): RecordingTimelinePoint[] {
+  if (points.length <= maxPoints) {
+    return points;
+  }
+
+  const sampled: RecordingTimelinePoint[] = [];
+  const lastIndex = points.length - 1;
+  const step = lastIndex / Math.max(maxPoints - 1, 1);
+  let previousIndex = -1;
+
+  for (let index = 0; index < maxPoints; index += 1) {
+    const nextIndex = Math.min(lastIndex, Math.round(index * step));
+    const point = points[nextIndex];
+    if (nextIndex !== previousIndex && point) {
+      sampled.push(point);
+      previousIndex = nextIndex;
+    }
+  }
+
+  const finalPoint = points[lastIndex];
+  if (finalPoint && sampled.at(-1) !== finalPoint) {
+    sampled.push(finalPoint);
+  }
+
+  return sampled;
+}
+
+function formatServoPosition(value: number | undefined): string {
+  return Number.isFinite(value) ? `${value.toFixed(1)} deg` : "n/a";
+}
+
+function recordingTimelineCopy(source: RecordingDetail["timelineSource"]): string {
+  return source === "commands"
+    ? "Using recorded servo command timing for the playhead."
+    : "Legacy recording. The playhead is following follower-state samples because command timestamps were not saved.";
+}
+
+function RecordingPreviewPanel({
+  detail,
+  loading,
+  error,
+  playheadS,
+  playing,
+  trimStartS,
+  trimEndS,
+  onScrub,
+  onTogglePlayback,
+  onReset,
+  onSetTrimStart,
+  onSetTrimEnd,
+}: {
+  detail: RecordingDetail | null;
+  loading: boolean;
+  error: string;
+  playheadS: number;
+  playing: boolean;
+  trimStartS: number;
+  trimEndS: number;
+  onScrub: (timeS: number) => void;
+  onTogglePlayback: () => void;
+  onReset: () => void;
+  onSetTrimStart: () => void;
+  onSetTrimEnd: () => void;
+}) {
+  const timelinePoints = useMemo(
+    () => (detail ? (detail.commandSamples.length ? detail.commandSamples : detail.samples) : []),
+    [detail],
+  );
+  const durationS = detail?.durationS ?? timelinePoints.at(-1)?.tS ?? 0;
+  const sampledPoints = useMemo(() => evenlySampleTimeline(timelinePoints, 260), [timelinePoints]);
+  const currentPoint = useMemo(
+    () => findRecordingPoint(timelinePoints, playheadS),
+    [playheadS, timelinePoints],
+  );
+
+  const displayArmKeys = useMemo(
+    () =>
+      detail?.armKeys.length
+        ? detail.armKeys
+        : ARM_SERVO_IDS.filter((key) => currentPoint?.values[key] !== undefined),
+    [currentPoint?.values, detail?.armKeys],
+  );
+
+  const tracePaths = useMemo(
+    () =>
+      displayArmKeys.map((key) => {
+        const values = sampledPoints.map((point) => point.values[key] ?? 0);
+        const min = values.length ? Math.min(...values) : 0;
+        const max = values.length ? Math.max(...values) : 0;
+        const span = max - min;
+        const points = sampledPoints
+          .map((point) => {
+            const x = durationS > 0 ? (point.tS / durationS) * 100 : 0;
+            const value = point.values[key] ?? 0;
+            const y = span < 1e-6 ? 50 : 92 - (((value - min) / span) * 84);
+            return `${x.toFixed(3)},${y.toFixed(3)}`;
+          })
+          .join(" ");
+        return {
+          key,
+          color: SERVO_TRACE_COLORS[key] ?? "#2563eb",
+          points,
+        };
+      }),
+    [displayArmKeys, durationS, sampledPoints],
+  );
+
+  const safePlayheadS = clampPlaybackTime(playheadS, durationS);
+  const safeTrimStartS = clampPlaybackTime(trimStartS, durationS);
+  const candidateTrimEndS = Number.isFinite(trimEndS) ? trimEndS : durationS;
+  const safeTrimEndS = clampPlaybackTime(candidateTrimEndS, durationS);
+  const effectiveTrimEndS =
+    safeTrimEndS > safeTrimStartS ? safeTrimEndS : durationS;
+  const keepWindowS = Math.max(effectiveTrimEndS - safeTrimStartS, 0);
+  const playheadPct = durationS > 0 ? (safePlayheadS / durationS) * 100 : 0;
+  const trimStartPct = durationS > 0 ? (safeTrimStartS / durationS) * 100 : 0;
+  const trimEndPct = durationS > 0 ? (effectiveTrimEndS / durationS) * 100 : 100;
+
+  const handleSeekFromChart = (event: MouseEvent<HTMLDivElement>) => {
+    if (durationS <= 0) {
+      return;
+    }
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(Math.max((event.clientX - bounds.left) / bounds.width, 0), 1);
+    onScrub(ratio * durationS);
+  };
+
+  return (
+    <div className="recording-preview">
+      <div className="recording-preview-head">
+        <div>
+          <h3>Recording Preview</h3>
+          <p className="card-note">
+            {detail ? recordingTimelineCopy(detail.timelineSource) : "Load a recording to scrub and trim it here."}
+          </p>
+        </div>
+        <div className="button-cluster inline recording-preview-buttons">
+          <button disabled={!detail || durationS <= 0} onClick={onTogglePlayback}>
+            {playing ? "Pause" : "Play"}
+          </button>
+          <button disabled={!detail || durationS <= 0} onClick={onReset}>
+            Restart
+          </button>
+        </div>
+      </div>
+
+      {loading ? <div className="empty-state">Loading recording timeline...</div> : null}
+      {!loading && error ? <div className="empty-state">{error}</div> : null}
+      {!loading && !error && detail && !timelinePoints.length ? (
+        <div className="empty-state">This recording does not contain timeline samples yet.</div>
+      ) : null}
+
+      {!loading && !error && detail && timelinePoints.length ? (
+        <>
+          <div className="recording-preview-chart-shell">
+            <div
+              className="recording-preview-chart"
+              onClick={handleSeekFromChart}
+              role="presentation"
+            >
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                <rect x="0" y="0" width="100" height="100" className="recording-preview-chart-bg" />
+                <rect
+                  x="0"
+                  y="0"
+                  width={trimStartPct}
+                  height="100"
+                  className="recording-preview-chart-mask"
+                />
+                <rect
+                  x={trimEndPct}
+                  y="0"
+                  width={Math.max(100 - trimEndPct, 0)}
+                  height="100"
+                  className="recording-preview-chart-mask"
+                />
+                <rect
+                  x={trimStartPct}
+                  y="0"
+                  width={Math.max(trimEndPct - trimStartPct, 0)}
+                  height="100"
+                  className="recording-preview-chart-window"
+                />
+                {tracePaths.map((trace) =>
+                  trace.points ? (
+                    <polyline
+                      key={trace.key}
+                      fill="none"
+                      points={trace.points}
+                      stroke={trace.color}
+                      strokeWidth="1.4"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  ) : null,
+                )}
+                <line
+                  x1={trimStartPct}
+                  y1="0"
+                  x2={trimStartPct}
+                  y2="100"
+                  className="recording-preview-boundary start"
+                />
+                <line
+                  x1={trimEndPct}
+                  y1="0"
+                  x2={trimEndPct}
+                  y2="100"
+                  className="recording-preview-boundary end"
+                />
+                <line
+                  x1={playheadPct}
+                  y1="0"
+                  x2={playheadPct}
+                  y2="100"
+                  className="recording-preview-playhead"
+                />
+              </svg>
+            </div>
+
+            <div className="recording-preview-stats">
+              <article>
+                <span>Playhead</span>
+                <strong>{formatClockDuration(safePlayheadS)}</strong>
+                <small>{safePlayheadS.toFixed(2)}s</small>
+              </article>
+              <article>
+                <span>Keep Window</span>
+                <strong>{formatClockDuration(keepWindowS)}</strong>
+                <small>
+                  {formatSecondsInput(safeTrimStartS)}s to {formatSecondsInput(effectiveTrimEndS)}s
+                </small>
+              </article>
+              <article>
+                <span>{detail.timelineSource === "commands" ? "Command Points" : "Follower Samples"}</span>
+                <strong>
+                  {detail.timelineSource === "commands"
+                    ? detail.commandSampleCount
+                    : detail.sampleCount}
+                </strong>
+                <small>
+                  {detail.timelineSource === "commands"
+                    ? `${detail.sampleCount} follower samples also recorded`
+                    : "Command timing unavailable in this file"}
+                </small>
+              </article>
+            </div>
+          </div>
+
+          <label className="recording-preview-scrubber">
+            Timeline
+            <input
+              type="range"
+              min="0"
+              max={Math.max(durationS, 0)}
+              step="0.01"
+              value={safePlayheadS}
+              onChange={(event) => onScrub(Number(event.target.value))}
+            />
+          </label>
+
+          <div className="button-cluster inline recording-preview-actions">
+            <button disabled={durationS <= 0} onClick={onSetTrimStart}>
+              Set Trim Start to Playhead
+            </button>
+            <button disabled={durationS <= 0} onClick={onSetTrimEnd}>
+              Set Trim End to Playhead
+            </button>
+          </div>
+
+          <div className="recording-preview-legend">
+            {displayArmKeys.map((key) => (
+              <span key={key} className="recording-preview-legend-item">
+                <span
+                  className="recording-preview-swatch"
+                  style={{ backgroundColor: SERVO_TRACE_COLORS[key] ?? "#2563eb" }}
+                />
+                {labelServo(key)}
+              </span>
+            ))}
+          </div>
+
+          <div className="recording-preview-poses">
+            {displayArmKeys.map((key) => (
+              <article key={key}>
+                <span>{labelServo(key)}</span>
+                <strong>{formatServoPosition(currentPoint?.values[key])}</strong>
+              </article>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 function parsePowerTelemetry(
@@ -544,6 +946,32 @@ function mergeLiveConsoleLines(groups: string[][], count: number): string[] {
     .map((entry) => entry.line);
 }
 
+function preferredLogServiceLabel(services: ServiceSnapshot[]): string {
+  return (
+    services.find((service) => service.state === "running")?.label ??
+    services.find((service) => service.state !== "idle")?.label ??
+    services[0]?.label ??
+    ""
+  );
+}
+
+async function writeClipboardText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
 export default function App() {
   const [state, setState] = useState<DashboardState | null>(null);
   const [activeSection, setActiveSection] = useState<SectionKey>("overview");
@@ -566,8 +994,15 @@ export default function App() {
   const [toast, setToast] = useState<string>("");
   const [backendError, setBackendError] = useState<string>("");
   const [recordingClockMs, setRecordingClockMs] = useState(() => Date.now());
+  const [recordingDetail, setRecordingDetail] = useState<RecordingDetail | null>(null);
+  const [recordingDetailLoading, setRecordingDetailLoading] = useState(false);
+  const [recordingDetailError, setRecordingDetailError] = useState("");
+  const [playbackTimeS, setPlaybackTimeS] = useState(0);
+  const [playbackPlaying, setPlaybackPlaying] = useState(false);
+  const [selectedLogServiceLabel, setSelectedLogServiceLabel] = useState("");
   const toastTimer = useRef<number | null>(null);
   const torqueTimers = useRef<Record<string, number>>({});
+  const playbackAnchorRef = useRef<{ startedAtMs: number; baseTimeS: number } | null>(null);
 
   const loadState = async () => {
     try {
@@ -673,6 +1108,94 @@ export default function App() {
   }, [selectedRecordingEntry?.durationS, selectedRecordingEntry?.path]);
 
   useEffect(() => {
+    if (!selectedRecordingEntry) {
+      setRecordingDetail(null);
+      setRecordingDetailLoading(false);
+      setRecordingDetailError("");
+      setPlaybackPlaying(false);
+      playbackAnchorRef.current = null;
+      setPlaybackTimeS(0);
+      return;
+    }
+
+    const payload: RecordingDetailRequest = {
+      path: selectedRecordingEntry.path,
+    };
+    let cancelled = false;
+
+    setRecordingDetailLoading(true);
+    setRecordingDetailError("");
+    setPlaybackPlaying(false);
+    playbackAnchorRef.current = null;
+    setPlaybackTimeS(0);
+
+    void request<RecordingDetail>("/api/recordings/detail", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+      .then((detail) => {
+        if (cancelled) {
+          return;
+        }
+        setRecordingDetail(detail);
+        setRecordingDetailLoading(false);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setRecordingDetail(null);
+        setRecordingDetailLoading(false);
+        setRecordingDetailError(
+          error instanceof Error ? error.message : "Could not load the recording timeline.",
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRecordingEntry?.modifiedAt, selectedRecordingEntry?.path]);
+
+  useEffect(() => {
+    if (!recordingDetail) {
+      return;
+    }
+
+    setPlaybackTimeS((current) => clampPlaybackTime(current, recordingDetail.durationS));
+  }, [recordingDetail]);
+
+  useEffect(() => {
+    if (!playbackPlaying || !recordingDetail) {
+      return;
+    }
+
+    let frameId = 0;
+    const tick = (now: number) => {
+      const anchor = playbackAnchorRef.current;
+      if (!anchor) {
+        return;
+      }
+
+      const nextTimeS = clampPlaybackTime(
+        anchor.baseTimeS + (now - anchor.startedAtMs) / 1000,
+        recordingDetail.durationS,
+      );
+      setPlaybackTimeS(nextTimeS);
+
+      if (nextTimeS >= recordingDetail.durationS) {
+        playbackAnchorRef.current = null;
+        setPlaybackPlaying(false);
+        return;
+      }
+
+      frameId = window.requestAnimationFrame(tick);
+    };
+
+    frameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [playbackPlaying, recordingDetail]);
+
+  useEffect(() => {
     if (!selectedTrainingProfile) {
       setTrainingDraft(null);
       setTrainingDirty(false);
@@ -726,6 +1249,9 @@ export default function App() {
     }),
     [pinHoldFinal, pinSpeed, replayTarget, selectedRecording],
   );
+  const recordingDurationS = recordingDetail?.durationS ?? selectedRecordingEntry?.durationS ?? 0;
+  const trimStartValueS = parseNumber(trimStartDraft) ?? 0;
+  const trimEndValueS = parseNumber(trimEndDraft) ?? recordingDurationS;
 
   const liveConsoleLines = useMemo(() => {
     if (!state) {
@@ -790,10 +1316,37 @@ export default function App() {
         : [],
     [state],
   );
+  const hotkeysArmed =
+    state?.services.host.state === "running" && state.services.host.mode === "keyboard-control";
+  const warmReplayReady =
+    state?.services.host.state === "running" &&
+    (state.services.host.mode === "control" || state.services.host.mode === "keyboard-control");
+  const warmReplayFromControl =
+    state?.services.host.state === "running" && state.services.host.mode === "control";
 
   const activeSectionMeta = useMemo(
     () => SECTIONS.find((section) => section.key === activeSection) ?? SECTIONS[0],
     [activeSection],
+  );
+
+  useEffect(() => {
+    if (!serviceSnapshots.length) {
+      setSelectedLogServiceLabel("");
+      return;
+    }
+
+    const stillExists = serviceSnapshots.some((service) => service.label === selectedLogServiceLabel);
+    if (!selectedLogServiceLabel || !stillExists) {
+      setSelectedLogServiceLabel(preferredLogServiceLabel(serviceSnapshots));
+    }
+  }, [selectedLogServiceLabel, serviceSnapshots]);
+
+  const selectedLogService = useMemo(
+    () =>
+      serviceSnapshots.find((service) => service.label === selectedLogServiceLabel) ??
+      serviceSnapshots[0] ??
+      null,
+    [selectedLogServiceLabel, serviceSnapshots],
   );
 
   const flashToast = (message: string) => {
@@ -804,6 +1357,54 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(""), 2200);
   };
 
+  const seekPlayback = (nextTimeS: number) => {
+    const clampedTimeS = clampPlaybackTime(nextTimeS, recordingDurationS);
+    setPlaybackTimeS(clampedTimeS);
+    if (playbackPlaying) {
+      playbackAnchorRef.current = {
+        startedAtMs: performance.now(),
+        baseTimeS: clampedTimeS,
+      };
+    }
+  };
+
+  const handleTogglePlayback = () => {
+    if (!recordingDetail || recordingDetail.durationS <= 0) {
+      return;
+    }
+
+    if (playbackPlaying) {
+      playbackAnchorRef.current = null;
+      setPlaybackPlaying(false);
+      return;
+    }
+
+    const nextBaseTimeS =
+      playbackTimeS >= recordingDetail.durationS ? 0 : clampPlaybackTime(playbackTimeS, recordingDetail.durationS);
+    setPlaybackTimeS(nextBaseTimeS);
+    playbackAnchorRef.current = {
+      startedAtMs: performance.now(),
+      baseTimeS: nextBaseTimeS,
+    };
+    setPlaybackPlaying(true);
+  };
+
+  const handleSetTrimStartFromPlayhead = () => {
+    const nextStartS = clampPlaybackTime(playbackTimeS, recordingDurationS);
+    const nextEndS =
+      trimEndValueS > nextStartS ? clampPlaybackTime(trimEndValueS, recordingDurationS) : recordingDurationS;
+    setTrimStartDraft(formatSecondsInput(nextStartS));
+    setTrimEndDraft(formatSecondsInput(nextEndS));
+  };
+
+  const handleSetTrimEndFromPlayhead = () => {
+    const nextEndS = clampPlaybackTime(playbackTimeS, recordingDurationS);
+    const nextStartS =
+      trimStartValueS < nextEndS ? clampPlaybackTime(trimStartValueS, recordingDurationS) : 0;
+    setTrimStartDraft(formatSecondsInput(nextStartS));
+    setTrimEndDraft(formatSecondsInput(nextEndS));
+  };
+
   const handleCopyLiveConsole = async () => {
     const text = liveConsoleLines.join("\n");
     if (!text) {
@@ -812,22 +1413,25 @@ export default function App() {
     }
 
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        textarea.remove();
-      }
+      await writeClipboardText(text);
       flashToast("Live console copied.");
     } catch {
       flashToast("Could not copy live console.");
+    }
+  };
+
+  const handleCopySelectedLogs = async () => {
+    const text = selectedLogService?.logs.join("\n") ?? "";
+    if (!text) {
+      flashToast("No selected log output to copy.");
+      return;
+    }
+
+    try {
+      await writeClipboardText(text);
+      flashToast(`${selectedLogService?.label ?? "Process"} logs copied.`);
+    } catch {
+      flashToast("Could not copy the selected logs.");
     }
   };
 
@@ -1213,12 +1817,26 @@ export default function App() {
                   Stop Control
                 </button>
                 <button
+                  disabled={disabled || hotkeysArmed}
+                  onClick={() => void mutate("start-hotkeys", "/api/robot/start-hotkeys", { method: "POST" })}
+                >
+                  Arm Hotkeys
+                </button>
+                <button
                   className="danger"
                   disabled={disabled}
                   onClick={() => void mutate("emergency-stop", "/api/robot/emergency-stop", { method: "POST" })}
                 >
                   Emergency Stop + Torque Off
                 </button>
+              </div>
+              <div className="mode-strip">
+                <span className={`status-pill ${hotkeysArmed ? "good" : "muted"}`}>
+                  {hotkeysArmed ? "hotkeys armed" : "hotkeys disarmed"}
+                </span>
+                <p className="card-note">
+                  Arm hotkeys keeps the Pi host live without leader teleop so pinned Pi replays can start immediately.
+                </p>
               </div>
 
               <div className="calibration-panel">
@@ -1428,6 +2046,19 @@ export default function App() {
                 </p>
               </div>
 
+              <div className="mode-strip compact">
+                <span className={`status-pill ${warmReplayReady ? "good" : "muted"}`}>
+                  {warmReplayReady ? "No-drop Pi replay ready" : "No-drop Pi replay inactive"}
+                </span>
+                <p className="card-note">
+                  {warmReplayFromControl
+                    ? "Replay Selected stops the leader relay and runs the saved motion on the already-connected Pi host."
+                    : warmReplayReady
+                      ? "Pinned Pi replays will use the warm host instead of launching a fresh remote replay process."
+                      : "Start Control or Arm Hotkeys first if you want Pi replays to keep the robot host connected."}
+                </p>
+              </div>
+
               <div className="record-toolbar">
                 <label>
                   Recording label
@@ -1550,6 +2181,20 @@ export default function App() {
                       Save Name
                     </button>
                   </div>
+                  <RecordingPreviewPanel
+                    detail={recordingDetail}
+                    loading={recordingDetailLoading}
+                    error={recordingDetailError}
+                    playheadS={playbackTimeS}
+                    playing={playbackPlaying}
+                    trimStartS={trimStartValueS}
+                    trimEndS={trimEndValueS}
+                    onScrub={seekPlayback}
+                    onTogglePlayback={handleTogglePlayback}
+                    onReset={() => seekPlayback(0)}
+                    onSetTrimStart={handleSetTrimStartFromPlayhead}
+                    onSetTrimEnd={handleSetTrimEndFromPlayhead}
+                  />
                   <div className="recording-trim-editor">
                     <div className="form-grid compact">
                       <label>
@@ -1577,7 +2222,7 @@ export default function App() {
                     </div>
                     <div className="trim-editor-actions">
                       <p className="card-note">
-                        Keep only the action window. This updates the selected recording in place.
+                        Scrub the preview, set trim start and end from the playhead, then keep only that action window.
                       </p>
                       <button
                         disabled={
@@ -1691,10 +2336,30 @@ export default function App() {
                   <p className="card-kicker">Pinned Moves</p>
                   <h2>Keyboard Launch Pad</h2>
                 </div>
-                <p className="card-note">
-                  Hotkeys fire when the page is focused and you are not typing in a field.
-                </p>
+                <div className="pin-head-actions">
+                  <span className={`status-pill ${hotkeysArmed ? "good" : "muted"}`}>
+                    {hotkeysArmed ? "instant Pi hotkeys ready" : "Pi hotkeys not armed"}
+                  </span>
+                  <div className="button-cluster inline">
+                    <button
+                      className="primary"
+                      disabled={disabled || hotkeysArmed}
+                      onClick={() => void mutate("start-hotkeys", "/api/robot/start-hotkeys", { method: "POST" })}
+                    >
+                      Arm Hotkeys
+                    </button>
+                    <button
+                      disabled={disabled || !hotkeysArmed}
+                      onClick={() => void mutate("stop-control", "/api/robot/stop-control", { method: "POST" })}
+                    >
+                      Disarm
+                    </button>
+                  </div>
+                </div>
               </div>
+              <p className="card-note">
+                Hotkeys fire when the page is focused and you are not typing in a field. Arm hotkeys to keep the Pi ready for fast pinned-move launches.
+              </p>
               <div className="pin-grid">
                 {state?.pinnedMoves.length ? (
                   state.pinnedMoves.map((move) => (
@@ -2292,32 +2957,81 @@ export default function App() {
                   Raw stdout and stderr from the Pi host, teleop process, replay runner, and calibration commands.
                 </p>
               </div>
-              <PowerTelemetryPanel
-                telemetry={powerTelemetry}
-                torqueLimits={torqueLimits}
-                controlsDisabled={disabled}
-                onTorqueLimitChange={handleTorqueLimitChange}
-              />
-              <div className="log-grid">
-                {state
-                  ? serviceSnapshots.map(
-                      (service) => (
-                        <div key={service.label} className="log-panel">
-                          <div className="log-panel-head">
-                            <h3>{service.label}</h3>
-                            <span className={`status-pill ${statusTone(service.state)}`}>
-                              {service.state}
-                            </span>
-                          </div>
-                          <pre>
-                            {service.logs.length
-                              ? service.logs.join("\n")
-                              : "No logs yet."}
-                          </pre>
-                        </div>
-                      ),
-                    )
-                  : null}
+
+              <div className="logs-shell">
+                <div className="logs-service-list">
+                  {serviceSnapshots.map((service) => (
+                    <button
+                      key={service.label}
+                      className={
+                        service.label === selectedLogService?.label
+                          ? "logs-service-button active"
+                          : "logs-service-button"
+                      }
+                      onClick={() => setSelectedLogServiceLabel(service.label)}
+                    >
+                      <div className="logs-service-row">
+                        <strong>{service.label}</strong>
+                        <span className={`status-pill ${statusTone(service.state)}`}>
+                          {service.state}
+                        </span>
+                      </div>
+                      <span className="logs-service-detail">{service.detail}</span>
+                      <span className="logs-service-meta">
+                        {service.logs.length} line{service.logs.length === 1 ? "" : "s"} •{" "}
+                        {service.mode ?? "no mode"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="logs-viewer">
+                  <div className="logs-viewer-head">
+                    <div>
+                      <p className="card-kicker">Selected Process</p>
+                      <h3>{selectedLogService?.label ?? "No process selected"}</h3>
+                      <p className="card-note">
+                        {selectedLogService?.detail ?? "Choose a process from the left to inspect its output."}
+                      </p>
+                    </div>
+                    <div className="inline-console-actions">
+                      <button
+                        className="console-copy-button"
+                        disabled={!selectedLogService?.logs.length}
+                        onClick={() => void handleCopySelectedLogs()}
+                      >
+                        Copy Selected Logs
+                      </button>
+                      <span className={`status-pill ${statusTone(selectedLogService?.state ?? "idle")}`}>
+                        {selectedLogService?.state ?? "idle"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="logs-viewer-meta">
+                    <span>Mode: {selectedLogService?.mode ?? "none"}</span>
+                    <span>Started: {prettyTimestamp(selectedLogService?.startedAt ?? null)}</span>
+                    <span>PID / Exit: {selectedLogService?.pid ?? "n/a"} / {selectedLogService?.exitCode ?? "n/a"}</span>
+                  </div>
+                  <pre className="logs-viewer-pre">
+                    {selectedLogService?.logs.length
+                      ? selectedLogService.logs.join("\n")
+                      : "No logs yet."}
+                  </pre>
+                </div>
+              </div>
+
+              <div className="activity-feed">
+                <div className="log-panel-head">
+                  <h3>Backend Activity</h3>
+                  <span className={`status-pill ${pendingAction ? "warn" : "muted"}`}>
+                    {pendingAction ? `running: ${pendingAction}` : "idle"}
+                  </span>
+                </div>
+                <pre>
+                  {state?.activityLog.length
+                    ? state.activityLog.join("\n")
+                    : "No backend activity yet."}
+                </pre>
               </div>
             </section>
           )}

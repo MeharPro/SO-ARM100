@@ -42,6 +42,8 @@ import type {
   DeleteTrainingProfileRequest,
   LeaderStatus,
   PinnedMove,
+  RecordingDetail,
+  RecordingDetailRequest,
   RenameRecordingRequest,
   RecordingEntry,
   ReplayRequest,
@@ -169,6 +171,7 @@ export class RobotController {
   private queue: Promise<void> = Promise.resolve();
   private readonly remoteHelperSyncCache = new Map<string, string>();
   private readonly remoteTorqueCache = new Map<string, string>();
+  private coupledTeleopCleanup: Promise<void> | null = null;
 
   async getState(): Promise<DashboardState> {
     const { settings, pinnedMoves, training } = this.configStore.getConfig();
@@ -199,6 +202,10 @@ export class RobotController {
 
     const selectedProfile =
       trainingConfig.profiles.find((profile) => profile.id === trainingConfig.selectedProfileId) ?? null;
+    const hostSnapshot = this.hostRunner.getSnapshot();
+    const teleopSnapshot = this.teleopRunner.getSnapshot();
+    this.maybeCleanupCoupledTeleopFailure(hostSnapshot, teleopSnapshot);
+    const warmHostReplaySnapshot = this.deriveWarmHostReplaySnapshot(hostSnapshot);
 
     return {
       settings,
@@ -215,11 +222,12 @@ export class RobotController {
       lastError: this.lastError,
       activityLog: [...this.activityLog],
       services: {
-        host: this.hostRunner.getSnapshot(),
-        teleop: this.teleopRunner.getSnapshot(),
+        host: hostSnapshot,
+        teleop: teleopSnapshot,
         replay: this.pickServiceSnapshot(
           this.replayRunner.getSnapshot(),
           this.localReplayRunner.getSnapshot(),
+          warmHostReplaySnapshot,
         ),
         piCalibration: this.piCalibrationRunner.getSnapshot(),
         macCalibration: this.macCalibrationRunner.getSnapshot(),
@@ -373,6 +381,7 @@ export class RobotController {
                 leaderPort: leader.expectedPort,
               },
             );
+            await this.waitForLocalProcessReady("Mac teleop", this.teleopRunner);
           }
         } catch (error) {
           await this.datasetCaptureRunner.stop("Training dataset capture failed to launch.");
@@ -688,9 +697,10 @@ export class RobotController {
       await this.hostRunner.stop("Restarting Pi host.");
       await this.piCalibrationRunner.stop("Live control needs the robot exclusively.");
       await this.macCalibrationRunner.stop("Live control needs the leader arm exclusively.");
+      await this.clearRemoteHostCommand(settings, host);
 
       await this.hostRunner.start(
-        this.buildHostScript(settings),
+        this.buildHostScript(settings, true),
         this.toConnectConfig(settings, host),
         "control",
         { host },
@@ -699,10 +709,45 @@ export class RobotController {
       try {
         await this.waitForHostReady(host, "Pi host");
         await this.teleopRunner.start(this.buildTeleopScript(settings, host, leader), "control");
+        await this.waitForLocalProcessReady("Mac teleop", this.teleopRunner);
       } catch (error) {
         await this.hostRunner.stop("Teleop failed to launch, stopping the Pi host.");
         throw error;
       }
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async startKeyboardControl(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      this.logActivity("Keyboard hotkey host requested.");
+      const host = await this.preparePi(settings, "arm keyboard hotkeys");
+
+      assertHelperExists(HOST_SCRIPT);
+      assertHelperExists(POWER_SCRIPT);
+      assertHelperExists(RUNTIME_SCRIPT);
+      await this.ensureRemoteHelpers(settings, host);
+      await this.writeRemoteTorqueLimits(settings, host);
+
+      await this.stopRobotExclusiveProcesses("Preparing keyboard-ready hotkey host.");
+      await this.clearRemoteHostCommand(settings, host);
+
+      await this.hostRunner.start(
+        this.buildHostScript(settings, true),
+        this.toConnectConfig(settings, host),
+        "keyboard-control",
+        { host, hotkeysArmed: true },
+      );
+
+      try {
+        await this.waitForHostReady(host, "Keyboard hotkey host");
+      } catch (error) {
+        await this.hostRunner.stop("Keyboard hotkey host failed to launch.");
+        throw error;
+      }
+
       this.lastError = null;
       return this.getState();
     });
@@ -891,6 +936,7 @@ export class RobotController {
       try {
         await this.waitForHostReady(host, "Recorder");
         await this.teleopRunner.start(this.buildTeleopScript(settings, host, leader), "recording");
+        await this.waitForLocalProcessReady("Mac teleop", this.teleopRunner);
       } catch (error) {
         await this.hostRunner.stop("Teleop failed to launch, stopping the recorder.");
         throw error;
@@ -935,6 +981,18 @@ export class RobotController {
       this.lastError = null;
       return this.getState();
     });
+  }
+
+  async getRecordingDetail(payload: RecordingDetailRequest): Promise<RecordingDetail> {
+    const { settings } = this.configStore.getConfig();
+    const recordingPath = payload.path.trim();
+    if (!recordingPath) {
+      throw new Error("Choose a recording first.");
+    }
+
+    this.logActivity(`Loading recording detail for ${recordingPath}.`);
+    const host = await this.preparePi(settings, "inspect recording");
+    return this.readRecordingDetail(settings, host, recordingPath);
   }
 
   async renameRecording(payload: RenameRecordingRequest): Promise<DashboardState> {
@@ -1000,10 +1058,30 @@ export class RobotController {
         `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}.`,
       );
 
-      await this.teleopRunner.stop("Replay takes control away from teleop.");
-      await this.hostRunner.stop("Replay needs exclusive access.");
       await this.replayRunner.stop("Restarting replay.");
       await this.localReplayRunner.stop("Restarting replay.");
+      await this.stopWarmHostReplay(settings, "Restarting warm-host replay.");
+
+      if (this.canUseWarmHostReplay(replay)) {
+        const host = this.getActiveHostAddress();
+        if (!host) {
+          throw new Error("The running Pi host is active, but its address is unavailable.");
+        }
+
+        await this.teleopRunner.stop("Switching from leader control to Pi replay.");
+        await this.piCalibrationRunner.stop("Replay needs the robot exclusively.");
+        await this.macCalibrationRunner.stop("Replay requested.");
+        await this.datasetCaptureRunner.stop("Replay needs the robot exclusively.");
+        await this.localDatasetCaptureRunner.stop("Replay needs the robot exclusively.");
+        await this.policyEvalRunner.stop("Replay needs the robot exclusively.");
+        await this.sendWarmHostReplay(settings, host, replay);
+
+        this.lastError = null;
+        return this.getState();
+      }
+
+      await this.teleopRunner.stop("Replay takes control away from teleop.");
+      await this.hostRunner.stop("Replay needs exclusive access.");
       await this.piCalibrationRunner.stop("Replay needs the robot exclusively.");
       await this.macCalibrationRunner.stop("Replay requested.");
       await this.datasetCaptureRunner.stop("Replay needs the robot exclusively.");
@@ -1055,6 +1133,7 @@ export class RobotController {
       this.logActivity("Stop replay requested.");
       await this.replayRunner.stop("Stopping replay.");
       await this.localReplayRunner.stop("Stopping replay.");
+      await this.stopWarmHostReplay(this.configStore.getConfig().settings, "Stopping warm-host replay.");
       this.lastError = null;
       return this.getState();
     });
@@ -1199,6 +1278,58 @@ export class RobotController {
     );
   }
 
+  private async waitForLocalProcessReady(
+    label: string,
+    runner: LocalProcessRunner,
+    timeoutMs = 1500,
+  ): Promise<void> {
+    const exited = await runner.waitForExit(timeoutMs);
+    if (exited) {
+      throw new Error(this.formatStartupExit(label, exited));
+    }
+  }
+
+  private maybeCleanupCoupledTeleopFailure(
+    hostSnapshot: ServiceSnapshot,
+    teleopSnapshot: ServiceSnapshot,
+  ): void {
+    if (this.coupledTeleopCleanup) {
+      return;
+    }
+
+    if (teleopSnapshot.state !== "error") {
+      return;
+    }
+
+    if (hostSnapshot.state !== "running") {
+      return;
+    }
+
+    if (hostSnapshot.mode !== teleopSnapshot.mode) {
+      return;
+    }
+
+    if (hostSnapshot.mode !== "control" && hostSnapshot.mode !== "recording") {
+      return;
+    }
+
+    const reason =
+      hostSnapshot.mode === "recording"
+        ? "Mac teleop failed; stopping the recorder."
+        : "Mac teleop failed; stopping the Pi host.";
+    this.logActivity(`${reason} ${teleopSnapshot.detail}`);
+
+    this.coupledTeleopCleanup = this.runExclusive(async () => {
+      await this.hostRunner.stop(reason);
+    })
+      .catch((error) => {
+        this.noteError(error);
+      })
+      .finally(() => {
+        this.coupledTeleopCleanup = null;
+      });
+  }
+
   private formatStartupExit(label: string, snapshot: ServiceSnapshot): string {
     const exit =
       snapshot.exitCode === null ? "" : ` with code ${snapshot.exitCode}`;
@@ -1219,6 +1350,75 @@ export class RobotController {
     const motorId = cleaned.match(/id_=(\d+)/)?.[1];
     const motorName = motorId ? LEKIWI_MOTOR_NAMES_BY_ID[motorId] : null;
     return motorName ? `${cleaned} Motor id ${motorId} is ${motorName}.` : cleaned;
+  }
+
+  private deriveWarmHostReplaySnapshot(hostSnapshot: ServiceSnapshot): ServiceSnapshot {
+    const replayLogs = hostSnapshot.logs.filter((line) => line.includes("[replay]"));
+    const inlineReplayReady =
+      hostSnapshot.state === "running" && this.hostSupportsInlineReplay(hostSnapshot.mode);
+    const baseDetail =
+      inlineReplayReady
+        ? hostSnapshot.mode === "control"
+          ? "Live control host ready for torque-preserving Pi replay handoff."
+          : "Hotkey host armed for instant Pi replays."
+        : "No warm-host replay activity yet.";
+    const lastStartIndex = this.findLastLogIndex(hostSnapshot.logs, /\[replay\] start\b/);
+    const lastEndIndex = this.findLastLogIndex(
+      hostSnapshot.logs,
+      /\[replay\] (complete|stopped|interrupted|error)\b/,
+    );
+    const active = lastStartIndex !== -1 && lastStartIndex > lastEndIndex;
+    const lastReplayLine =
+      hostSnapshot.logs[Math.max(lastStartIndex, lastEndIndex)] ?? replayLogs.at(-1) ?? null;
+    const state: ServiceSnapshot["state"] =
+      active ? "running" : lastReplayLine?.includes("[replay] error") ? "error" : "idle";
+
+    return {
+      label: "Replay",
+      state,
+      detail: lastReplayLine ? this.cleanServiceLogLine(lastReplayLine) : baseDetail,
+      pid: hostSnapshot.pid,
+      exitCode: null,
+      startedAt:
+        lastStartIndex === -1 ? null : this.parseServiceLogTimestamp(hostSnapshot.logs[lastStartIndex]),
+      stoppedAt:
+        active || lastEndIndex === -1 ? null : this.parseServiceLogTimestamp(hostSnapshot.logs[lastEndIndex]),
+      mode: active ? "replay" : inlineReplayReady ? hostSnapshot.mode : null,
+      logs: replayLogs.slice(-60),
+      meta: {
+        transport: "warm-host",
+        host: this.getActiveHostAddress(),
+      },
+    };
+  }
+
+  private findLastLogIndex(lines: string[], pattern: RegExp): number {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (pattern.test(lines[index])) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  private cleanServiceLogLine(line: string): string {
+    return line.replace(/^\d{1,2}:\d{2}:\d{2}\s[AP]M\s\[[^\]]+\]\s*/, "");
+  }
+
+  private parseServiceLogTimestamp(line: string): string | null {
+    const match = line.match(/^(\d{1,2}):(\d{2}):(\d{2})\s(AM|PM)\b/);
+    if (!match) {
+      return null;
+    }
+
+    let hours = Number(match[1]) % 12;
+    if (match[4] === "PM") {
+      hours += 12;
+    }
+
+    const stamp = new Date();
+    stamp.setHours(hours, Number(match[2]), Number(match[3]), 0);
+    return stamp.toISOString();
   }
 
   private pickServiceSnapshot(...snapshots: ServiceSnapshot[]): ServiceSnapshot {
@@ -1316,6 +1516,10 @@ export class RobotController {
 
   private getRemoteTorqueLimitsPath(settings: AppSettings): string {
     return `${settings.pi.remoteHelperDir}/torque_limits.json`;
+  }
+
+  private getRemoteHostCommandPath(settings: AppSettings): string {
+    return `${settings.pi.remoteHelperDir}/host_command.json`;
   }
 
   private clampTorqueLimit(value: unknown): number {
@@ -1442,7 +1646,10 @@ JSON
     }
   }
 
-  private buildHostScript(settings: AppSettings): string {
+  private buildHostScript(settings: AppSettings, includeUiCommandPath = false): string {
+    const uiCommandFlag = includeUiCommandPath
+      ? ` \\\n  --ui-command-path ${shellQuote(this.getRemoteHostCommandPath(settings))}`
+      : "";
     return [
       this.buildPiActivation(settings),
       `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_host.py`)} \\`,
@@ -1455,7 +1662,7 @@ JSON
       `  --torque-limits-path ${shellQuote(this.getRemoteTorqueLimitsPath(settings))} \\`,
       `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
-      `  --enable-base false`,
+      `  --enable-base false${uiCommandFlag}`,
     ].join("\n");
   }
 
@@ -1599,6 +1806,109 @@ PY
 `.trim();
   }
 
+  private canUseWarmHostReplay(replay: ReplayRequest): boolean {
+    const hostSnapshot = this.hostRunner.getSnapshot();
+    return (
+      replay.target === "pi" &&
+      hostSnapshot.state === "running" &&
+      this.hostSupportsInlineReplay(hostSnapshot.mode)
+    );
+  }
+
+  private hostSupportsInlineReplay(mode: string | null): boolean {
+    return mode === "control" || mode === "keyboard-control";
+  }
+
+  private getActiveHostAddress(): string | null {
+    const hostSnapshot = this.hostRunner.getSnapshot();
+    const metaHost =
+      typeof hostSnapshot.meta.host === "string" && hostSnapshot.meta.host.trim()
+        ? hostSnapshot.meta.host.trim()
+        : null;
+    return metaHost ?? this.lastResolvedHost;
+  }
+
+  private async sendWarmHostReplay(
+    settings: AppSettings,
+    host: string,
+    replay: ReplayRequest,
+  ): Promise<void> {
+    await this.writeRemoteHostCommand(settings, host, {
+      command: "replay",
+      trajectoryPath: replay.trajectoryPath,
+      speed: replay.speed,
+      holdFinalS: replay.holdFinalS,
+      includeBase: replay.includeBase,
+    });
+    this.logActivity(`Queued replay command on the warm host at ${host}.`);
+  }
+
+  private async stopWarmHostReplay(settings: AppSettings, reason: string): Promise<void> {
+    const hostSnapshot = this.hostRunner.getSnapshot();
+    if (
+      hostSnapshot.state !== "running" ||
+      !this.hostSupportsInlineReplay(hostSnapshot.mode)
+    ) {
+      return;
+    }
+
+    const host = this.getActiveHostAddress();
+    if (!host) {
+      return;
+    }
+
+    await this.writeRemoteHostCommand(settings, host, {
+      command: "stop-replay",
+    }).catch(() => undefined);
+    this.logActivity(reason);
+  }
+
+  private async writeRemoteHostCommand(
+    settings: AppSettings,
+    host: string,
+    command:
+      | {
+          command: "replay";
+          trajectoryPath: string;
+          speed: number;
+          holdFinalS: number;
+          includeBase: boolean;
+        }
+      | { command: "stop-replay" },
+  ): Promise<void> {
+    const commandPath = this.getRemoteHostCommandPath(settings);
+    const payload =
+      command.command === "replay"
+        ? {
+            command: "replay",
+            trajectory_path: command.trajectoryPath,
+            speed: command.speed,
+            hold_final_s: command.holdFinalS,
+            include_base: command.includeBase,
+            requested_at: new Date().toISOString(),
+          }
+        : {
+            command: "stop-replay",
+            requested_at: new Date().toISOString(),
+          };
+    const serialized = JSON.stringify(payload);
+    const script = `
+mkdir -p ${shellQuote(path.posix.dirname(commandPath))}
+cat > ${shellQuote(commandPath)} <<'JSON'
+${serialized}
+JSON
+`.trim();
+    await this.execRemoteScript(script, host, settings);
+  }
+
+  private async clearRemoteHostCommand(settings: AppSettings, host: string): Promise<void> {
+    await this.execRemoteScript(
+      `rm -f ${shellQuote(this.getRemoteHostCommandPath(settings))}`,
+      host,
+      settings,
+    );
+  }
+
   private async ensureRemoteHelpers(settings: AppSettings, host: string): Promise<void> {
     const helperDir = `${settings.pi.remoteHelperDir}/scripts`;
     const fingerprintPath = `${settings.pi.remoteHelperDir}/.ui-helper-sync`;
@@ -1709,6 +2019,88 @@ PY
 
     const { stdout } = await this.execRemoteScript(script, host, settings);
     return JSON.parse(stdout) as RecordingEntry[];
+  }
+
+  private async readRecordingDetail(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+  ): Promise<RecordingDetail> {
+    const script = `
+export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
+export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
+path = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser().resolve()
+
+if root not in path.parents:
+    raise SystemExit("Recording path is outside the trajectory directory.")
+if not path.is_file():
+    raise SystemExit(f"Recording does not exist: {path}")
+
+payload = json.loads(path.read_text())
+if not isinstance(payload, dict):
+    raise SystemExit("Recording payload is invalid.")
+
+arm_keys = [key for key in payload.get("arm_state_keys", []) if isinstance(key, str)]
+base_keys = [key for key in payload.get("base_state_keys", []) if isinstance(key, str)]
+keys = arm_keys + base_keys
+
+def normalize_points(items, value_key):
+    points = []
+    if not isinstance(items, list):
+        return points
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_t_s = item.get("t_s")
+        raw_values = item.get(value_key)
+        if not isinstance(raw_t_s, (int, float)) or not isinstance(raw_values, dict):
+            continue
+        point = {}
+        for key in keys:
+            value = raw_values.get(key)
+            point[key] = float(value) if isinstance(value, (int, float)) else 0.0
+        points.append({"tS": round(float(raw_t_s), 6), "values": point})
+    return points
+
+samples = normalize_points(payload.get("samples"), "state")
+command_samples = normalize_points(payload.get("command_samples"), "action")
+
+raw_duration = payload.get("duration_s")
+if isinstance(raw_duration, (int, float)):
+    duration_s = float(raw_duration)
+elif samples:
+    duration_s = float(samples[-1]["tS"])
+elif command_samples:
+    duration_s = float(command_samples[-1]["tS"])
+else:
+    duration_s = 0.0
+
+print(
+    json.dumps(
+        {
+            "path": str(path),
+            "durationS": round(duration_s, 6),
+            "sampleCount": len(samples),
+            "commandSampleCount": len(command_samples),
+            "armKeys": arm_keys,
+            "baseKeys": base_keys,
+            "timelineSource": "commands" if command_samples else "state",
+            "samples": samples,
+            "commandSamples": command_samples,
+        }
+    )
+)
+PY
+`.trim();
+
+    const { stdout } = await this.execRemoteScript(script, host, settings);
+    return JSON.parse(stdout) as RecordingDetail;
   }
 
   private async downloadRemoteRecordingToLocal(
@@ -1929,26 +2321,34 @@ samples = payload.get("samples")
 if not isinstance(samples, list) or not samples:
     raise SystemExit("Recording does not contain any samples.")
 
-trimmed = []
-for sample in samples:
-    if not isinstance(sample, dict):
-        continue
-    sample_t_s = sample.get("t_s")
-    if not isinstance(sample_t_s, (int, float)):
-        continue
-    sample_t_s = float(sample_t_s)
-    if trim_start_s <= sample_t_s <= trim_end_s:
-        trimmed.append(
-            {
-                **sample,
-                "t_s": round(sample_t_s - trim_start_s, 6),
-            }
-        )
+def trim_points(items):
+    trimmed_items = []
+    if not isinstance(items, list):
+        return trimmed_items
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_t_s = item.get("t_s")
+        if not isinstance(item_t_s, (int, float)):
+            continue
+        item_t_s = float(item_t_s)
+        if trim_start_s <= item_t_s <= trim_end_s:
+            trimmed_items.append(
+                {
+                    **item,
+                    "t_s": round(item_t_s - trim_start_s, 6),
+                }
+            )
+    return trimmed_items
+
+trimmed = trim_points(samples)
 
 if not trimmed:
     raise SystemExit("Trim range does not include any recorded samples.")
 
 payload["samples"] = trimmed
+if "command_samples" in payload:
+    payload["command_samples"] = trim_points(payload.get("command_samples"))
 payload["duration_s"] = round(float(trimmed[-1]["t_s"]), 6)
 path.write_text(json.dumps(payload, indent=2) + "\\n")
 PY

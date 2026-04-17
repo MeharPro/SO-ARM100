@@ -141,6 +141,27 @@ export interface RecordingEntry {
   durationS: number | null;
 }
 
+export interface RecordingDetailRequest {
+  path: string;
+}
+
+export interface RecordingTimelinePoint {
+  tS: number;
+  values: Record<string, number>;
+}
+
+export interface RecordingDetail {
+  path: string;
+  durationS: number;
+  sampleCount: number;
+  commandSampleCount: number;
+  armKeys: string[];
+  baseKeys: string[];
+  timelineSource: "commands" | "state";
+  samples: RecordingTimelinePoint[];
+  commandSamples: RecordingTimelinePoint[];
+}
+
 export interface RenameRecordingRequest {
   path: string;
   label: string;

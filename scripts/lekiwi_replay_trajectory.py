@@ -189,7 +189,12 @@ def main() -> None:
     finally:
         try:
             if last_action is not None:
-                robot.send_action({**{key: last_action[key] for key in ARM_STATE_KEYS}, **dict.fromkeys(BASE_STATE_KEYS, 0.0)})
+                robot.send_action(
+                    {
+                        **{key: last_action[key] for key in ARM_STATE_KEYS},
+                        **dict.fromkeys(BASE_STATE_KEYS, 0.0),
+                    }
+                )
             else:
                 robot.stop_base()
         except Exception:

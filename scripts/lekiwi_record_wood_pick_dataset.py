@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 
 import argparse
-import glob
 import os
 import shutil
 import time
 from pathlib import Path
 
+from lekiwi_leader_support import (
+    connect_leader_noninteractive,
+    detect_leader_port,
+    disconnect_device_safely,
+)
 from lerobot.datasets.feature_utils import build_dataset_frame
 from lerobot.datasets.feature_utils import hw_to_dataset_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -48,45 +52,6 @@ def is_incomplete_empty_dataset_root(dataset_root: Path) -> bool:
 
     all_files = [path for path in dataset_root.rglob("*") if path.is_file()]
     return all_files == [meta_info_path]
-
-
-def detect_leader_port() -> str:
-    candidates = sorted(
-        set(glob.glob("/dev/tty.usbmodem*"))
-        | set(glob.glob("/dev/tty.usbserial*"))
-        | set(glob.glob("/dev/cu.usbmodem*"))
-        | set(glob.glob("/dev/cu.usbserial*"))
-    )
-    if not candidates:
-        raise SystemExit(
-            "No leader-arm serial port found. Plug the leader arm into the Mac and rerun, "
-            "or pass --leader-port explicitly."
-        )
-
-    grouped: dict[str, list[str]] = {}
-    for path in candidates:
-        name = os.path.basename(path)
-        if name.startswith("tty."):
-            key = name.removeprefix("tty.")
-        elif name.startswith("cu."):
-            key = name.removeprefix("cu.")
-        else:
-            key = name
-        grouped.setdefault(key, []).append(path)
-
-    deduped = []
-    for key in sorted(grouped):
-        paths = sorted(grouped[key])
-        tty_path = next((p for p in paths if os.path.basename(p).startswith("tty.")), None)
-        deduped.append(tty_path or paths[0])
-
-    if len(deduped) == 1:
-        return deduped[0]
-
-    raise SystemExit(
-        "More than one leader-arm serial port was found. Re-run with --leader-port set to one of:\n"
-        + "\n".join(deduped)
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -201,7 +166,7 @@ def free_teach_record_loop(
 
 def main() -> None:
     args = parse_args()
-    leader_port = None if args.arm_free_teach else (args.leader_port or detect_leader_port())
+    leader_port = None if args.arm_free_teach else detect_leader_port(args.leader_port)
     dataset_root = Path(args.dataset_root).expanduser()
     dataset_root.parent.mkdir(parents=True, exist_ok=True)
 
@@ -291,7 +256,14 @@ def main() -> None:
 
     robot.connect()
     if leader_arm is not None:
-        leader_arm.connect()
+        connect_leader_noninteractive(
+            leader_arm,
+            calibrate_hint=(
+                "Run the dashboard's Mac calibration, or run "
+                "`lerobot-calibrate --teleop.type=so101_leader --teleop.port <port> --teleop.id "
+                f"{args.leader_id}`."
+            ),
+        )
     keyboard.connect()
 
     listener, events = init_keyboard_listener()
@@ -377,12 +349,9 @@ def main() -> None:
                     )
     finally:
         log_say("Stop recording")
-        if robot.is_connected:
-            robot.disconnect()
-        if leader_arm is not None and leader_arm.is_connected:
-            leader_arm.disconnect()
-        if keyboard.is_connected:
-            keyboard.disconnect()
+        disconnect_device_safely(robot, "LeKiwi client")
+        disconnect_device_safely(leader_arm, "leader arm")
+        disconnect_device_safely(keyboard, "keyboard teleop")
         listener.stop()
 
         dataset.finalize()
