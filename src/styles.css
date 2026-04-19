@@ -602,6 +602,12 @@ code {
   background: var(--surface);
 }
 
+.servo-controls {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
 .servo-torque-control {
   display: grid;
   grid-template-columns: auto minmax(72px, 1fr) 38px;
@@ -614,6 +620,13 @@ code {
   width: 100%;
   min-width: 0;
   accent-color: var(--accent);
+}
+
+.servo-calibrate-button {
+  min-height: 34px;
+  justify-self: start;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.82rem;
 }
 
 .servo-temperature.good strong {

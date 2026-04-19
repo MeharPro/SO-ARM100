@@ -17,18 +17,113 @@ ARM_MOTORS = (
 
 TORQUE_LIMIT_MIN = 0
 TORQUE_LIMIT_MAX = 1000
+ARM_STATE_KEYS = tuple(f"{motor}.pos" for motor in ARM_MOTORS)
+WRIST_ROLL_KEY = "arm_wrist_roll.pos"
+GRIPPER_KEY = "arm_gripper.pos"
+
+DEFAULT_SAFER_ARM_MAX_STEP = {
+    "arm_shoulder_pan.pos": 8.0,
+    "arm_shoulder_lift.pos": 8.0,
+    "arm_elbow_flex.pos": 8.0,
+    "arm_wrist_flex.pos": 10.0,
+    "arm_wrist_roll.pos": 12.0,
+    "arm_gripper.pos": 2.0,
+}
+DEFAULT_SAFER_MAX_RELATIVE_TARGET = {
+    "arm_shoulder_pan.pos": 10.0,
+    "arm_shoulder_lift.pos": 10.0,
+    "arm_elbow_flex.pos": 10.0,
+    "arm_wrist_flex.pos": 12.0,
+    "arm_wrist_roll.pos": 14.0,
+    "arm_gripper.pos": 3.0,
+}
+SAFE_ABSOLUTE_POSITION_LIMITS = {
+    GRIPPER_KEY: (0.0, 85.0),
+}
+RECOMMENDED_ARM_TORQUE_LIMITS = {
+    "arm_shoulder_pan": 500,
+    "arm_shoulder_lift": 650,
+    "arm_elbow_flex": 600,
+    "arm_wrist_flex": 450,
+    "arm_wrist_roll": 250,
+    "arm_gripper": 1000,
+}
 
 
 def wrap_degrees(value: float) -> float:
     return ((float(value) + 180.0) % 360.0) - 180.0
 
 
-def normalize_arm_action(action: dict[str, float]) -> dict[str, float]:
+def align_degrees_near_reference(value: float, reference: float) -> float:
+    return float(reference) + wrap_degrees(float(value) - float(reference))
+
+
+def normalize_arm_action(action: dict[str, float], *, wrap_wrist_roll: bool = True) -> dict[str, float]:
     normalized = dict(action)
-    wrist_key = "arm_wrist_roll.pos"
-    if wrist_key in normalized:
-        normalized[wrist_key] = wrap_degrees(normalized[wrist_key])
+    if wrap_wrist_roll and WRIST_ROLL_KEY in normalized:
+        normalized[WRIST_ROLL_KEY] = wrap_degrees(normalized[WRIST_ROLL_KEY])
     return normalized
+
+
+def build_safer_max_relative_target() -> dict[str, float]:
+    return dict(DEFAULT_SAFER_MAX_RELATIVE_TARGET)
+
+
+def add_servo_safety_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--safer-servo-mode",
+        action="store_true",
+        help="Enable wrist continuity handling plus per-command arm step limiting.",
+    )
+
+
+class ArmSafetyFilter:
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+        self.last_targets: dict[str, float] = {}
+
+    def seed_from_observation(self, observation: dict[str, Any]) -> None:
+        for key in ARM_STATE_KEYS:
+            value = observation.get(key)
+            if isinstance(value, (int, float)):
+                self.last_targets[key] = float(value)
+
+    def update(self, action: dict[str, Any]) -> None:
+        for key in ARM_STATE_KEYS:
+            value = action.get(key)
+            if isinstance(value, (int, float)):
+                self.last_targets[key] = float(value)
+
+    def normalize(self, action: dict[str, Any]) -> dict[str, float]:
+        normalized = normalize_arm_action(action, wrap_wrist_roll=not self.enabled)
+        if not self.enabled:
+            return normalized
+
+        filtered = dict(normalized)
+        wrist_reference = self.last_targets.get(WRIST_ROLL_KEY)
+        wrist_value = filtered.get(WRIST_ROLL_KEY)
+        if isinstance(wrist_value, (int, float)) and wrist_reference is not None:
+            filtered[WRIST_ROLL_KEY] = align_degrees_near_reference(float(wrist_value), wrist_reference)
+
+        for key in ARM_STATE_KEYS:
+            value = filtered.get(key)
+            if not isinstance(value, (int, float)):
+                continue
+
+            next_value = float(value)
+            absolute_limits = SAFE_ABSOLUTE_POSITION_LIMITS.get(key)
+            if absolute_limits is not None:
+                low, high = absolute_limits
+                next_value = min(max(next_value, low), high)
+
+            previous = self.last_targets.get(key)
+            max_step = DEFAULT_SAFER_ARM_MAX_STEP.get(key)
+            if previous is not None and max_step is not None:
+                next_value = min(max(next_value, previous - max_step), previous + max_step)
+
+            filtered[key] = next_value
+
+        return filtered
 
 
 def add_torque_limit_args(parser: argparse.ArgumentParser) -> None:

@@ -18,6 +18,7 @@ import type {
   StartTrainingCaptureRequest,
   StartTrainingRunRequest,
   StartTrainingSyncRequest,
+  ServoCalibrationRequest,
   TrainingProfile,
   TrimRecordingRequest,
   TorqueLimitsRequest,
@@ -92,6 +93,13 @@ app.post(
   "/api/calibration/pi/start",
   asyncRoute(async (_req, res) => {
     res.json(await controller.startPiCalibration());
+  }),
+);
+
+app.post(
+  "/api/calibration/pi/servo",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startPiServoCalibration(req.body as ServoCalibrationRequest));
   }),
 );
 

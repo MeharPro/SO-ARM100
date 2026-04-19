@@ -28,6 +28,7 @@ export function buildPiDatasetCaptureCommand(
   profile: TrainingProfile,
   torquePath: string,
 ): string {
+  const saferServoModeFlag = settings.host.saferServoMode ? " \\\n  --safer-servo-mode" : "";
   return [
     `source ${shellQuote(settings.pi.condaScript)}`,
     "conda activate lerobot",
@@ -51,7 +52,7 @@ export function buildPiDatasetCaptureCommand(
     `  --torque-limits-path ${shellQuote(torquePath)} \\`,
     `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
     `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
-    "  --enable-base false",
+    `  --enable-base false${saferServoModeFlag}`,
   ].join("\n");
 }
 

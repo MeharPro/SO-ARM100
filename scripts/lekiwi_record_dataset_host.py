@@ -12,10 +12,12 @@ import cv2
 import zmq
 
 from lekiwi_runtime import (
+    ArmSafetyFilter,
     TorqueLimitFileWatcher,
+    add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
-    normalize_arm_action,
+    build_safer_max_relative_target,
     parse_torque_limits_json,
 )
 from lerobot.datasets.feature_utils import build_dataset_frame, hw_to_dataset_features
@@ -68,6 +70,8 @@ def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
         "base_wheel_torque_limit": args.base_wheel_torque_limit,
         "enable_base": args.enable_base,
     }
+    if args.safer_servo_mode:
+        optional_values["max_relative_target"] = build_safer_max_relative_target()
     for name, value in optional_values.items():
         if name in fields:
             kwargs[name] = value
@@ -119,6 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-streaming-encoding", type=parse_bool, default=False)
     parser.add_argument("--encoder-threads", type=int, default=2)
     parser.add_argument("--image-writer-threads", type=int, default=4)
+    add_servo_safety_args(parser)
     add_torque_limit_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
@@ -181,6 +186,11 @@ def main() -> None:
     apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
+    safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    try:
+        safety_filter.seed_from_observation(robot.get_observation())
+    except Exception as exc:
+        logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
     if args.capture_mode == "free-teach":
         robot.bus.disable_torque(robot.arm_motors, num_retry=10)
 
@@ -210,6 +220,8 @@ def main() -> None:
         print("Waiting for leader commands from the Mac before starting episode 1.", flush=True)
     else:
         print("Free-teach mode: recording starts immediately and arm torque stays disabled.", flush=True)
+    if args.safer_servo_mode:
+        print("Safer servo mode enabled for dataset capture.", flush=True)
 
     current_action = make_zero_action()
     episodes_recorded = dataset.num_episodes
@@ -239,7 +251,7 @@ def main() -> None:
 
             try:
                 raw = cmd_socket.recv_string(zmq.NOBLOCK)
-                leader_action = normalize_arm_action(dict(json.loads(raw)))
+                leader_action = safety_filter.normalize(dict(json.loads(raw)))
                 current_action = {
                     **make_zero_action(),
                     **leader_action,
@@ -271,11 +283,12 @@ def main() -> None:
                 current_action = make_free_teach_action(observation)
 
             if phase == "recording":
-                robot.send_action(current_action)
+                sent_action = robot.send_action(safety_filter.normalize(current_action))
+                safety_filter.update(sent_action)
                 processed_obs = robot_observation_processor(observation)
                 frame = {
                     **build_dataset_frame(dataset.features, processed_obs, prefix=OBS_STR),
-                    **build_dataset_frame(dataset.features, current_action, prefix=ACTION),
+                    **build_dataset_frame(dataset.features, sent_action, prefix=ACTION),
                     "task": args.task,
                 }
                 dataset.add_frame(frame)
@@ -297,7 +310,8 @@ def main() -> None:
                         flush=True,
                     )
             else:
-                robot.send_action(current_action)
+                sent_action = robot.send_action(safety_filter.normalize(current_action))
+                safety_filter.update(sent_action)
                 if time.perf_counter() - reset_start >= args.reset_time_s:
                     phase = "recording"
                     episode_start = time.perf_counter()

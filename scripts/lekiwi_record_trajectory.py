@@ -13,10 +13,12 @@ import cv2
 import zmq
 
 from lekiwi_runtime import (
+    ArmSafetyFilter,
     TorqueLimitFileWatcher,
+    add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
-    normalize_arm_action,
+    build_safer_max_relative_target,
     parse_torque_limits_json,
 )
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
@@ -67,6 +69,8 @@ def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
         "base_wheel_torque_limit": args.base_wheel_torque_limit,
         "enable_base": args.enable_base,
     }
+    if args.safer_servo_mode:
+        optional_values["max_relative_target"] = build_safer_max_relative_target()
     for name, value in optional_values.items():
         if name in fields:
             kwargs[name] = value
@@ -100,6 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=None, help="Trajectory JSON output path. Defaults to ~/lekiwi-trajectories.")
     parser.add_argument("--label", default="", help="Optional label stored in the trajectory metadata.")
     parser.add_argument("--print-every", type=int, default=30, help="Print every N recorded samples.")
+    add_servo_safety_args(parser)
     add_torque_limit_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
@@ -185,6 +190,11 @@ def main() -> None:
     apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
+    safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    try:
+        safety_filter.seed_from_observation(robot.get_observation())
+    except Exception as exc:
+        logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_record_trajectory")
     power_logger.start()
 
@@ -208,6 +218,8 @@ def main() -> None:
     )
     print(f"Recording exact follower motion to {output_path}", flush=True)
     print("Waiting for the first leader command before recording samples.", flush=True)
+    if args.safer_servo_mode:
+        print("Safer servo mode enabled for recording.", flush=True)
 
     session_started_at = time.perf_counter()
     recording_started_at = None
@@ -217,15 +229,16 @@ def main() -> None:
 
             try:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
-                action = normalize_arm_action(dict(json.loads(msg)))
+                action = safety_filter.normalize(dict(json.loads(msg)))
                 if recording_started_at is None:
                     recording_started_at = time.perf_counter()
                     print("First leader command received. Recording started.", flush=True)
                     command_t_s = 0.0
                 else:
                     command_t_s = time.perf_counter() - recording_started_at
-                command_samples.append(build_command_sample(action, command_t_s))
-                robot.send_action(action)
+                sent_action = robot.send_action(action)
+                safety_filter.update(sent_action)
+                command_samples.append(build_command_sample(sent_action, command_t_s))
                 last_cmd_time = time.time()
                 watchdog_active = False
             except zmq.Again:

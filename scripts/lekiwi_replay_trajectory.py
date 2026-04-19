@@ -8,10 +8,12 @@ import time
 from pathlib import Path
 
 from lekiwi_runtime import (
+    ArmSafetyFilter,
     TorqueLimitFileWatcher,
+    add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
-    normalize_arm_action,
+    build_safer_max_relative_target,
     parse_torque_limits_json,
 )
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
@@ -61,6 +63,8 @@ def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
         "base_wheel_torque_limit": args.base_wheel_torque_limit,
         "enable_base": args.enable_base,
     }
+    if args.safer_servo_mode:
+        optional_values["max_relative_target"] = build_safer_max_relative_target()
     for name, value in optional_values.items():
         if name in fields:
             kwargs[name] = value
@@ -93,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hold-final-s", type=float, default=0.5, help="How long to hold the final arm target.")
     parser.add_argument("--print-every", type=int, default=30, help="Print every N replayed samples.")
+    add_servo_safety_args(parser)
     add_torque_limit_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
@@ -133,7 +138,7 @@ def build_action(state: dict[str, float], include_base: bool) -> dict[str, float
         action.update({key: float(state[key]) for key in BASE_STATE_KEYS})
     else:
         action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
-    return normalize_arm_action(action)
+    return action
 
 
 def summarize_arm_action(action: dict[str, float]) -> str:
@@ -156,6 +161,11 @@ def main() -> None:
     apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
+    safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    try:
+        safety_filter.seed_from_observation(robot.get_observation())
+    except Exception as exc:
+        logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_replay_trajectory")
     power_logger.start()
     print(f"Replaying {len(samples)} samples from {trajectory_path}")
@@ -163,6 +173,8 @@ def main() -> None:
         print("Base replay: enabled")
     else:
         print("Base replay: disabled (base held at zero velocity)")
+    if args.safer_servo_mode:
+        print("Safer servo mode enabled for replay.")
 
     start = time.perf_counter()
     last_action: dict[str, float] | None = None
@@ -174,9 +186,10 @@ def main() -> None:
             precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
 
             torque_watcher.poll(robot)
-            action = build_action(state, include_base=args.include_base)
-            robot.send_action(action)
-            last_action = action
+            action = safety_filter.normalize(build_action(state, include_base=args.include_base))
+            sent_action = robot.send_action(action)
+            safety_filter.update(sent_action)
+            last_action = sent_action
             power_logger.maybe_sample()
 
             if idx == 1 or idx % args.print_every == 0 or idx == len(samples):

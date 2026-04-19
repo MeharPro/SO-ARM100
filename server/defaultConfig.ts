@@ -27,6 +27,7 @@ export const defaultConfig: StoredConfig = {
       baseMaxRawVelocity: 6000,
       baseWheelTorqueLimit: 700,
       enableBase: false,
+      saferServoMode: false,
       armTorqueLimits: {
         arm_shoulder_pan: 1000,
         arm_shoulder_lift: 1000,

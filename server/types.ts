@@ -25,6 +25,7 @@ export interface HostSettings {
   baseMaxRawVelocity: number;
   baseWheelTorqueLimit: number;
   enableBase: boolean;
+  saferServoMode: boolean;
   armTorqueLimits: Record<string, number>;
 }
 
@@ -243,6 +244,10 @@ export interface TorqueLimitsRequest {
 
 export interface CalibrationInputRequest {
   input: "enter" | "c";
+}
+
+export interface ServoCalibrationRequest {
+  servoId: string;
 }
 
 export interface SelectTrainingProfileRequest {

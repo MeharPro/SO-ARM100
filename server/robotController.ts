@@ -49,6 +49,7 @@ import type {
   ReplayRequest,
   SelectTrainingProfileRequest,
   ServiceSnapshot,
+  ServoCalibrationRequest,
   StartPolicyEvalRequest,
   StartTrainingCaptureRequest,
   StartTrainingRunRequest,
@@ -64,6 +65,7 @@ const ROOT_DIR = process.cwd();
 const HOST_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_host.py");
 const POWER_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_power.py");
 const RUNTIME_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_runtime.py");
+const PI_CALIBRATION_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_calibrate.py");
 const RECORD_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_record_trajectory.py");
 const REPLAY_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_replay_trajectory.py");
 const UI_TELEOP_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_ui_teleop.py");
@@ -81,11 +83,13 @@ const LOCAL_LEADER_REPLAY_SCRIPT = path.join(
 const POLICY_BENCHMARK_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_benchmark_policy.py");
 const POLICY_EVAL_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_run_policy_eval.py");
 const LOCAL_LEADER_REPLAY_DIR = path.join(ROOT_DIR, ".tmp", "leader-replay");
+const LOCAL_POWER_LOG_DIR = path.join(ROOT_DIR, ".lekiwi-ui", "power-logs");
 const LOCAL_LEADER_ROBOT_ID = "leader";
 const MAX_ACTIVITY_LINES = 220;
 const HOST_READY_TIMEOUT_MS = 15000;
 const HOST_READY_PORTS = [5555, 5556];
 const TRAINING_METADATA_REFRESH_MS = 15000;
+const POWER_LOG_SYNC_INTERVAL_MS = 15000;
 const ARM_MOTORS = [
   "arm_shoulder_pan",
   "arm_shoulder_lift",
@@ -166,11 +170,13 @@ export class RobotController {
   private cachedRecordings: RecordingEntry[] = [];
   private lastRecordingRefresh = 0;
   private lastTrainingMetadataRefresh = 0;
+  private lastPowerLogSync = 0;
   private lastResolvedHost: string | null = null;
   private activityLog: string[] = [];
   private queue: Promise<void> = Promise.resolve();
   private readonly remoteHelperSyncCache = new Map<string, string>();
   private readonly remoteTorqueCache = new Map<string, string>();
+  private readonly remotePowerLogCache = new Map<string, string>();
   private coupledTeleopCleanup: Promise<void> | null = null;
 
   async getState(): Promise<DashboardState> {
@@ -187,6 +193,16 @@ export class RobotController {
         this.lastRecordingRefresh = Date.now();
       } catch (error) {
         this.noteError(error);
+      }
+    }
+
+    if (resolvedPiHost && Date.now() - this.lastPowerLogSync > POWER_LOG_SYNC_INTERVAL_MS) {
+      try {
+        await this.syncRemotePowerLogs(settings, resolvedPiHost, true);
+      } catch (error) {
+        this.noteError(error);
+      } finally {
+        this.lastPowerLogSync = Date.now();
       }
     }
 
@@ -815,6 +831,8 @@ export class RobotController {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Pi calibration requested.");
       const host = await this.preparePi(settings, "start Pi calibration");
+      assertHelperExists(PI_CALIBRATION_SCRIPT);
+      await this.ensureRemoteHelpers(settings, host);
 
       await this.teleopRunner.stop("Pi calibration needs the robot exclusively.");
       await this.replayRunner.stop("Pi calibration needs the robot exclusively.");
@@ -830,6 +848,44 @@ export class RobotController {
         this.toConnectConfig(settings, host),
         "pi-calibration",
         { host },
+      );
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async startPiServoCalibration(payload: ServoCalibrationRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const servoId =
+        typeof payload?.servoId === "string" &&
+        ARM_MOTORS.includes(payload.servoId as (typeof ARM_MOTORS)[number])
+          ? payload.servoId
+          : null;
+      if (!servoId) {
+        throw new Error("A valid arm servo id is required for calibration.");
+      }
+
+      const { settings } = this.configStore.getConfig();
+      this.logActivity(`Pi single-servo calibration requested for ${servoId}.`);
+      const host = await this.preparePi(settings, `start ${servoId} calibration`);
+      assertHelperExists(PI_CALIBRATION_SCRIPT);
+      await this.ensureRemoteHelpers(settings, host);
+
+      await this.teleopRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.replayRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.hostRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.datasetCaptureRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.localDatasetCaptureRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.localReplayRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.policyEvalRunner.stop("Pi calibration needs the robot exclusively.");
+      await this.piCalibrationRunner.stop("Restarting Pi calibration.");
+
+      await this.piCalibrationRunner.start(
+        this.buildPiServoCalibrationScript(settings, servoId),
+        this.toConnectConfig(settings, host),
+        "pi-servo-calibration",
+        { host, servoId },
       );
 
       this.lastError = null;
@@ -1487,13 +1543,21 @@ export class RobotController {
   private buildPiCalibrationScript(settings: AppSettings): string {
     return [
       this.buildPiActivation(settings),
-      "lerobot-calibrate \\",
-      "  --robot.type=lekiwi \\",
-      `  --robot.id=${shellQuote(settings.host.robotId)} \\`,
-      `  --robot.port=${shellQuote(settings.pi.robotPort)} \\`,
-      `  --robot.cameras=${shellQuote("{}")} \\`,
-      "  --robot.enable_base=false \\",
-      "  --robot.use_degrees=true",
+      `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_calibrate.py`)} \\`,
+      "  --mode full-arm \\",
+      `  --robot-id ${shellQuote(settings.host.robotId)} \\`,
+      `  --robot-port ${shellQuote(settings.pi.robotPort)}`,
+    ].join("\n");
+  }
+
+  private buildPiServoCalibrationScript(settings: AppSettings, servoId: string): string {
+    return [
+      this.buildPiActivation(settings),
+      `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_calibrate.py`)} \\`,
+      "  --mode single-servo \\",
+      `  --robot-id ${shellQuote(settings.host.robotId)} \\`,
+      `  --robot-port ${shellQuote(settings.pi.robotPort)} \\`,
+      `  --servo ${shellQuote(servoId)}`,
     ].join("\n");
   }
 
@@ -1520,6 +1584,14 @@ export class RobotController {
 
   private getRemoteHostCommandPath(settings: AppSettings): string {
     return `${settings.pi.remoteHelperDir}/host_command.json`;
+  }
+
+  private getRemotePowerLogDir(): string {
+    return "~/lekiwi-power-logs";
+  }
+
+  private buildSaferServoModeFlag(settings: AppSettings): string {
+    return settings.host.saferServoMode ? " \\\n  --safer-servo-mode" : "";
   }
 
   private clampTorqueLimit(value: unknown): number {
@@ -1650,6 +1722,7 @@ JSON
     const uiCommandFlag = includeUiCommandPath
       ? ` \\\n  --ui-command-path ${shellQuote(this.getRemoteHostCommandPath(settings))}`
       : "";
+    const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
     return [
       this.buildPiActivation(settings),
       `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_host.py`)} \\`,
@@ -1662,7 +1735,7 @@ JSON
       `  --torque-limits-path ${shellQuote(this.getRemoteTorqueLimitsPath(settings))} \\`,
       `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
-      `  --enable-base false${uiCommandFlag}`,
+      `  --enable-base false${uiCommandFlag}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -1672,6 +1745,7 @@ JSON
     label: string,
   ): string {
     const labelFlag = label ? ` \\\n  --label ${shellQuote(label)}` : "";
+    const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
     return [
       this.buildPiActivation(settings),
       `mkdir -p ${shellQuote(settings.trajectories.remoteDir)}`,
@@ -1686,12 +1760,13 @@ JSON
       `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
       `  --enable-base false \\`,
-      `  --output ${shellQuote(trajectoryPath)}${labelFlag}`,
+      `  --output ${shellQuote(trajectoryPath)}${labelFlag}${saferServoModeFlag}`,
     ].join("\n");
   }
 
   private buildReplayScript(settings: AppSettings, replay: ReplayRequest): string {
     const includeBaseFlag = replay.includeBase ? " \\\n  --include-base" : "";
+    const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
     return [
       this.buildPiActivation(settings),
       `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_replay_trajectory.py`)} \\`,
@@ -1706,7 +1781,7 @@ JSON
       `  --enable-base false \\`,
       `  --input ${shellQuote(replay.trajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
-      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}`,
+      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -1942,6 +2017,7 @@ fi
         this.fastPut(sftp, HOST_SCRIPT, `${helperDir}/lekiwi_host.py`),
         this.fastPut(sftp, POWER_SCRIPT, `${helperDir}/lekiwi_power.py`),
         this.fastPut(sftp, RUNTIME_SCRIPT, `${helperDir}/lekiwi_runtime.py`),
+        this.fastPut(sftp, PI_CALIBRATION_SCRIPT, `${helperDir}/lekiwi_calibrate.py`),
         this.fastPut(sftp, RECORD_SCRIPT, `${helperDir}/lekiwi_record_trajectory.py`),
         this.fastPut(sftp, REPLAY_SCRIPT, `${helperDir}/lekiwi_replay_trajectory.py`),
         this.fastPut(sftp, DATASET_CAPTURE_SCRIPT, `${helperDir}/lekiwi_record_dataset_host.py`),
@@ -2019,6 +2095,88 @@ PY
 
     const { stdout } = await this.execRemoteScript(script, host, settings);
     return JSON.parse(stdout) as RecordingEntry[];
+  }
+
+  private async listRemotePowerLogs(
+    settings: AppSettings,
+    host: string,
+  ): Promise<Array<{ path: string; name: string; size: number; modifiedAtNs: number }>> {
+    const script = `
+export LEKIWI_POWER_LOG_DIR=${shellQuote(this.getRemotePowerLogDir())}
+python - <<'PY'
+from pathlib import Path
+import json
+import os
+
+root = Path(os.path.expanduser(os.environ["LEKIWI_POWER_LOG_DIR"]))
+records = []
+if root.exists():
+    for path in sorted(root.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True):
+        stat = path.stat()
+        records.append(
+            {
+                "path": str(path),
+                "name": path.name,
+                "size": stat.st_size,
+                "modifiedAtNs": stat.st_mtime_ns,
+            }
+        )
+
+print(json.dumps(records))
+PY
+`.trim();
+
+    const { stdout } = await this.execRemoteScript(script, host, settings);
+    if (!stdout) {
+      return [];
+    }
+    return JSON.parse(stdout) as Array<{
+      path: string;
+      name: string;
+      size: number;
+      modifiedAtNs: number;
+    }>;
+  }
+
+  private async syncRemotePowerLogs(
+    settings: AppSettings,
+    host: string,
+    silent = false,
+  ): Promise<void> {
+    const remoteLogs = await this.listRemotePowerLogs(settings, host);
+    if (!remoteLogs.length) {
+      return;
+    }
+
+    await fs.promises.mkdir(LOCAL_POWER_LOG_DIR, { recursive: true });
+
+    let syncedCount = 0;
+    await this.withSftp(settings, host, async (sftp) => {
+      for (const entry of remoteLogs) {
+        const cacheKey = entry.path;
+        const fingerprint = `${entry.size}:${entry.modifiedAtNs}`;
+        const localPath = path.join(LOCAL_POWER_LOG_DIR, entry.name);
+
+        if (
+          this.remotePowerLogCache.get(cacheKey) === fingerprint &&
+          fs.existsSync(localPath)
+        ) {
+          continue;
+        }
+
+        await this.fastGet(sftp, entry.path, localPath);
+        this.remotePowerLogCache.set(cacheKey, fingerprint);
+        syncedCount += 1;
+      }
+    });
+
+    if (!syncedCount || silent) {
+      return;
+    }
+
+    this.logActivity(
+      `Downloaded ${syncedCount} power log ${syncedCount === 1 ? "file" : "files"} from ${host} to ${LOCAL_POWER_LOG_DIR}.`,
+    );
   }
 
   private async readRecordingDetail(
@@ -2234,6 +2392,7 @@ PY
       HOST_SCRIPT,
       POWER_SCRIPT,
       RUNTIME_SCRIPT,
+      PI_CALIBRATION_SCRIPT,
       RECORD_SCRIPT,
       REPLAY_SCRIPT,
       DATASET_CAPTURE_SCRIPT,

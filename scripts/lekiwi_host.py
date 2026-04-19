@@ -13,10 +13,12 @@ import cv2
 import zmq
 
 from lekiwi_runtime import (
+    ArmSafetyFilter,
     TorqueLimitFileWatcher,
+    add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
-    normalize_arm_action,
+    build_safer_max_relative_target,
     parse_torque_limits_json,
 )
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
@@ -66,6 +68,8 @@ def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
         "base_wheel_torque_limit": args.base_wheel_torque_limit,
         "enable_base": args.enable_base,
     }
+    if args.safer_servo_mode:
+        optional_values["max_relative_target"] = build_safer_max_relative_target()
     for name, value in optional_values.items():
         if name in fields:
             kwargs[name] = value
@@ -195,7 +199,7 @@ def build_replay_action(state: dict[str, Any], include_base: bool) -> dict[str, 
         action.update({key: get_state_value(state, key) for key in BASE_STATE_KEYS})
     else:
         action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
-    return normalize_arm_action(action)
+    return action
 
 
 def publish_observation(robot: LeKiwi, obs_socket: Any) -> None:
@@ -242,6 +246,7 @@ def execute_replay(
     command: dict[str, Any],
     robot: LeKiwi,
     torque_watcher: TorqueLimitFileWatcher,
+    safety_filter: ArmSafetyFilter,
     power_logger: Any,
     cmd_socket: Any,
     obs_socket: Any,
@@ -293,9 +298,10 @@ def execute_replay(
             target_t = float(raw_t_s) / speed
             precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
             torque_watcher.poll(robot)
-            action = build_replay_action(state, include_base=include_base)
-            robot.send_action(action)
-            last_action = action
+            action = safety_filter.normalize(build_replay_action(state, include_base=include_base))
+            sent_action = robot.send_action(action)
+            safety_filter.update(sent_action)
+            last_action = sent_action
             power_logger.maybe_sample()
             publish_observation(robot, obs_socket)
 
@@ -347,6 +353,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--loop-hz", "--host.max_loop_freq_hz", dest="loop_hz", type=float, default=30.0)
     parser.add_argument("--ui-command-path", default="")
+    add_servo_safety_args(parser)
     add_torque_limit_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
@@ -376,6 +383,11 @@ def main() -> None:
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
     ui_command_watcher = UiCommandWatcher(args.ui_command_path)
+    safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    try:
+        safety_filter.seed_from_observation(robot.get_observation())
+    except Exception as exc:
+        logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
 
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_host")
     power_logger.start()
@@ -397,6 +409,8 @@ def main() -> None:
         f"LeKiwi host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
         flush=True,
     )
+    if args.safer_servo_mode:
+        print("Safer servo mode enabled: wrist continuity, bounded arm steps, and relative target clamps are active.", flush=True)
 
     start = time.perf_counter()
     try:
@@ -411,6 +425,7 @@ def main() -> None:
                         pending_ui_command,
                         robot,
                         torque_watcher,
+                        safety_filter,
                         power_logger,
                         cmd_socket,
                         obs_socket,
@@ -429,8 +444,9 @@ def main() -> None:
 
             try:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
-                action = normalize_arm_action(dict(json.loads(msg)))
-                robot.send_action(action)
+                action = safety_filter.normalize(dict(json.loads(msg)))
+                sent_action = robot.send_action(action)
+                safety_filter.update(sent_action)
                 last_cmd_time = time.time()
                 watchdog_active = False
             except zmq.Again:

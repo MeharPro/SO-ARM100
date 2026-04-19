@@ -25,6 +25,7 @@ export interface HostSettings {
   baseMaxRawVelocity: number;
   baseWheelTorqueLimit: number;
   enableBase: boolean;
+  saferServoMode: boolean;
   armTorqueLimits: Record<string, number>;
 }
 
@@ -212,6 +213,10 @@ export interface DashboardState {
     policyBenchmark: ServiceSnapshot;
     policyEval: ServiceSnapshot;
   };
+}
+
+export interface ServoCalibrationRequest {
+  servoId: string;
 }
 
 export interface ReplayRequest {

@@ -11,6 +11,7 @@ import type {
   RenameRecordingRequest,
   RecordingTimelinePoint,
   ServiceSnapshot,
+  ServoCalibrationRequest,
   TrainingArtifact,
   TrainingProfile,
   TrimRecordingRequest,
@@ -59,6 +60,14 @@ const TORQUE_LIMIT_MAX = 1000;
 const DEFAULT_ARM_TORQUE_LIMITS = Object.fromEntries(
   ARM_SERVO_IDS.map((id) => [id, TORQUE_LIMIT_MAX]),
 ) as Record<string, number>;
+const RECOMMENDED_SAFE_ARM_TORQUE_LIMITS: Record<string, number> = {
+  arm_shoulder_pan: 500,
+  arm_shoulder_lift: 650,
+  arm_elbow_flex: 600,
+  arm_wrist_flex: 450,
+  arm_wrist_roll: 250,
+  arm_gripper: 1000,
+};
 const LOCAL_TRAINING_ROOT = "/Users/meharkhanna/robot-arm/output";
 
 interface ServoTemperature {
@@ -834,12 +843,20 @@ function clampTorqueLimit(value: number): number {
 function PowerTelemetryPanel({
   telemetry,
   torqueLimits,
+  calibrationBusy,
+  calibratingServoId,
   controlsDisabled,
+  onApplyRecommendedTorqueLimits,
+  onServoCalibrationStart,
   onTorqueLimitChange,
 }: {
   telemetry: PowerTelemetry | null;
   torqueLimits: Record<string, number>;
+  calibrationBusy: boolean;
+  calibratingServoId: string | null;
   controlsDisabled: boolean;
+  onApplyRecommendedTorqueLimits: () => void;
+  onServoCalibrationStart: (servoId: string) => void;
   onTorqueLimitChange: (servoId: string, value: number) => void;
 }) {
   return (
@@ -855,6 +872,15 @@ function PowerTelemetryPanel({
           </p>
         </div>
         <BatteryGauge percent={telemetry?.batteryPercent ?? null} />
+      </div>
+
+      <div className="button-cluster inline">
+        <button
+          disabled={controlsDisabled || calibrationBusy}
+          onClick={onApplyRecommendedTorqueLimits}
+        >
+          Apply Safer Torque Preset
+        </button>
       </div>
 
       <div className="power-metrics">
@@ -893,21 +919,30 @@ function PowerTelemetryPanel({
         ).map((servo) => (
           <article key={servo.id} className={`servo-temperature ${temperatureTone(servo.temperatureC)}`}>
             <span>{servo.label}</span>
-            <label className="servo-torque-control">
-              <small>Torque</small>
-              <input
-                type="range"
-                min={TORQUE_LIMIT_MIN}
-                max={TORQUE_LIMIT_MAX}
-                step="10"
-                disabled={controlsDisabled}
-                value={torqueLimits[servo.id] ?? TORQUE_LIMIT_MAX}
-                onChange={(event) =>
-                  onTorqueLimitChange(servo.id, Number(event.target.value))
-                }
-              />
-              <small>{torqueLimits[servo.id] ?? TORQUE_LIMIT_MAX}</small>
-            </label>
+            <div className="servo-controls">
+              <label className="servo-torque-control">
+                <small>Torque</small>
+                <input
+                  type="range"
+                  min={TORQUE_LIMIT_MIN}
+                  max={TORQUE_LIMIT_MAX}
+                  step="10"
+                  disabled={controlsDisabled || calibrationBusy}
+                  value={torqueLimits[servo.id] ?? TORQUE_LIMIT_MAX}
+                  onChange={(event) =>
+                    onTorqueLimitChange(servo.id, Number(event.target.value))
+                  }
+                />
+                <small>{torqueLimits[servo.id] ?? TORQUE_LIMIT_MAX}</small>
+              </label>
+              <button
+                className="servo-calibrate-button"
+                disabled={controlsDisabled || calibrationBusy}
+                onClick={() => onServoCalibrationStart(servo.id)}
+              >
+                {calibratingServoId === servo.id ? "Calibrating..." : "Calibrate"}
+              </button>
+            </div>
             <strong>{servo.temperatureC === null ? "--" : `${Math.round(servo.temperatureC)}C`}</strong>
           </article>
         ))}
@@ -1585,9 +1620,17 @@ export default function App() {
         body: JSON.stringify({ limits: { [servoId]: value } }),
       });
       setState(next);
-      if (!settingsDirty) {
-        setSettingsDraft(next.settings);
-      }
+      setSettingsDraft((current) =>
+        current
+          ? {
+              ...current,
+              host: {
+                ...current.host,
+                armTorqueLimits: next.settings.host.armTorqueLimits,
+              },
+            }
+          : next.settings,
+      );
       setTorqueDraft((current) => {
         const nextDraft = { ...current };
         delete nextDraft[servoId];
@@ -1609,6 +1652,40 @@ export default function App() {
       delete torqueTimers.current[servoId];
       void sendTorqueLimit(servoId, limit);
     }, 350);
+  };
+
+  const handleApplyRecommendedTorqueLimits = async () => {
+    const next = await mutate("recommended-torque-preset", "/api/robot/torque-limits", {
+      method: "POST",
+      body: JSON.stringify({ limits: RECOMMENDED_SAFE_ARM_TORQUE_LIMITS }),
+    });
+    if (!next) {
+      return;
+    }
+    setTorqueDraft({});
+    setSettingsDraft((current) =>
+      current
+        ? {
+            ...current,
+            host: {
+              ...current.host,
+              armTorqueLimits: next.settings.host.armTorqueLimits,
+            },
+          }
+        : next.settings,
+    );
+    flashToast("Safer torque preset applied.");
+  };
+
+  const handleServoCalibrationStart = async (servoId: string) => {
+    const payload: ServoCalibrationRequest = { servoId };
+    const next = await mutate("pi-servo-calibration", "/api/calibration/pi/servo", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast(`${labelServo(servoId)} calibration started.`);
+    }
   };
 
   const handleTriggerPinnedMove = async (move: PinnedMove) => {
@@ -1700,6 +1777,14 @@ export default function App() {
   };
 
   const disabled = pendingAction !== null;
+  const piCalibrationBusy = state
+    ? ["starting", "running", "stopping"].includes(state.services.piCalibration.state)
+    : false;
+  const activePiServoCalibrationId =
+    state?.services.piCalibration.mode === "pi-servo-calibration" &&
+    typeof state.services.piCalibration.meta.servoId === "string"
+      ? state.services.piCalibration.meta.servoId
+      : null;
 
   return (
     <div className="app-frame">
@@ -1844,7 +1929,7 @@ export default function App() {
                   <p className="card-kicker">Calibration</p>
                   <h3>Calibrate Arm and Leader</h3>
                   <p className="card-note">
-                    Use the live console prompts. Send <code>c</code> to force a fresh calibration, then Enter at each step.
+                    Use the live console prompts. Send <code>c</code> to force a fresh full-arm follower calibration, then Enter at each step. Individual follower servos can also be started from the cards below.
                   </p>
                 </div>
                 <div className="calibration-grid">
@@ -1944,7 +2029,11 @@ export default function App() {
               <PowerTelemetryPanel
                 telemetry={powerTelemetry}
                 torqueLimits={torqueLimits}
+                calibrationBusy={piCalibrationBusy}
+                calibratingServoId={activePiServoCalibrationId}
                 controlsDisabled={disabled}
+                onApplyRecommendedTorqueLimits={handleApplyRecommendedTorqueLimits}
+                onServoCalibrationStart={handleServoCalibrationStart}
                 onTorqueLimitChange={handleTorqueLimitChange}
               />
 
@@ -2915,6 +3004,23 @@ export default function App() {
                         }
                       />
                     </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.host.saferServoMode}
+                        onChange={(event) =>
+                          updateSettingsField("host", {
+                            ...settingsDraft.host,
+                            saferServoMode: event.target.checked,
+                          })
+                        }
+                      />
+                      <span>Enable safer SO-101 servo mode</span>
+                    </label>
+                  </div>
+
+                  <div className="settings-note">
+                    Safer servo mode is opt-in. When enabled, live control, recording, replay, and Pi dataset capture keep wrist roll continuous across the 180-degree seam and clamp arm command jumps before they hit the servos. Start or restart the Pi-side robot process after saving for it to take effect.
                   </div>
 
                   <div className="settings-note">
@@ -2922,6 +3028,17 @@ export default function App() {
                   </div>
 
                   <div className="button-cluster inline">
+                    <button
+                      disabled={disabled}
+                      onClick={() =>
+                        updateSettingsField("host", {
+                          ...settingsDraft.host,
+                          armTorqueLimits: { ...RECOMMENDED_SAFE_ARM_TORQUE_LIMITS },
+                        })
+                      }
+                    >
+                      Load Safer Torque Preset
+                    </button>
                     <button
                       className="primary"
                       disabled={disabled || !settingsDirty}
