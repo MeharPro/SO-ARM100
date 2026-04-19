@@ -14,6 +14,7 @@ from lekiwi_runtime import (
     add_torque_limit_args,
     apply_torque_limits,
     build_safer_max_relative_target,
+    configure_wrist_roll_mode,
     parse_torque_limits_json,
 )
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
@@ -157,7 +158,8 @@ def main() -> None:
     power_logger = None
 
     print(f"Connecting to LeKiwi on {args.robot_port}")
-    robot.connect()
+    robot.connect(calibrate=False)
+    configure_wrist_roll_mode(robot, continuous=args.safer_servo_mode)
     apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)

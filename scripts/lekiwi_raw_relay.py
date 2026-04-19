@@ -44,6 +44,10 @@ def summarize_action(action: dict[str, float]) -> str:
     return " ".join(f"{key}={action[key]:7.2f}" for key in ordered_keys)
 
 
+def align_degrees_near_reference(value: float, reference: float) -> float:
+    return float(reference) + (((float(value) - float(reference)) + 180.0) % 360.0) - 180.0
+
+
 def main() -> None:
     args = parse_args()
     if not args.remote_host:
@@ -75,10 +79,18 @@ def main() -> None:
     print("Base controls: W/S forward/back, A/D strafe, Z/X rotate, R/F speed up/down")
 
     loop_idx = 0
+    last_wrist_roll: float | None = None
     try:
         while True:
             t0 = time.perf_counter()
             leader_action = leader.get_action()
+            wrist_key = "wrist_roll.pos"
+            if wrist_key in leader_action:
+                wrist_value = float(leader_action[wrist_key])
+                if last_wrist_roll is not None:
+                    wrist_value = align_degrees_near_reference(wrist_value, last_wrist_roll)
+                last_wrist_roll = wrist_value
+                leader_action[wrist_key] = wrist_value
             keyboard_keys = keyboard.get_action()
             base_action = base_mapper._from_keyboard_to_base_action(keyboard_keys)
 

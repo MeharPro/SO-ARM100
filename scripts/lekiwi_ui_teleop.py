@@ -42,22 +42,30 @@ def summarize_action(action: dict[str, float]) -> str:
     return " ".join(f"{key}={action[key]:7.2f}" for key in keys)
 
 
-def wrap_degrees(value: float) -> float:
-    return ((float(value) + 180.0) % 360.0) - 180.0
+def align_degrees_near_reference(value: float, reference: float) -> float:
+    return float(reference) + (((float(value) - float(reference)) + 180.0) % 360.0) - 180.0
 
 
-def build_robot_action(leader_action: dict[str, float]) -> dict[str, float]:
-    arm_action = {f"arm_{key}": value for key, value in leader_action.items()}
-    wrist_key = "arm_wrist_roll.pos"
-    if wrist_key in arm_action:
-        arm_action[wrist_key] = wrap_degrees(arm_action[wrist_key])
+class LeaderActionMapper:
+    def __init__(self) -> None:
+        self.last_wrist_roll: float | None = None
 
-    return {
-        **arm_action,
-        "x.vel": 0.0,
-        "y.vel": 0.0,
-        "theta.vel": 0.0,
-    }
+    def build_robot_action(self, leader_action: dict[str, float]) -> dict[str, float]:
+        arm_action = {f"arm_{key}": value for key, value in leader_action.items()}
+        wrist_key = "arm_wrist_roll.pos"
+        if wrist_key in arm_action:
+            wrist_value = float(arm_action[wrist_key])
+            if self.last_wrist_roll is not None:
+                wrist_value = align_degrees_near_reference(wrist_value, self.last_wrist_roll)
+            self.last_wrist_roll = wrist_value
+            arm_action[wrist_key] = wrist_value
+
+        return {
+            **arm_action,
+            "x.vel": 0.0,
+            "y.vel": 0.0,
+            "theta.vel": 0.0,
+        }
 
 
 def summarize_robot_action(action: dict[str, float]) -> str:
@@ -95,6 +103,7 @@ def main() -> None:
     print("Starting UI teleop relay. Base keyboard control is disabled in this helper.", flush=True)
 
     loop_idx = 0
+    mapper = LeaderActionMapper()
     try:
         robot.connect()
         connect_leader_noninteractive(
@@ -109,7 +118,7 @@ def main() -> None:
         while True:
             t0 = time.perf_counter()
             leader_action = leader.get_action()
-            robot_action = build_robot_action(leader_action)
+            robot_action = mapper.build_robot_action(leader_action)
 
             if loop_idx % args.print_every == 0:
                 print(summarize_robot_action(robot_action), flush=True)

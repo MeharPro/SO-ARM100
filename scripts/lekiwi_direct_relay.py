@@ -43,6 +43,10 @@ def summarize_action(action: dict[str, float]) -> str:
     return " ".join(f"{key}={action[key]:7.2f}" for key in ordered_keys)
 
 
+def align_degrees_near_reference(value: float, reference: float) -> float:
+    return float(reference) + (((float(value) - float(reference)) + 180.0) % 360.0) - 180.0
+
+
 def main() -> None:
     args = parse_args()
     leader_port = detect_leader_port(args.leader_port)
@@ -75,10 +79,18 @@ def main() -> None:
 
     print("Starting direct relay loop...")
     loop_idx = 0
+    last_wrist_roll: float | None = None
     try:
         while True:
             t0 = time.perf_counter()
             leader_action = leader.get_action()
+            wrist_key = "wrist_roll.pos"
+            if wrist_key in leader_action:
+                wrist_value = float(leader_action[wrist_key])
+                if last_wrist_roll is not None:
+                    wrist_value = align_degrees_near_reference(wrist_value, last_wrist_roll)
+                last_wrist_roll = wrist_value
+                leader_action[wrist_key] = wrist_value
 
             if loop_idx % args.print_every == 0:
                 print(summarize_action(leader_action))

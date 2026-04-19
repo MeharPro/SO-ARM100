@@ -3020,7 +3020,7 @@ export default function App() {
                   </div>
 
                   <div className="settings-note">
-                    Safer servo mode is opt-in. When enabled, live control, recording, replay, and Pi dataset capture keep wrist roll continuous across the 180-degree seam and clamp arm command jumps before they hit the servos. Start or restart the Pi-side robot process after saving for it to take effect.
+                    Safer servo mode is opt-in. When enabled, live control, recording, replay, and Pi dataset capture keep wrist roll continuous across the 180-degree seam for exact leader tracking, switch the follower wrist into continuous rotation mode, and still clamp the other arm joints before bad command jumps hit the servos. Start or restart the Pi-side robot process after saving for it to take effect.
                   </div>
 
                   <div className="settings-note">

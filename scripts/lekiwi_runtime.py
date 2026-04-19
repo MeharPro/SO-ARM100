@@ -20,6 +20,9 @@ TORQUE_LIMIT_MAX = 1000
 ARM_STATE_KEYS = tuple(f"{motor}.pos" for motor in ARM_MOTORS)
 WRIST_ROLL_KEY = "arm_wrist_roll.pos"
 GRIPPER_KEY = "arm_gripper.pos"
+WRIST_ROLL_MOTOR = "arm_wrist_roll"
+WRIST_ROLL_SINGLE_TURN_LIMITS = (0, 4095)
+WRIST_ROLL_CONTINUOUS_LIMITS = (0, 0)
 
 DEFAULT_SAFER_ARM_MAX_STEP = {
     "arm_shoulder_pan.pos": 8.0,
@@ -34,7 +37,7 @@ DEFAULT_SAFER_MAX_RELATIVE_TARGET = {
     "arm_shoulder_lift.pos": 10.0,
     "arm_elbow_flex.pos": 10.0,
     "arm_wrist_flex.pos": 12.0,
-    "arm_wrist_roll.pos": 14.0,
+    "arm_wrist_roll.pos": 720.0,
     "arm_gripper.pos": 3.0,
 }
 SAFE_ABSOLUTE_POSITION_LIMITS = {
@@ -67,6 +70,26 @@ def normalize_arm_action(action: dict[str, float], *, wrap_wrist_roll: bool = Tr
 
 def build_safer_max_relative_target() -> dict[str, float]:
     return dict(DEFAULT_SAFER_MAX_RELATIVE_TARGET)
+
+
+def configure_wrist_roll_mode(robot: Any, *, continuous: bool) -> None:
+    target_min, target_max = (
+        WRIST_ROLL_CONTINUOUS_LIMITS if continuous else WRIST_ROLL_SINGLE_TURN_LIMITS
+    )
+    current_min = robot.bus.read("Min_Position_Limit", WRIST_ROLL_MOTOR, normalize=False)
+    current_max = robot.bus.read("Max_Position_Limit", WRIST_ROLL_MOTOR, normalize=False)
+    if current_min == target_min and current_max == target_max:
+        return
+
+    torque_disabled = False
+    try:
+        robot.bus.disable_torque(WRIST_ROLL_MOTOR, num_retry=5)
+        torque_disabled = True
+        robot.bus.write("Min_Position_Limit", WRIST_ROLL_MOTOR, target_min, normalize=False, num_retry=5)
+        robot.bus.write("Max_Position_Limit", WRIST_ROLL_MOTOR, target_max, normalize=False, num_retry=5)
+    finally:
+        if torque_disabled:
+            robot.bus.enable_torque(WRIST_ROLL_MOTOR, num_retry=5)
 
 
 def add_servo_safety_args(parser: argparse.ArgumentParser) -> None:
@@ -118,6 +141,10 @@ class ArmSafetyFilter:
 
             previous = self.last_targets.get(key)
             max_step = DEFAULT_SAFER_ARM_MAX_STEP.get(key)
+            if key == WRIST_ROLL_KEY:
+                filtered[key] = next_value
+                continue
+
             if previous is not None and max_step is not None:
                 next_value = min(max(next_value, previous - max_step), previous + max_step)
 
