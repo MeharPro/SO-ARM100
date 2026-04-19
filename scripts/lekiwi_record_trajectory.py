@@ -18,7 +18,6 @@ from lekiwi_runtime import (
     add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
-    build_safer_max_relative_target,
     configure_wrist_roll_mode,
     parse_torque_limits_json,
 )
@@ -70,8 +69,6 @@ def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
         "base_wheel_torque_limit": args.base_wheel_torque_limit,
         "enable_base": args.enable_base,
     }
-    if args.safer_servo_mode:
-        optional_values["max_relative_target"] = build_safer_max_relative_target()
     for name, value in optional_values.items():
         if name in fields:
             kwargs[name] = value
