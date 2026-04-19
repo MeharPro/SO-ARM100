@@ -247,7 +247,7 @@ def execute_replay(
     command: dict[str, Any],
     robot: LeKiwi,
     torque_watcher: TorqueLimitFileWatcher,
-    safety_filter: ArmSafetyFilter,
+    replay_filter: ArmSafetyFilter,
     power_logger: Any,
     cmd_socket: Any,
     obs_socket: Any,
@@ -299,9 +299,9 @@ def execute_replay(
             target_t = float(raw_t_s) / speed
             precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
             torque_watcher.poll(robot)
-            action = safety_filter.normalize(build_replay_action(state, include_base=include_base))
+            action = replay_filter.normalize(build_replay_action(state, include_base=include_base))
             sent_action = robot.send_action(action)
-            safety_filter.update(sent_action)
+            replay_filter.update(sent_action)
             last_action = sent_action
             power_logger.maybe_sample()
             publish_observation(robot, obs_socket)
@@ -385,9 +385,15 @@ def main() -> None:
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
     ui_command_watcher = UiCommandWatcher(args.ui_command_path)
-    safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    live_safety_filter = ArmSafetyFilter(
+        enabled=args.safer_servo_mode,
+        map_wrist_to_follower_start=True,
+    )
+    replay_safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
     try:
-        safety_filter.seed_from_observation(robot.get_observation())
+        observation = robot.get_observation()
+        live_safety_filter.seed_from_observation(observation)
+        replay_safety_filter.seed_from_observation(observation)
     except Exception as exc:
         logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
 
@@ -427,7 +433,7 @@ def main() -> None:
                         pending_ui_command,
                         robot,
                         torque_watcher,
-                        safety_filter,
+                        replay_safety_filter,
                         power_logger,
                         cmd_socket,
                         obs_socket,
@@ -446,9 +452,10 @@ def main() -> None:
 
             try:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
-                action = safety_filter.normalize(dict(json.loads(msg)))
+                action = live_safety_filter.normalize(dict(json.loads(msg)))
                 sent_action = robot.send_action(action)
-                safety_filter.update(sent_action)
+                live_safety_filter.update(sent_action)
+                replay_safety_filter.update(sent_action)
                 last_cmd_time = time.time()
                 watchdog_active = False
             except zmq.Again:

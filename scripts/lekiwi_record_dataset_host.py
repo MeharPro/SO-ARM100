@@ -188,7 +188,10 @@ def main() -> None:
     apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
-    safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    safety_filter = ArmSafetyFilter(
+        enabled=args.safer_servo_mode,
+        map_wrist_to_follower_start=args.capture_mode == "leader",
+    )
     try:
         safety_filter.seed_from_observation(robot.get_observation())
     except Exception as exc:

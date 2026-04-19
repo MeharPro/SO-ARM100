@@ -101,15 +101,22 @@ def add_servo_safety_args(parser: argparse.ArgumentParser) -> None:
 
 
 class ArmSafetyFilter:
-    def __init__(self, enabled: bool) -> None:
+    def __init__(self, enabled: bool, *, map_wrist_to_follower_start: bool = False) -> None:
         self.enabled = bool(enabled)
+        self.map_wrist_to_follower_start = bool(map_wrist_to_follower_start)
         self.last_targets: dict[str, float] = {}
+        self.initial_follower_wrist_roll: float | None = None
+        self.initial_leader_wrist_roll: float | None = None
+        self.last_input_wrist_roll: float | None = None
 
     def seed_from_observation(self, observation: dict[str, Any]) -> None:
         for key in ARM_STATE_KEYS:
             value = observation.get(key)
             if isinstance(value, (int, float)):
                 self.last_targets[key] = float(value)
+        wrist_value = observation.get(WRIST_ROLL_KEY)
+        if isinstance(wrist_value, (int, float)):
+            self.initial_follower_wrist_roll = float(wrist_value)
 
     def update(self, action: dict[str, Any]) -> None:
         for key in ARM_STATE_KEYS:
@@ -123,10 +130,36 @@ class ArmSafetyFilter:
             return normalized
 
         filtered = dict(normalized)
-        wrist_reference = self.last_targets.get(WRIST_ROLL_KEY)
         wrist_value = filtered.get(WRIST_ROLL_KEY)
-        if isinstance(wrist_value, (int, float)) and wrist_reference is not None:
-            filtered[WRIST_ROLL_KEY] = align_degrees_near_reference(float(wrist_value), wrist_reference)
+        if isinstance(wrist_value, (int, float)):
+            continuous_wrist_value = float(wrist_value)
+            if self.last_input_wrist_roll is not None:
+                continuous_wrist_value = align_degrees_near_reference(
+                    continuous_wrist_value,
+                    self.last_input_wrist_roll,
+                )
+            self.last_input_wrist_roll = continuous_wrist_value
+
+            if self.map_wrist_to_follower_start:
+                if self.initial_leader_wrist_roll is None:
+                    self.initial_leader_wrist_roll = continuous_wrist_value
+                follower_anchor = (
+                    self.initial_follower_wrist_roll
+                    if self.initial_follower_wrist_roll is not None
+                    else self.last_targets.get(WRIST_ROLL_KEY, continuous_wrist_value)
+                )
+                continuous_wrist_value = follower_anchor + (
+                    continuous_wrist_value - self.initial_leader_wrist_roll
+                )
+            else:
+                wrist_reference = self.last_targets.get(WRIST_ROLL_KEY)
+                if wrist_reference is not None:
+                    continuous_wrist_value = align_degrees_near_reference(
+                        continuous_wrist_value,
+                        wrist_reference,
+                    )
+
+            filtered[WRIST_ROLL_KEY] = continuous_wrist_value
 
         for key in ARM_STATE_KEYS:
             value = filtered.get(key)
