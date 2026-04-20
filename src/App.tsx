@@ -69,6 +69,12 @@ const RECOMMENDED_SAFE_ARM_TORQUE_LIMITS: Record<string, number> = {
   arm_gripper: 1000,
 };
 const LOCAL_TRAINING_ROOT = "/Users/meharkhanna/robot-arm/output";
+const VEX_AXIS_OPTIONS = [
+  { value: "axis1", label: "Axis 1" },
+  { value: "axis2", label: "Axis 2" },
+  { value: "axis3", label: "Axis 3" },
+  { value: "axis4", label: "Axis 4" },
+] as const;
 
 interface ServoTemperature {
   id: string;
@@ -333,6 +339,30 @@ function captureModeLabel(captureMode: TrainingProfile["captureMode"]): string {
 
 function replayTargetLabel(target: ReplayTarget): string {
   return target === "leader" ? "Leader arm" : "Pi follower";
+}
+
+function vexStatusLabel(vexBrain: DashboardState["vexBrain"] | null | undefined): string {
+  if (!vexBrain?.connected) {
+    return "missing";
+  }
+  if (vexBrain.telemetryActive) {
+    return vexBrain.source === "replay" ? "replay" : "ready";
+  }
+  return "detected";
+}
+
+function recordingHasReplayableBaseMotion(detail: RecordingDetail | null | undefined): boolean {
+  if (!detail || !detail.baseKeys.length) {
+    return false;
+  }
+
+  const timeline = detail.commandSamples.length ? detail.commandSamples : detail.samples;
+  return timeline.some((point) =>
+    detail.baseKeys.some((key) => {
+      const value = point.values[key];
+      return typeof value === "number" && Math.abs(value) > 1e-4;
+    }),
+  );
 }
 
 function emptyTrainingArtifact(): TrainingArtifact {
@@ -1032,6 +1062,7 @@ export default function App() {
   const [recordingDetail, setRecordingDetail] = useState<RecordingDetail | null>(null);
   const [recordingDetailLoading, setRecordingDetailLoading] = useState(false);
   const [recordingDetailError, setRecordingDetailError] = useState("");
+  const [replayIncludeBasePreference, setReplayIncludeBasePreference] = useState<boolean | null>(null);
   const [playbackTimeS, setPlaybackTimeS] = useState(0);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
   const [selectedLogServiceLabel, setSelectedLogServiceLabel] = useState("");
@@ -1128,10 +1159,20 @@ export default function App() {
     [selectedRecording, state?.recordings],
   );
   const selectedTrainingProfile = state?.training.selectedProfile ?? null;
+  const selectedRecordingHasBaseMotion = useMemo(
+    () => recordingHasReplayableBaseMotion(recordingDetail),
+    [recordingDetail],
+  );
+  const effectiveReplayIncludeBase =
+    replayTarget === "pi" ? (replayIncludeBasePreference ?? selectedRecordingHasBaseMotion) : false;
 
   useEffect(() => {
     setRecordingNameDraft(selectedRecordingEntry?.name ?? "");
   }, [selectedRecordingEntry?.name, selectedRecordingEntry?.path]);
+
+  useEffect(() => {
+    setReplayIncludeBasePreference(null);
+  }, [selectedRecordingEntry?.path]);
 
   useEffect(() => {
     setTrimStartDraft("0");
@@ -1278,11 +1319,11 @@ export default function App() {
     () => ({
       trajectoryPath: selectedRecording,
       target: replayTarget,
-      includeBase: false,
+      includeBase: effectiveReplayIncludeBase,
       speed: pinSpeed,
       holdFinalS: pinHoldFinal,
     }),
-    [pinHoldFinal, pinSpeed, replayTarget, selectedRecording],
+    [effectiveReplayIncludeBase, pinHoldFinal, pinSpeed, replayTarget, selectedRecording],
   );
   const recordingDurationS = recordingDetail?.durationS ?? selectedRecordingEntry?.durationS ?? 0;
   const trimStartValueS = parseNumber(trimStartDraft) ?? 0;
@@ -1507,9 +1548,9 @@ export default function App() {
     setSettingsDirty(true);
   };
 
-  const handleSaveSettings = async () => {
+  const handleSaveSettings = async (showToast = true) => {
     if (!settingsDraft) {
-      return;
+      return null;
     }
 
     const next = await mutate("save-settings", "/api/settings", {
@@ -1517,8 +1558,30 @@ export default function App() {
       body: JSON.stringify(settingsDraft),
     });
     if (next) {
+      setSettingsDraft(next.settings);
       setSettingsDirty(false);
-      flashToast("Settings saved.");
+      if (showToast) {
+        flashToast("Settings saved.");
+      }
+    }
+    return next;
+  };
+
+  const handleSyncVexTelemetry = async () => {
+    if (settingsDirty) {
+      const saved = await handleSaveSettings(false);
+      if (!saved) {
+        return;
+      }
+    }
+
+    const next = await mutate("sync-vex-telemetry", "/api/vex/telemetry/sync", {
+      method: "POST",
+    });
+    if (next) {
+      setSettingsDraft(next.settings);
+      setSettingsDirty(false);
+      flashToast("VEX telemetry synced.");
     }
   };
 
@@ -1813,6 +1876,9 @@ export default function App() {
           <span className={`status-pill ${state?.leader.connected ? "good" : "bad"}`}>
             Leader: {state?.leader.connected ? "ready" : "missing"}
           </span>
+          <span className={`status-pill ${state?.vexBrain.connected ? "good" : "bad"}`}>
+            VEX: {vexStatusLabel(state?.vexBrain)}
+          </span>
           <span className={`status-pill ${statusTone(state?.services.host.state ?? "idle")}`}>
             Host: {state?.services.host.state ?? "idle"}
           </span>
@@ -1836,6 +1902,8 @@ export default function App() {
         <div className="sidebar-footer">
           <strong>Leader check</strong>
           <span>{state?.leader.message ?? "Checking leader status..."}</span>
+          <strong>VEX check</strong>
+          <span>{state?.vexBrain.message ?? "Checking VEX Brain status..."}</span>
         </div>
       </aside>
 
@@ -2362,6 +2430,22 @@ export default function App() {
                         onChange={(event) => setPinHoldFinal(Number(event.target.value))}
                       />
                     </label>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={effectiveReplayIncludeBase}
+                        disabled={replayTarget !== "pi"}
+                        onChange={(event) => setReplayIncludeBasePreference(event.target.checked)}
+                      />
+                      <span>
+                        Replay VEX base {replayTarget === "pi" ? "with this move" : "(Pi follower only)"}
+                      </span>
+                    </label>
+                    {replayTarget === "pi" &&
+                    replayIncludeBasePreference === null &&
+                    selectedRecordingHasBaseMotion ? (
+                      <p className="card-note">Auto-enabled because this recording contains VEX base motion.</p>
+                    ) : null}
                   </div>
                   <div className="button-cluster inline">
                     <button
@@ -2461,7 +2545,7 @@ export default function App() {
                         <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
                       </div>
                       <p className="pin-meta">
-                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • Arm only
+                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {move.includeBase ? "VEX base + arm" : "Arm only"}
                       </p>
                       <div className="button-cluster inline">
                         <button
@@ -3020,11 +3104,398 @@ export default function App() {
                   </div>
 
                   <div className="settings-note">
+                    VEX Brain status: {state?.vexBrain.message ?? "Checking VEX Brain status..."}
+                  </div>
+
+                  <div className="form-grid">
+                    <label>
+                      VEX telemetry program
+                      <input
+                        value={settingsDraft.vex.telemetryProgramName}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            telemetryProgramName: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Telemetry slot
+                      <input
+                        type="number"
+                        min="1"
+                        max="8"
+                        value={settingsDraft.vex.telemetrySlot}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            telemetrySlot: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Replay slot
+                      <input
+                        type="number"
+                        min="1"
+                        max="8"
+                        value={settingsDraft.vex.replaySlot}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            replaySlot: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Deadband (%)
+                      <input
+                        type="number"
+                        min="0"
+                        max="30"
+                        value={settingsDraft.vex.tuning.deadbandPercent}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            tuning: {
+                              ...settingsDraft.vex.tuning,
+                              deadbandPercent: Number(event.target.value),
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Max linear speed (m/s)
+                      <input
+                        type="number"
+                        min="0.05"
+                        step="0.01"
+                        value={settingsDraft.vex.tuning.maxLinearSpeedMps}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            tuning: {
+                              ...settingsDraft.vex.tuning,
+                              maxLinearSpeedMps: Number(event.target.value),
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Max turn speed (deg/s)
+                      <input
+                        type="number"
+                        min="5"
+                        step="1"
+                        value={settingsDraft.vex.tuning.maxTurnSpeedDps}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            tuning: {
+                              ...settingsDraft.vex.tuning,
+                              maxTurnSpeedDps: Number(event.target.value),
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Forward axis
+                      <select
+                        value={settingsDraft.vex.controls.forwardAxis}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            controls: {
+                              ...settingsDraft.vex.controls,
+                              forwardAxis: event.target.value as AppSettings["vex"]["controls"]["forwardAxis"],
+                            },
+                          })
+                        }
+                      >
+                        {VEX_AXIS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Strafe axis
+                      <select
+                        value={settingsDraft.vex.controls.strafeAxis}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            controls: {
+                              ...settingsDraft.vex.controls,
+                              strafeAxis: event.target.value as AppSettings["vex"]["controls"]["strafeAxis"],
+                            },
+                          })
+                        }
+                      >
+                        {VEX_AXIS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Turn axis
+                      <select
+                        value={settingsDraft.vex.controls.turnAxis}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            controls: {
+                              ...settingsDraft.vex.controls,
+                              turnAxis: event.target.value as AppSettings["vex"]["controls"]["turnAxis"],
+                            },
+                          })
+                        }
+                      >
+                        {VEX_AXIS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Front right port
+                      <input
+                        type="number"
+                        min="1"
+                        max="21"
+                        value={settingsDraft.vex.motors.frontRight.port}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              frontRight: {
+                                ...settingsDraft.vex.motors.frontRight,
+                                port: Number(event.target.value),
+                              },
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Front left port
+                      <input
+                        type="number"
+                        min="1"
+                        max="21"
+                        value={settingsDraft.vex.motors.frontLeft.port}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              frontLeft: {
+                                ...settingsDraft.vex.motors.frontLeft,
+                                port: Number(event.target.value),
+                              },
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Rear right port
+                      <input
+                        type="number"
+                        min="1"
+                        max="21"
+                        value={settingsDraft.vex.motors.rearRight.port}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              rearRight: {
+                                ...settingsDraft.vex.motors.rearRight,
+                                port: Number(event.target.value),
+                              },
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Rear left port
+                      <input
+                        type="number"
+                        min="1"
+                        max="21"
+                        value={settingsDraft.vex.motors.rearLeft.port}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              rearLeft: {
+                                ...settingsDraft.vex.motors.rearLeft,
+                                port: Number(event.target.value),
+                              },
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.autoRunTelemetry}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            autoRunTelemetry: event.target.checked,
+                          })
+                        }
+                      />
+                      <span>Auto-run VEX telemetry when control, hotkeys, recording, or Pi capture starts</span>
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.controls.invertForward}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            controls: {
+                              ...settingsDraft.vex.controls,
+                              invertForward: event.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      <span>Invert forward axis</span>
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.controls.invertStrafe}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            controls: {
+                              ...settingsDraft.vex.controls,
+                              invertStrafe: event.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      <span>Invert strafe axis</span>
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.controls.invertTurn}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            controls: {
+                              ...settingsDraft.vex.controls,
+                              invertTurn: event.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      <span>Invert turn axis</span>
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.motors.frontRight.reversed}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              frontRight: {
+                                ...settingsDraft.vex.motors.frontRight,
+                                reversed: event.target.checked,
+                              },
+                            },
+                          })
+                        }
+                      />
+                      <span>Front right reversed</span>
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.motors.frontLeft.reversed}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              frontLeft: {
+                                ...settingsDraft.vex.motors.frontLeft,
+                                reversed: event.target.checked,
+                              },
+                            },
+                          })
+                        }
+                      />
+                      <span>Front left reversed</span>
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.motors.rearRight.reversed}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              rearRight: {
+                                ...settingsDraft.vex.motors.rearRight,
+                                reversed: event.target.checked,
+                              },
+                            },
+                          })
+                        }
+                      />
+                      <span>Rear right reversed</span>
+                    </label>
+                    <label className="checkbox-row settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settingsDraft.vex.motors.rearLeft.reversed}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            motors: {
+                              ...settingsDraft.vex.motors,
+                              rearLeft: {
+                                ...settingsDraft.vex.motors.rearLeft,
+                                reversed: event.target.checked,
+                              },
+                            },
+                          })
+                        }
+                      />
+                      <span>Rear left reversed</span>
+                    </label>
+                  </div>
+
+                  <div className="settings-note">
                     When enabled, live control, recording, replay, and Pi dataset capture keep wrist roll continuous across the 180-degree seam for exact leader tracking, switch the follower wrist into continuous rotation mode, and still clamp the other arm joints before bad command jumps hit the servos. Start or restart the Pi-side robot process after saving for it to take effect.
                   </div>
 
                   <div className="settings-note">
-                    Base control is disabled. This LeKiwi setup is arm-only, so replay and calibration always use <code>--robot.enable_base=false</code>.
+                    Legacy LeKiwi base control stays off in this build. The Pi host, replay, calibration, and dataset capture paths all run arm-only, while the VEX Brain/controller remains the base drive path.
                   </div>
 
                   <div className="button-cluster inline">
@@ -3038,6 +3509,12 @@ export default function App() {
                       }
                     >
                       Load Safer Torque Preset
+                    </button>
+                    <button
+                      disabled={disabled || !state?.piReachable}
+                      onClick={() => void handleSyncVexTelemetry()}
+                    >
+                      Save + Run VEX Telemetry
                     </button>
                     <button
                       className="primary"

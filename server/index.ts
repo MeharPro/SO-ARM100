@@ -83,6 +83,13 @@ app.post(
 );
 
 app.post(
+  "/api/vex/telemetry/sync",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.syncVexTelemetryProgram());
+  }),
+);
+
+app.post(
   "/api/robot/torque-limits",
   asyncRoute(async (req, res) => {
     res.json(await controller.setArmTorqueLimits(req.body as TorqueLimitsRequest));

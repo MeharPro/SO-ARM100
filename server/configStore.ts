@@ -30,7 +30,7 @@ export class ConfigStore {
   saveSettings(settings: AppSettings): StoredConfig {
     this.config = {
       ...this.config,
-      settings: structuredClone(settings),
+      settings: this.normalizeSettings(settings),
     };
     this.persist();
     return this.getConfig();
@@ -62,7 +62,7 @@ export class ConfigStore {
     try {
       const raw = JSON.parse(fs.readFileSync(this.configPath, "utf8")) as Partial<StoredConfig>;
       return {
-        settings: {
+        settings: this.normalizeSettings({
           ...this.defaults.settings,
           ...raw.settings,
           hotspot: {
@@ -85,7 +85,39 @@ export class ConfigStore {
             ...this.defaults.settings.trajectories,
             ...raw.settings?.trajectories,
           },
-        },
+          vex: {
+            ...this.defaults.settings.vex,
+            ...raw.settings?.vex,
+            motors: {
+              ...this.defaults.settings.vex.motors,
+              ...raw.settings?.vex?.motors,
+              frontRight: {
+                ...this.defaults.settings.vex.motors.frontRight,
+                ...raw.settings?.vex?.motors?.frontRight,
+              },
+              frontLeft: {
+                ...this.defaults.settings.vex.motors.frontLeft,
+                ...raw.settings?.vex?.motors?.frontLeft,
+              },
+              rearRight: {
+                ...this.defaults.settings.vex.motors.rearRight,
+                ...raw.settings?.vex?.motors?.rearRight,
+              },
+              rearLeft: {
+                ...this.defaults.settings.vex.motors.rearLeft,
+                ...raw.settings?.vex?.motors?.rearLeft,
+              },
+            },
+            controls: {
+              ...this.defaults.settings.vex.controls,
+              ...raw.settings?.vex?.controls,
+            },
+            tuning: {
+              ...this.defaults.settings.vex.tuning,
+              ...raw.settings?.vex?.tuning,
+            },
+          },
+        }),
         pinnedMoves: Array.isArray(raw.pinnedMoves)
           ? raw.pinnedMoves.map((move) => this.normalizePinnedMove(move))
           : this.defaults.pinnedMoves,
@@ -106,6 +138,81 @@ export class ConfigStore {
       includeBase: Boolean(raw?.includeBase),
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
       keyBinding: typeof raw?.keyBinding === "string" ? raw.keyBinding : "",
+    };
+  }
+
+  private normalizeSettings(settings: AppSettings): AppSettings {
+    const normalized = structuredClone(settings);
+    const clampPort = (value: number) => {
+      const numeric = Math.round(Number(value));
+      if (!Number.isFinite(numeric)) {
+        return 1;
+      }
+      return Math.min(21, Math.max(1, numeric));
+    };
+    const clampSlot = (value: number, fallback: number) => {
+      const numeric = Math.round(Number(value));
+      if (!Number.isFinite(numeric)) {
+        return fallback;
+      }
+      return Math.min(8, Math.max(1, numeric));
+    };
+    const validAxes = new Set(["axis1", "axis2", "axis3", "axis4"]);
+
+    return {
+      ...normalized,
+      host: {
+        ...normalized.host,
+        enableBase: false,
+      },
+      vex: {
+        ...normalized.vex,
+        telemetrySlot: clampSlot(normalized.vex.telemetrySlot, this.defaults.settings.vex.telemetrySlot),
+        replaySlot: clampSlot(normalized.vex.replaySlot, this.defaults.settings.vex.replaySlot),
+        autoRunTelemetry: Boolean(normalized.vex.autoRunTelemetry),
+        telemetryProgramName:
+          typeof normalized.vex.telemetryProgramName === "string" &&
+          normalized.vex.telemetryProgramName.trim()
+            ? normalized.vex.telemetryProgramName.trim()
+            : this.defaults.settings.vex.telemetryProgramName,
+        motors: {
+          frontRight: {
+            port: clampPort(normalized.vex.motors.frontRight.port),
+            reversed: Boolean(normalized.vex.motors.frontRight.reversed),
+          },
+          frontLeft: {
+            port: clampPort(normalized.vex.motors.frontLeft.port),
+            reversed: Boolean(normalized.vex.motors.frontLeft.reversed),
+          },
+          rearRight: {
+            port: clampPort(normalized.vex.motors.rearRight.port),
+            reversed: Boolean(normalized.vex.motors.rearRight.reversed),
+          },
+          rearLeft: {
+            port: clampPort(normalized.vex.motors.rearLeft.port),
+            reversed: Boolean(normalized.vex.motors.rearLeft.reversed),
+          },
+        },
+        controls: {
+          forwardAxis: validAxes.has(normalized.vex.controls.forwardAxis)
+            ? normalized.vex.controls.forwardAxis
+            : this.defaults.settings.vex.controls.forwardAxis,
+          strafeAxis: validAxes.has(normalized.vex.controls.strafeAxis)
+            ? normalized.vex.controls.strafeAxis
+            : this.defaults.settings.vex.controls.strafeAxis,
+          turnAxis: validAxes.has(normalized.vex.controls.turnAxis)
+            ? normalized.vex.controls.turnAxis
+            : this.defaults.settings.vex.controls.turnAxis,
+          invertForward: Boolean(normalized.vex.controls.invertForward),
+          invertStrafe: Boolean(normalized.vex.controls.invertStrafe),
+          invertTurn: Boolean(normalized.vex.controls.invertTurn),
+        },
+        tuning: {
+          deadbandPercent: Math.min(30, Math.max(0, Number(normalized.vex.tuning.deadbandPercent) || 0)),
+          maxLinearSpeedMps: Math.min(2, Math.max(0.05, Number(normalized.vex.tuning.maxLinearSpeedMps) || 0.35)),
+          maxTurnSpeedDps: Math.min(360, Math.max(5, Number(normalized.vex.tuning.maxTurnSpeedDps) || 90)),
+        },
+      },
     };
   }
 

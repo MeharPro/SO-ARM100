@@ -35,6 +35,43 @@ export interface TrajectorySettings {
   defaultHoldFinalS: number;
 }
 
+export type VexControllerAxis = "axis1" | "axis2" | "axis3" | "axis4";
+
+export interface VexDriveMotorSettings {
+  port: number;
+  reversed: boolean;
+}
+
+export interface VexDriveControls {
+  forwardAxis: VexControllerAxis;
+  strafeAxis: VexControllerAxis;
+  turnAxis: VexControllerAxis;
+  invertForward: boolean;
+  invertStrafe: boolean;
+  invertTurn: boolean;
+}
+
+export interface VexDriveTuning {
+  deadbandPercent: number;
+  maxLinearSpeedMps: number;
+  maxTurnSpeedDps: number;
+}
+
+export interface VexSettings {
+  telemetrySlot: number;
+  replaySlot: number;
+  autoRunTelemetry: boolean;
+  telemetryProgramName: string;
+  motors: {
+    frontRight: VexDriveMotorSettings;
+    frontLeft: VexDriveMotorSettings;
+    rearRight: VexDriveMotorSettings;
+    rearLeft: VexDriveMotorSettings;
+  };
+  controls: VexDriveControls;
+  tuning: VexDriveTuning;
+}
+
 export type TrainingCaptureMode = "leader" | "free-teach" | "leader-as-follower";
 
 export type ReplayTarget = "pi" | "leader";
@@ -106,6 +143,7 @@ export interface AppSettings {
   mac: MacSettings;
   host: HostSettings;
   trajectories: TrajectorySettings;
+  vex: VexSettings;
 }
 
 export interface ServiceSnapshot {
@@ -182,6 +220,15 @@ export interface LeaderStatus {
   message: string;
 }
 
+export interface VexBrainStatus {
+  connected: boolean;
+  telemetryActive: boolean;
+  consolePort: string | null;
+  commPort: string | null;
+  source: string | null;
+  message: string;
+}
+
 export interface DashboardState {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
@@ -197,6 +244,7 @@ export interface DashboardState {
   piReachable: boolean;
   resolvedPiHost: string | null;
   leader: LeaderStatus;
+  vexBrain: VexBrainStatus;
   recordings: RecordingEntry[];
   lastError: string | null;
   activityLog: string[];

@@ -16,12 +16,16 @@ from lekiwi_runtime import (
     ArmSafetyFilter,
     ResilientObservationReader,
     TorqueLimitFileWatcher,
+    apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
     configure_wrist_roll_mode,
+    disconnect_robot,
     parse_torque_limits_json,
+    stop_robot_base,
 )
+from vex_base_bridge import VexBaseBridge, add_vex_base_args
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
 
 logging.basicConfig(level=logging.WARNING)
@@ -105,6 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--print-every", type=int, default=30, help="Print every N recorded samples.")
     add_servo_safety_args(parser)
     add_torque_limit_args(parser)
+    add_vex_base_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
 
@@ -201,6 +206,14 @@ def main() -> None:
         logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_record_trajectory")
     power_logger.start()
+    vex_base_bridge = VexBaseBridge(
+        requested_port=args.vex_base_port,
+        baudrate=args.vex_base_baudrate,
+        stale_after_s=args.vex_base_stale_after_s,
+        command_timeout_s=args.vex_base_command_timeout_s,
+        logger=logger,
+    )
+    vex_base_bridge.connect()
 
     ctx = zmq.Context()
     cmd_socket = ctx.socket(zmq.PULL)
@@ -220,6 +233,7 @@ def main() -> None:
         f"LeKiwi recording host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
         flush=True,
     )
+    print(vex_base_bridge.status_message, flush=True)
     print(f"Recording exact follower motion to {output_path}", flush=True)
     print("Waiting for the first leader command before recording samples.", flush=True)
     if args.safer_servo_mode:
@@ -240,9 +254,15 @@ def main() -> None:
                     command_t_s = 0.0
                 else:
                     command_t_s = time.perf_counter() - recording_started_at
-                sent_action = robot.send_action(action)
+                sent_action = apply_robot_action(
+                    robot,
+                    action,
+                    allow_legacy_base=args.enable_base,
+                )
                 safety_filter.update(sent_action)
-                command_samples.append(build_command_sample(sent_action, command_t_s))
+                command_samples.append(
+                    build_command_sample(vex_base_bridge.merge_action(sent_action), command_t_s)
+                )
                 last_cmd_time = time.time()
                 watchdog_active = False
             except zmq.Again:
@@ -257,12 +277,12 @@ def main() -> None:
                     "Command not received for more than %s milliseconds. Stopping the base.",
                     args.watchdog_timeout_ms,
                 )
-                robot.stop_base()
+                stop_robot_base(robot, allow_legacy_base=args.enable_base)
                 watchdog_active = True
 
             torque_watcher.poll(robot)
 
-            observation = observation_reader.get_observation()
+            observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
             if recording_started_at is not None:
                 sample = build_sample(observation, time.perf_counter() - recording_started_at)
                 samples.append(sample)
@@ -305,9 +325,10 @@ def main() -> None:
         else:
             print("No leader-driven motion was recorded, so nothing was saved.", flush=True)
         try:
-            robot.disconnect()
+            disconnect_robot(robot, allow_legacy_base=args.enable_base)
         except Exception as exc:
             print(f"disconnect: {exc}", flush=True)
+        vex_base_bridge.close()
         if power_logger is not None:
             try:
                 power_logger.close()

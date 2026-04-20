@@ -10,11 +10,20 @@ from pathlib import Path
 from lekiwi_runtime import (
     ArmSafetyFilter,
     TorqueLimitFileWatcher,
+    apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
     configure_wrist_roll_mode,
+    disconnect_robot,
     parse_torque_limits_json,
+    stop_robot_base,
+)
+from vex_base_bridge import (
+    VexBaseReplayManager,
+    VexBaseTelemetryManager,
+    add_vex_base_args,
+    normalize_vex_control_config,
 )
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
 from lerobot.utils.robot_utils import precise_sleep
@@ -97,6 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--print-every", type=int, default=30, help="Print every N replayed samples.")
     add_servo_safety_args(parser)
     add_torque_limit_args(parser)
+    add_vex_base_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
 
@@ -153,6 +163,9 @@ def main() -> None:
     configure_cameras(robot_config, args.robot_cameras_json)
     robot = LeKiwi(robot_config)
     power_logger = None
+    vex_base_replay = None
+    vex_base_telemetry = None
+    vex_control_config = normalize_vex_control_config(json.loads(args.vex_control_config_json))
 
     print(f"Connecting to LeKiwi on {args.robot_port}")
     robot.connect(calibrate=False)
@@ -167,6 +180,25 @@ def main() -> None:
         logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_replay_trajectory")
     power_logger.start()
+    if args.include_base and not args.enable_base:
+        vex_base_replay = VexBaseReplayManager(
+            requested_vexcom_path=args.vex_vexcom_path,
+            replay_slot=args.vex_replay_slot,
+            cache_dir=args.vex_replay_cache_dir,
+            control_config=vex_control_config,
+            logger=logger,
+        )
+        vex_base_telemetry = VexBaseTelemetryManager(
+            requested_vexcom_path=args.vex_vexcom_path,
+            telemetry_slot=args.vex_telemetry_slot,
+            cache_dir=args.vex_program_cache_dir,
+            logger=logger,
+        )
+        print(vex_base_replay.status_message, flush=True)
+        if not vex_base_replay.enabled:
+            raise SystemExit("VEX base replay requested, but the official vexcom uploader is not available.")
+        if not vex_base_replay.launch_replay(samples):
+            raise SystemExit("VEX base replay requested, but the replay program could not be uploaded to the Brain.")
     print(f"Replaying {len(samples)} samples from {trajectory_path}")
     if args.include_base:
         print("Base replay: enabled")
@@ -186,7 +218,11 @@ def main() -> None:
 
             torque_watcher.poll(robot)
             action = safety_filter.normalize(build_action(state, include_base=args.include_base))
-            sent_action = robot.send_action(action)
+            sent_action = apply_robot_action(
+                robot,
+                action,
+                allow_legacy_base=args.enable_base,
+            )
             safety_filter.update(sent_action)
             last_action = sent_action
             power_logger.maybe_sample()
@@ -200,7 +236,7 @@ def main() -> None:
         print("\nReplay interrupted.")
     finally:
         try:
-            if last_action is not None:
+            if last_action is not None and args.enable_base:
                 robot.send_action(
                     {
                         **{key: last_action[key] for key in ARM_STATE_KEYS},
@@ -208,7 +244,7 @@ def main() -> None:
                     }
                 )
             else:
-                robot.stop_base()
+                stop_robot_base(robot, allow_legacy_base=args.enable_base)
         except Exception:
             pass
         if power_logger is not None:
@@ -216,7 +252,23 @@ def main() -> None:
                 power_logger.maybe_sample(force=True)
             except Exception:
                 pass
-        robot.disconnect()
+        if vex_base_telemetry is not None and vex_base_telemetry.enabled:
+            restored = vex_base_telemetry.install_and_run(
+                vex_control_config,
+                program_name=args.vex_telemetry_program_name,
+                run_after_install=True,
+            )
+            if restored:
+                print(
+                    f"VEX telemetry restored on slot {args.vex_telemetry_slot} ({args.vex_telemetry_program_name}).",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Warning: failed to restore VEX telemetry on slot {args.vex_telemetry_slot}.",
+                    flush=True,
+                )
+        disconnect_robot(robot, allow_legacy_base=args.enable_base)
         if power_logger is not None:
             power_logger.close()
 

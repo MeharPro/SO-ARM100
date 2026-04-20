@@ -381,3 +381,48 @@ class TorqueLimitFileWatcher:
             apply_torque_limits(robot, limits)
         except Exception as exc:
             print(f"[torque] failed to load {self.path}: {exc}", flush=True)
+
+
+def apply_robot_action(
+    robot: Any,
+    action: dict[str, Any],
+    *,
+    allow_legacy_base: bool,
+) -> dict[str, float]:
+    arm_goal_pos = {
+        key: float(value)
+        for key, value in action.items()
+        if key.endswith(".pos") and isinstance(value, (int, float))
+    }
+    base_goal_vel = {
+        key: float(action.get(key, 0.0)) if isinstance(action.get(key, 0.0), (int, float)) else 0.0
+        for key in BASE_STATE_KEYS
+    }
+
+    if allow_legacy_base:
+        return robot.send_action({**arm_goal_pos, **base_goal_vel})
+
+    arm_goal_pos_raw = {key.removesuffix(".pos"): value for key, value in arm_goal_pos.items()}
+    if arm_goal_pos_raw:
+        robot.bus.sync_write("Goal_Position", arm_goal_pos_raw)
+    return {**arm_goal_pos, **base_goal_vel}
+
+
+def stop_robot_base(robot: Any, *, allow_legacy_base: bool) -> None:
+    if allow_legacy_base:
+        robot.stop_base()
+
+
+def disconnect_robot(robot: Any, *, allow_legacy_base: bool) -> None:
+    if allow_legacy_base:
+        robot.disconnect()
+        return
+
+    try:
+        robot.bus.disconnect(False)
+    finally:
+        for cam in getattr(robot, "cameras", {}).values():
+            try:
+                cam.disconnect()
+            except Exception:
+                pass

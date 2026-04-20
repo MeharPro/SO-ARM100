@@ -42,6 +42,43 @@ export const defaultConfig: StoredConfig = {
       defaultReplaySpeed: 1,
       defaultHoldFinalS: 0.5,
     },
+    vex: {
+      telemetrySlot: 8,
+      replaySlot: 7,
+      autoRunTelemetry: true,
+      telemetryProgramName: "Base Telemetry",
+      motors: {
+        frontRight: {
+          port: 1,
+          reversed: true,
+        },
+        frontLeft: {
+          port: 2,
+          reversed: false,
+        },
+        rearRight: {
+          port: 9,
+          reversed: true,
+        },
+        rearLeft: {
+          port: 10,
+          reversed: false,
+        },
+      },
+      controls: {
+        forwardAxis: "axis2",
+        strafeAxis: "axis4",
+        turnAxis: "axis1",
+        invertForward: false,
+        invertStrafe: false,
+        invertTurn: false,
+      },
+      tuning: {
+        deadbandPercent: 5,
+        maxLinearSpeedMps: 0.35,
+        maxTurnSpeedDps: 90,
+      },
+    },
   },
   pinnedMoves: [],
   training: createDefaultTrainingConfig(process.cwd()),

@@ -59,12 +59,14 @@ import type {
   TrainingProfile,
   TrimRecordingRequest,
   TorqueLimitsRequest,
+  VexBrainStatus,
 } from "./types.js";
 
 const ROOT_DIR = process.cwd();
 const HOST_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_host.py");
 const POWER_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_power.py");
 const RUNTIME_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_runtime.py");
+const VEX_BASE_BRIDGE_SCRIPT = path.join(ROOT_DIR, "scripts", "vex_base_bridge.py");
 const PI_CALIBRATION_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_calibrate.py");
 const RECORD_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_record_trajectory.py");
 const REPLAY_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_replay_trajectory.py");
@@ -90,6 +92,7 @@ const HOST_READY_TIMEOUT_MS = 15000;
 const HOST_READY_PORTS = [5555, 5556];
 const TRAINING_METADATA_REFRESH_MS = 15000;
 const POWER_LOG_SYNC_INTERVAL_MS = 15000;
+const VEX_STATUS_REFRESH_MS = 5000;
 const ARM_MOTORS = [
   "arm_shoulder_pan",
   "arm_shoulder_lift",
@@ -145,7 +148,7 @@ function normalizeReplayRequest(
     trajectoryPath: payload.trajectoryPath.trim(),
     target: payload.target === "leader" ? "leader" : "pi",
     speed: payload.speed > 0 ? payload.speed : defaults.defaultReplaySpeed,
-    includeBase: false,
+    includeBase: payload.target === "leader" ? false : Boolean(payload.includeBase),
     holdFinalS:
       payload.holdFinalS >= 0 ? payload.holdFinalS : defaults.defaultHoldFinalS,
   };
@@ -171,6 +174,7 @@ export class RobotController {
   private lastRecordingRefresh = 0;
   private lastTrainingMetadataRefresh = 0;
   private lastPowerLogSync = 0;
+  private lastVexBrainStatusRefresh = 0;
   private lastResolvedHost: string | null = null;
   private activityLog: string[] = [];
   private queue: Promise<void> = Promise.resolve();
@@ -178,6 +182,14 @@ export class RobotController {
   private readonly remoteTorqueCache = new Map<string, string>();
   private readonly remotePowerLogCache = new Map<string, string>();
   private coupledTeleopCleanup: Promise<void> | null = null;
+  private cachedVexBrainStatus: VexBrainStatus = {
+    connected: false,
+    telemetryActive: false,
+    consolePort: null,
+    commPort: null,
+    source: null,
+    message: "VEX Brain is not connected to the Pi.",
+  };
 
   async getState(): Promise<DashboardState> {
     const { settings, pinnedMoves, training } = this.configStore.getConfig();
@@ -185,6 +197,10 @@ export class RobotController {
     const resolvedPiHost = await this.findReachablePiHost(settings);
     const piReachable = Boolean(resolvedPiHost);
     const leader = await this.getLeaderStatus(settings);
+    const hostSnapshot = this.hostRunner.getSnapshot();
+    const teleopSnapshot = this.teleopRunner.getSnapshot();
+    const replaySnapshot = this.replayRunner.getSnapshot();
+    const datasetCaptureSnapshot = this.datasetCaptureRunner.getSnapshot();
     this.lastResolvedHost = resolvedPiHost;
 
     if (resolvedPiHost && Date.now() - this.lastRecordingRefresh > 15000) {
@@ -206,6 +222,14 @@ export class RobotController {
       }
     }
 
+    const vexBrain = await this.getVexBrainStatus(
+      settings,
+      resolvedPiHost,
+      hostSnapshot,
+      replaySnapshot,
+      datasetCaptureSnapshot,
+    );
+
     let trainingConfig = training;
     if (Date.now() - this.lastTrainingMetadataRefresh > TRAINING_METADATA_REFRESH_MS) {
       try {
@@ -218,8 +242,6 @@ export class RobotController {
 
     const selectedProfile =
       trainingConfig.profiles.find((profile) => profile.id === trainingConfig.selectedProfileId) ?? null;
-    const hostSnapshot = this.hostRunner.getSnapshot();
-    const teleopSnapshot = this.teleopRunner.getSnapshot();
     this.maybeCleanupCoupledTeleopFailure(hostSnapshot, teleopSnapshot);
     const warmHostReplaySnapshot = this.deriveWarmHostReplaySnapshot(hostSnapshot);
 
@@ -234,6 +256,7 @@ export class RobotController {
       piReachable,
       resolvedPiHost,
       leader,
+      vexBrain,
       recordings: this.cachedRecordings,
       lastError: this.lastError,
       activityLog: [...this.activityLog],
@@ -241,14 +264,14 @@ export class RobotController {
         host: hostSnapshot,
         teleop: teleopSnapshot,
         replay: this.pickServiceSnapshot(
-          this.replayRunner.getSnapshot(),
+          replaySnapshot,
           this.localReplayRunner.getSnapshot(),
           warmHostReplaySnapshot,
         ),
         piCalibration: this.piCalibrationRunner.getSnapshot(),
         macCalibration: this.macCalibrationRunner.getSnapshot(),
         datasetCapture: this.pickServiceSnapshot(
-          this.datasetCaptureRunner.getSnapshot(),
+          datasetCaptureSnapshot,
           this.localDatasetCaptureRunner.getSnapshot(),
         ),
         datasetSync: this.datasetSyncRunner.getSnapshot(),
@@ -264,6 +287,27 @@ export class RobotController {
     return this.runExclusive(async () => {
       this.logActivity("Saving updated dashboard settings.");
       this.configStore.saveSettings(settings);
+      const nextSettings = this.configStore.getConfig().settings;
+      const host = await this.findReachablePiHost(nextSettings);
+      if (host && nextSettings.vex.autoRunTelemetry) {
+        await this.syncVexTelemetryProgramOnPi(
+          nextSettings,
+          host,
+          "apply updated VEX control settings",
+          false,
+        );
+      }
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async syncVexTelemetryProgram(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      this.logActivity("Sync VEX telemetry requested.");
+      const host = await this.preparePi(settings, "sync VEX telemetry");
+      await this.syncVexTelemetryProgramOnPi(settings, host, "manual VEX telemetry sync", true);
       this.lastError = null;
       return this.getState();
     });
@@ -368,6 +412,9 @@ export class RobotController {
         assertHelperExists(POWER_SCRIPT);
         assertHelperExists(RUNTIME_SCRIPT);
         await this.ensureRemoteHelpers(settings, host);
+        if (settings.vex.autoRunTelemetry) {
+          await this.syncVexTelemetryProgramOnPi(settings, host, "start training capture", false);
+        }
         await this.writeRemoteTorqueLimits(settings, host);
 
         await this.datasetCaptureRunner.start(
@@ -702,6 +749,9 @@ export class RobotController {
       assertHelperExists(POWER_SCRIPT);
       assertHelperExists(RUNTIME_SCRIPT);
       await this.ensureRemoteHelpers(settings, host);
+      if (settings.vex.autoRunTelemetry) {
+        await this.syncVexTelemetryProgramOnPi(settings, host, "start control", false);
+      }
       await this.writeRemoteTorqueLimits(settings, host);
 
       await this.replayRunner.stop("Stopping replay before live control.");
@@ -745,6 +795,9 @@ export class RobotController {
       assertHelperExists(POWER_SCRIPT);
       assertHelperExists(RUNTIME_SCRIPT);
       await this.ensureRemoteHelpers(settings, host);
+      if (settings.vex.autoRunTelemetry) {
+        await this.syncVexTelemetryProgramOnPi(settings, host, "arm keyboard hotkeys", false);
+      }
       await this.writeRemoteTorqueLimits(settings, host);
 
       await this.stopRobotExclusiveProcesses("Preparing keyboard-ready hotkey host.");
@@ -963,6 +1016,9 @@ export class RobotController {
       assertHelperExists(RECORD_SCRIPT);
       assertHelperExists(RUNTIME_SCRIPT);
       await this.ensureRemoteHelpers(settings, host);
+      if (settings.vex.autoRunTelemetry) {
+        await this.syncVexTelemetryProgramOnPi(settings, host, "start recording", false);
+      }
       await this.writeRemoteTorqueLimits(settings, host);
 
       await this.replayRunner.stop("Recording takes over the robot.");
@@ -1111,7 +1167,9 @@ export class RobotController {
         throw new Error("Choose a saved trajectory before starting replay.");
       }
       this.logActivity(
-        `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}.`,
+        `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}${
+          replay.target === "pi" ? ` (${replay.includeBase ? "VEX base + arm" : "arm only"})` : ""
+        }.`,
       );
 
       await this.replayRunner.stop("Restarting replay.");
@@ -1187,9 +1245,14 @@ export class RobotController {
   async stopReplay(): Promise<DashboardState> {
     return this.runExclusive(async () => {
       this.logActivity("Stop replay requested.");
+      const { settings } = this.configStore.getConfig();
       await this.replayRunner.stop("Stopping replay.");
       await this.localReplayRunner.stop("Stopping replay.");
-      await this.stopWarmHostReplay(this.configStore.getConfig().settings, "Stopping warm-host replay.");
+      await this.stopWarmHostReplay(settings, "Stopping warm-host replay.");
+      const host = await this.findReachablePiHost(settings);
+      if (host && settings.vex.autoRunTelemetry) {
+        await this.syncVexTelemetryProgramOnPi(settings, host, "restore controller telemetry after replay", false);
+      }
       this.lastError = null;
       return this.getState();
     });
@@ -1594,6 +1657,23 @@ export class RobotController {
     return settings.host.saferServoMode ? " \\\n  --safer-servo-mode" : "";
   }
 
+  private buildVexControlConfig(settings: AppSettings): Record<string, unknown> {
+    return {
+      motors: structuredClone(settings.vex.motors),
+      controls: structuredClone(settings.vex.controls),
+      tuning: structuredClone(settings.vex.tuning),
+    };
+  }
+
+  private buildVexBaseFlags(settings: AppSettings): string {
+    return [
+      `  --vex-telemetry-slot ${settings.vex.telemetrySlot} \\`,
+      `  --vex-telemetry-program-name ${shellQuote(settings.vex.telemetryProgramName)} \\`,
+      `  --vex-replay-slot ${settings.vex.replaySlot} \\`,
+      `  --vex-control-config-json ${shellQuote(JSON.stringify(this.buildVexControlConfig(settings)))}`,
+    ].join("\n");
+  }
+
   private clampTorqueLimit(value: unknown): number {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
@@ -1640,6 +1720,310 @@ JSON
 
   private getTeleoperateScriptPath(settings: AppSettings): string {
     return path.join(settings.mac.projectDir, "examples", "lekiwi", "teleoperate.py");
+  }
+
+  private defaultVexBrainStatus(message: string): VexBrainStatus {
+    return {
+      connected: false,
+      telemetryActive: false,
+      consolePort: null,
+      commPort: null,
+      source: null,
+      message,
+    };
+  }
+
+  private shouldProbeVexBrainConsole(...snapshots: ServiceSnapshot[]): boolean {
+    return snapshots.every((snapshot) => snapshot.state === "idle");
+  }
+
+  private describeActiveVexConsumer(...snapshots: ServiceSnapshot[]): string {
+    return snapshots.find((snapshot) => snapshot.state !== "idle")?.label ?? "another Pi task";
+  }
+
+  private buildVexBrainStatusScript(
+    settings: AppSettings,
+    probeConsole: boolean,
+    activeConsumer: string | null,
+  ): string {
+    const activeConsumerLiteral = activeConsumer === null ? "None" : JSON.stringify(activeConsumer);
+    const probeConsoleLiteral = probeConsole ? "True" : "False";
+    const telemetryMessage = JSON.stringify(
+      `VEX Brain is connected, but no telemetry is coming out. Run slot ${settings.vex.telemetrySlot} ${settings.vex.telemetryProgramName} on the Brain.`,
+    );
+    return `
+python - <<'PY'
+import glob
+import json
+import time
+from pathlib import Path
+
+try:
+    import serial
+except Exception:
+    serial = None
+
+PORT_GLOB = "/dev/serial/by-id/*VEX_Robotics_V5_Brain*"
+paths = sorted(glob.glob(PORT_GLOB))
+probe_console = ${probeConsoleLiteral}
+active_consumer = ${activeConsumerLiteral}
+
+
+def pick(*suffixes):
+    for suffix in suffixes:
+        for candidate in paths:
+            if suffix in Path(candidate).name:
+                return candidate
+    return None
+
+
+console_port = pick("if02", "if00")
+comm_port = pick("if00", "if01")
+payload = {
+    "connected": bool(paths),
+    "telemetryActive": False,
+    "consolePort": console_port,
+    "commPort": comm_port,
+    "source": None,
+}
+
+if not paths:
+    payload["message"] = "VEX Brain is not connected to the Pi."
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+if not probe_console:
+    payload["message"] = (
+        f"VEX Brain is connected on the Pi. Live telemetry probe is paused while {active_consumer} is active."
+    )
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+if serial is None:
+    payload["message"] = "VEX Brain is connected, but pyserial is unavailable on the Pi."
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+if console_port is None:
+    payload["message"] = "VEX Brain is connected, but the Pi cannot see the Brain console port."
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+try:
+    handle = serial.Serial(console_port, baudrate=115200, timeout=0.05)
+except Exception as exc:
+    payload["message"] = f"VEX Brain is connected on {console_port}, but the console port could not be opened: {exc}"
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+buffer = ""
+deadline = time.time() + 0.8
+
+try:
+    while time.time() < deadline:
+        available = int(getattr(handle, "in_waiting", 0) or 0)
+        chunk = handle.read(available or 1)
+        if chunk:
+            buffer += chunk.decode("utf-8", errors="ignore")
+
+        while "\\n" in buffer:
+            line, buffer = buffer.split("\\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                candidate = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(candidate, dict):
+                continue
+            if not all(key in candidate for key in ("x.vel", "y.vel", "theta.vel")):
+                continue
+            payload["telemetryActive"] = True
+            source = candidate.get("source")
+            payload["source"] = source if isinstance(source, str) else None
+            break
+
+        if payload["telemetryActive"]:
+            break
+
+        time.sleep(0.03)
+finally:
+    handle.close()
+
+if payload["telemetryActive"]:
+    source = payload["source"] or "telemetry"
+    payload["message"] = f"VEX Brain telemetry is active on {console_port} ({source})."
+else:
+    payload["message"] = ${telemetryMessage}
+
+print(json.dumps(payload))
+PY
+`.trim();
+  }
+
+  private buildVexTelemetrySyncScript(settings: AppSettings, runAfterInstall: boolean): string {
+    return `
+export PYTHONPATH=${shellQuote(`${settings.pi.remoteHelperDir}/scripts`)}:$PYTHONPATH
+export LEKIWI_VEX_CONTROL_CONFIG=${shellQuote(JSON.stringify(this.buildVexControlConfig(settings)))}
+export LEKIWI_VEX_TELEMETRY_SLOT=${shellQuote(String(settings.vex.telemetrySlot))}
+export LEKIWI_VEX_TELEMETRY_NAME=${shellQuote(settings.vex.telemetryProgramName)}
+export LEKIWI_VEX_RUN_AFTER_INSTALL=${shellQuote(runAfterInstall ? "1" : "0")}
+python3 - <<'PY'
+import json
+import logging
+import os
+
+from vex_base_bridge import VexBaseTelemetryManager
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger("vex_base_telemetry_sync")
+
+control_config = json.loads(os.environ["LEKIWI_VEX_CONTROL_CONFIG"])
+manager = VexBaseTelemetryManager(
+    requested_vexcom_path="auto",
+    telemetry_slot=int(os.environ["LEKIWI_VEX_TELEMETRY_SLOT"]),
+    cache_dir="~/.lekiwi-vex/programs",
+    logger=logger,
+)
+result = {
+    "enabled": manager.enabled,
+    "success": False,
+    "status": manager.status_message,
+}
+if manager.enabled:
+    result["success"] = manager.install_and_run(
+        control_config,
+        program_name=os.environ["LEKIWI_VEX_TELEMETRY_NAME"],
+        run_after_install=os.environ["LEKIWI_VEX_RUN_AFTER_INSTALL"] == "1",
+    )
+print(json.dumps(result))
+PY
+`.trim();
+  }
+
+  private async syncVexTelemetryProgramOnPi(
+    settings: AppSettings,
+    host: string,
+    reason: string,
+    strict: boolean,
+  ): Promise<boolean> {
+    try {
+      await this.ensureRemoteHelpers(settings, host);
+      const { stdout } = await this.execRemoteScript(
+        this.buildVexTelemetrySyncScript(settings, true),
+        host,
+        settings,
+      );
+      const parsed = stdout ? JSON.parse(stdout) : null;
+      const enabled = Boolean(parsed?.enabled);
+      const success = Boolean(parsed?.success);
+      const status =
+        typeof parsed?.status === "string" && parsed.status.trim()
+          ? parsed.status.trim()
+          : "VEX telemetry sync completed.";
+
+      this.lastVexBrainStatusRefresh = 0;
+
+      if (!enabled) {
+        if (strict) {
+          throw new Error(status);
+        }
+        this.logActivity(`Skipping ${reason}: ${status}`);
+        return false;
+      }
+
+      if (!success) {
+        if (strict) {
+          throw new Error(status);
+        }
+        this.logActivity(`VEX telemetry sync failed during ${reason}: ${status}`);
+        return false;
+      }
+
+      this.logActivity(`VEX telemetry ready for ${reason} on slot ${settings.vex.telemetrySlot}.`);
+      return true;
+    } catch (error) {
+      this.lastVexBrainStatusRefresh = 0;
+      if (strict) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      this.logActivity(`VEX telemetry sync skipped during ${reason}: ${message}`);
+      return false;
+    }
+  }
+
+  private normalizeVexBrainStatus(candidate: unknown, fallbackMessage: string): VexBrainStatus {
+    if (!candidate || typeof candidate !== "object") {
+      return this.defaultVexBrainStatus(fallbackMessage);
+    }
+
+    const payload = candidate as Partial<VexBrainStatus>;
+    return {
+      connected: Boolean(payload.connected),
+      telemetryActive: Boolean(payload.telemetryActive),
+      consolePort: typeof payload.consolePort === "string" ? payload.consolePort : null,
+      commPort: typeof payload.commPort === "string" ? payload.commPort : null,
+      source: typeof payload.source === "string" ? payload.source : null,
+      message: typeof payload.message === "string" && payload.message.trim() ? payload.message : fallbackMessage,
+    };
+  }
+
+  private async getVexBrainStatus(
+    settings: AppSettings,
+    resolvedPiHost: string | null,
+    hostSnapshot: ServiceSnapshot,
+    replaySnapshot: ServiceSnapshot,
+    datasetCaptureSnapshot: ServiceSnapshot,
+  ): Promise<VexBrainStatus> {
+    if (!resolvedPiHost) {
+      const offline = this.defaultVexBrainStatus("Pi is offline, so VEX Brain status is unavailable.");
+      this.cachedVexBrainStatus = offline;
+      this.lastVexBrainStatusRefresh = Date.now();
+      return offline;
+    }
+
+    if (Date.now() - this.lastVexBrainStatusRefresh < VEX_STATUS_REFRESH_MS) {
+      return this.cachedVexBrainStatus;
+    }
+
+    const probeConsole = this.shouldProbeVexBrainConsole(
+      hostSnapshot,
+      replaySnapshot,
+      datasetCaptureSnapshot,
+    );
+    const activeConsumer = probeConsole
+      ? null
+      : this.describeActiveVexConsumer(hostSnapshot, replaySnapshot, datasetCaptureSnapshot);
+
+    try {
+      const { stdout } = await this.execRemoteScript(
+        this.buildVexBrainStatusScript(settings, probeConsole, activeConsumer),
+        resolvedPiHost,
+        settings,
+      );
+      const parsed = stdout ? JSON.parse(stdout) : null;
+      const fallbackMessage = probeConsole
+        ? "VEX Brain status probe returned no data."
+        : `VEX Brain is connected on the Pi. Live telemetry probe is paused while ${activeConsumer} is active.`;
+      const normalized = this.normalizeVexBrainStatus(parsed, fallbackMessage);
+      this.cachedVexBrainStatus = normalized;
+      this.lastVexBrainStatusRefresh = Date.now();
+      return normalized;
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? `Could not check the VEX Brain on the Pi: ${error.message}`
+          : "Could not check the VEX Brain on the Pi.";
+      const fallback = {
+        ...this.cachedVexBrainStatus,
+        message,
+      };
+      this.cachedVexBrainStatus = fallback;
+      this.lastVexBrainStatusRefresh = Date.now();
+      return fallback;
+    }
   }
 
   private async getLeaderStatus(settings: AppSettings): Promise<LeaderStatus> {
@@ -1723,6 +2107,7 @@ JSON
       ? ` \\\n  --ui-command-path ${shellQuote(this.getRemoteHostCommandPath(settings))}`
       : "";
     const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
+    const vexBaseFlags = this.buildVexBaseFlags(settings);
     return [
       this.buildPiActivation(settings),
       `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_host.py`)} \\`,
@@ -1735,7 +2120,8 @@ JSON
       `  --torque-limits-path ${shellQuote(this.getRemoteTorqueLimitsPath(settings))} \\`,
       `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
-      `  --enable-base false${uiCommandFlag}${saferServoModeFlag}`,
+      `  --enable-base false \\`,
+      `${vexBaseFlags}${uiCommandFlag}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -1767,6 +2153,7 @@ JSON
   private buildReplayScript(settings: AppSettings, replay: ReplayRequest): string {
     const includeBaseFlag = replay.includeBase ? " \\\n  --include-base" : "";
     const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
+    const vexBaseFlags = this.buildVexBaseFlags(settings);
     return [
       this.buildPiActivation(settings),
       `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_replay_trajectory.py`)} \\`,
@@ -1779,6 +2166,7 @@ JSON
       `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
       `  --enable-base false \\`,
+      `${vexBaseFlags} \\`,
       `  --input ${shellQuote(replay.trajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
       `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${saferServoModeFlag}`,
@@ -2017,6 +2405,7 @@ fi
         this.fastPut(sftp, HOST_SCRIPT, `${helperDir}/lekiwi_host.py`),
         this.fastPut(sftp, POWER_SCRIPT, `${helperDir}/lekiwi_power.py`),
         this.fastPut(sftp, RUNTIME_SCRIPT, `${helperDir}/lekiwi_runtime.py`),
+        this.fastPut(sftp, VEX_BASE_BRIDGE_SCRIPT, `${helperDir}/vex_base_bridge.py`),
         this.fastPut(sftp, PI_CALIBRATION_SCRIPT, `${helperDir}/lekiwi_calibrate.py`),
         this.fastPut(sftp, RECORD_SCRIPT, `${helperDir}/lekiwi_record_trajectory.py`),
         this.fastPut(sftp, REPLAY_SCRIPT, `${helperDir}/lekiwi_replay_trajectory.py`),
@@ -2392,6 +2781,7 @@ PY
       HOST_SCRIPT,
       POWER_SCRIPT,
       RUNTIME_SCRIPT,
+      VEX_BASE_BRIDGE_SCRIPT,
       PI_CALIBRATION_SCRIPT,
       RECORD_SCRIPT,
       REPLAY_SCRIPT,

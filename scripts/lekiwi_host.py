@@ -16,11 +16,21 @@ from lekiwi_runtime import (
     ArmSafetyFilter,
     ResilientObservationReader,
     TorqueLimitFileWatcher,
+    apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
     configure_wrist_roll_mode,
+    disconnect_robot,
     parse_torque_limits_json,
+    stop_robot_base,
+)
+from vex_base_bridge import (
+    VexBaseBridge,
+    VexBaseReplayManager,
+    VexBaseTelemetryManager,
+    add_vex_base_args,
+    normalize_vex_control_config,
 )
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
 from lerobot.utils.robot_utils import precise_sleep
@@ -201,12 +211,19 @@ def build_replay_action(state: dict[str, Any], include_base: bool) -> dict[str, 
     return action
 
 
-def publish_observation(observation_reader: ResilientObservationReader, obs_socket: Any) -> None:
+def publish_observation(
+    observation_reader: ResilientObservationReader,
+    obs_socket: Any,
+    vex_base_bridge: VexBaseBridge | None = None,
+) -> None:
     try:
         observation = observation_reader.get_observation()
     except Exception as exc:
         logger.warning("Observation read failed: %s", exc)
         return
+
+    if vex_base_bridge is not None:
+        observation = vex_base_bridge.merge_observation(observation)
 
     for cam_key in observation_reader.robot.cameras:
         frame = observation.get(cam_key)
@@ -224,17 +241,22 @@ def publish_observation(observation_reader: ResilientObservationReader, obs_sock
         logger.warning("Observation publish failed: %s", exc)
 
 
-def stop_replay_motion(robot: LeKiwi, last_action: dict[str, float] | None) -> None:
+def stop_replay_motion(
+    robot: LeKiwi,
+    last_action: dict[str, float] | None,
+    *,
+    allow_legacy_base: bool,
+) -> None:
     try:
-        if last_action is not None:
+        if last_action is not None and allow_legacy_base:
             robot.send_action(
                 {
                     **{key: last_action[key] for key in ARM_STATE_KEYS},
                     **dict.fromkeys(BASE_STATE_KEYS, 0.0),
                 }
             )
-        else:
-            robot.stop_base()
+        elif allow_legacy_base:
+            stop_robot_base(robot, allow_legacy_base=True)
     except Exception:
         pass
 
@@ -260,7 +282,13 @@ def execute_replay(
     cmd_socket: Any,
     obs_socket: Any,
     ui_command_watcher: UiCommandWatcher,
+    vex_base_bridge: VexBaseBridge | None,
+    vex_base_replay: VexBaseReplayManager | None,
+    vex_base_telemetry: VexBaseTelemetryManager | None,
+    vex_control_config: dict[str, Any],
+    vex_telemetry_program_name: str,
     loop_hz: float,
+    allow_legacy_base: bool,
 ) -> dict[str, Any] | None:
     try:
         trajectory_path, samples = load_trajectory(command["trajectory_path"])
@@ -272,6 +300,14 @@ def execute_replay(
     hold_final_s = float(command["hold_final_s"])
     include_base = bool(command["include_base"])
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
+    replay_to_vex_base = include_base and not allow_legacy_base
+
+    if replay_to_vex_base and (vex_base_replay is None or not vex_base_replay.enabled):
+        print("[replay] error VEX base replay requested, but vexcom or the V5 Brain communication port is unavailable.", flush=True)
+        return None
+    if replay_to_vex_base and vex_base_replay is not None and not vex_base_replay.launch_replay(samples):
+        print("[replay] error failed to upload the VEX base replay program to the Brain.", flush=True)
+        return None
 
     print(
         "[replay] start "
@@ -308,11 +344,15 @@ def execute_replay(
             precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
             torque_watcher.poll(robot)
             action = replay_filter.normalize(build_replay_action(state, include_base=include_base))
-            sent_action = robot.send_action(action)
+            sent_action = apply_robot_action(
+                robot,
+                action,
+                allow_legacy_base=allow_legacy_base,
+            )
             replay_filter.update(sent_action)
             last_action = sent_action
             power_logger.maybe_sample()
-            publish_observation(observation_reader, obs_socket)
+            publish_observation(observation_reader, obs_socket, vex_base_bridge)
 
         if last_action is not None and hold_final_s > 0:
             hold_until = time.perf_counter() + hold_final_s
@@ -330,7 +370,7 @@ def execute_replay(
 
                 torque_watcher.poll(robot)
                 power_logger.maybe_sample()
-                publish_observation(observation_reader, obs_socket)
+                publish_observation(observation_reader, obs_socket, vex_base_bridge)
                 precise_sleep(min(sleep_step_s, max(hold_until - time.perf_counter(), 0.0)))
 
         print(f"[replay] complete path={trajectory_path}", flush=True)
@@ -339,7 +379,27 @@ def execute_replay(
         print(f"[replay] error path={trajectory_path}: {exc}", flush=True)
         return None
     finally:
-        stop_replay_motion(robot, last_action)
+        stop_replay_motion(
+            robot,
+            last_action,
+            allow_legacy_base=allow_legacy_base,
+        )
+        if replay_to_vex_base and vex_base_telemetry is not None and vex_base_telemetry.enabled:
+            restored = vex_base_telemetry.install_and_run(
+                vex_control_config,
+                program_name=vex_telemetry_program_name,
+                run_after_install=True,
+            )
+            if restored:
+                print(
+                    f"[replay] restored-vex-telemetry slot={vex_base_telemetry.telemetry_slot} name={vex_telemetry_program_name}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[replay] warning failed to restore VEX telemetry on slot={vex_base_telemetry.telemetry_slot}",
+                    flush=True,
+                )
         drain_command_socket(cmd_socket)
 
 
@@ -364,6 +424,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ui-command-path", default="")
     add_servo_safety_args(parser)
     add_torque_limit_args(parser)
+    add_vex_base_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
 
@@ -408,6 +469,28 @@ def main() -> None:
 
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_host")
     power_logger.start()
+    vex_base_bridge = VexBaseBridge(
+        requested_port=args.vex_base_port,
+        baudrate=args.vex_base_baudrate,
+        stale_after_s=args.vex_base_stale_after_s,
+        command_timeout_s=args.vex_base_command_timeout_s,
+        logger=logger,
+    )
+    vex_base_bridge.connect()
+    vex_control_config = normalize_vex_control_config(json.loads(args.vex_control_config_json))
+    vex_base_telemetry = VexBaseTelemetryManager(
+        requested_vexcom_path=args.vex_vexcom_path,
+        telemetry_slot=args.vex_telemetry_slot,
+        cache_dir=args.vex_program_cache_dir,
+        logger=logger,
+    )
+    vex_base_replay = VexBaseReplayManager(
+        requested_vexcom_path=args.vex_vexcom_path,
+        replay_slot=args.vex_replay_slot,
+        cache_dir=args.vex_replay_cache_dir,
+        control_config=vex_control_config,
+        logger=logger,
+    )
 
     ctx = zmq.Context()
     cmd_socket = ctx.socket(zmq.PULL)
@@ -426,6 +509,9 @@ def main() -> None:
         f"LeKiwi host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
         flush=True,
     )
+    print(vex_base_bridge.status_message, flush=True)
+    print(vex_base_telemetry.status_message, flush=True)
+    print(vex_base_replay.status_message, flush=True)
     if args.safer_servo_mode:
         print("Safer servo mode enabled: wrist continuity and bounded arm steps are active.", flush=True)
 
@@ -448,11 +534,17 @@ def main() -> None:
                         cmd_socket,
                         obs_socket,
                         ui_command_watcher,
+                        vex_base_bridge,
+                        vex_base_replay,
+                        vex_base_telemetry,
+                        vex_control_config,
+                        args.vex_telemetry_program_name,
                         args.loop_hz,
+                        args.enable_base,
                     )
                 else:
                     try:
-                        robot.stop_base()
+                        stop_robot_base(robot, allow_legacy_base=args.enable_base)
                     except Exception:
                         pass
                     pending_ui_command = None
@@ -463,7 +555,11 @@ def main() -> None:
             try:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
                 action = live_safety_filter.normalize(dict(json.loads(msg)))
-                sent_action = robot.send_action(action)
+                sent_action = apply_robot_action(
+                    robot,
+                    action,
+                    allow_legacy_base=args.enable_base,
+                )
                 live_safety_filter.update(sent_action)
                 replay_safety_filter.update(sent_action)
                 last_cmd_time = time.time()
@@ -480,11 +576,11 @@ def main() -> None:
                     "Command not received for more than %s milliseconds. Stopping the base.",
                     args.watchdog_timeout_ms,
                 )
-                robot.stop_base()
+                stop_robot_base(robot, allow_legacy_base=args.enable_base)
                 watchdog_active = True
 
             torque_watcher.poll(robot)
-            publish_observation(observation_reader, obs_socket)
+            publish_observation(observation_reader, obs_socket, vex_base_bridge)
 
             power_logger.maybe_sample()
 
@@ -494,9 +590,10 @@ def main() -> None:
         print("\nStopping LeKiwi host", flush=True)
     finally:
         try:
-            robot.disconnect()
+            disconnect_robot(robot, allow_legacy_base=args.enable_base)
         except Exception as exc:
             print(f"disconnect: {exc}", flush=True)
+        vex_base_bridge.close()
         power_logger.maybe_sample(force=True)
         power_logger.close()
         cmd_socket.close()

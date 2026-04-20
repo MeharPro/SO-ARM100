@@ -15,12 +15,16 @@ from lekiwi_runtime import (
     ArmSafetyFilter,
     ResilientObservationReader,
     TorqueLimitFileWatcher,
+    apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
     configure_wrist_roll_mode,
+    disconnect_robot,
     parse_torque_limits_json,
+    stop_robot_base,
 )
+from vex_base_bridge import VexBaseBridge, add_vex_base_args
 from lerobot.datasets.feature_utils import build_dataset_frame, hw_to_dataset_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.processor import make_default_processors
@@ -124,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-writer-threads", type=int, default=4)
     add_servo_safety_args(parser)
     add_torque_limit_args(parser)
+    add_vex_base_args(parser)
     add_power_monitor_args(parser)
     return parser.parse_args()
 
@@ -203,6 +208,14 @@ def main() -> None:
 
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_record_dataset_host")
     power_logger.start()
+    vex_base_bridge = VexBaseBridge(
+        requested_port=args.vex_base_port,
+        baudrate=args.vex_base_baudrate,
+        stale_after_s=args.vex_base_stale_after_s,
+        command_timeout_s=args.vex_base_command_timeout_s,
+        logger=logger,
+    )
+    vex_base_bridge.connect()
 
     ctx = zmq.Context()
     cmd_socket = ctx.socket(zmq.PULL)
@@ -217,6 +230,7 @@ def main() -> None:
         f"LeKiwi dataset capture host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
         flush=True,
     )
+    print(vex_base_bridge.status_message, flush=True)
     print(f"Capture mode: {args.capture_mode}", flush=True)
     print(f"Dataset root: {Path(args.dataset_root).expanduser()}", flush=True)
     print(f"Target episodes: {args.num_episodes} at {args.fps} fps", flush=True)
@@ -235,7 +249,8 @@ def main() -> None:
             flush=True,
         )
         dataset.finalize()
-        robot.disconnect()
+        disconnect_robot(robot, allow_legacy_base=args.enable_base)
+        vex_base_bridge.close()
         power_logger.close()
         cmd_socket.close()
         obs_socket.close()
@@ -275,24 +290,29 @@ def main() -> None:
             except Exception as exc:
                 logger.warning("Command fetch failed: %s", exc)
 
-            observation = observation_reader.get_observation()
+            observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
             torque_watcher.poll(robot)
 
             now = time.time()
             if (now - last_cmd_time > args.watchdog_timeout_ms / 1000.0) and not watchdog_active:
-                robot.stop_base()
+                stop_robot_base(robot, allow_legacy_base=args.enable_base)
                 watchdog_active = True
 
             if args.capture_mode == "free-teach":
                 current_action = make_free_teach_action(observation)
 
             if phase == "recording":
-                sent_action = robot.send_action(safety_filter.normalize(current_action))
+                sent_action = apply_robot_action(
+                    robot,
+                    safety_filter.normalize(current_action),
+                    allow_legacy_base=args.enable_base,
+                )
                 safety_filter.update(sent_action)
                 processed_obs = robot_observation_processor(observation)
+                recorded_action = vex_base_bridge.merge_action(sent_action)
                 frame = {
                     **build_dataset_frame(dataset.features, processed_obs, prefix=OBS_STR),
-                    **build_dataset_frame(dataset.features, sent_action, prefix=ACTION),
+                    **build_dataset_frame(dataset.features, recorded_action, prefix=ACTION),
                     "task": args.task,
                 }
                 dataset.add_frame(frame)
@@ -314,7 +334,11 @@ def main() -> None:
                         flush=True,
                     )
             else:
-                sent_action = robot.send_action(safety_filter.normalize(current_action))
+                sent_action = apply_robot_action(
+                    robot,
+                    safety_filter.normalize(current_action),
+                    allow_legacy_base=args.enable_base,
+                )
                 safety_filter.update(sent_action)
                 if time.perf_counter() - reset_start >= args.reset_time_s:
                     phase = "recording"
@@ -352,9 +376,10 @@ def main() -> None:
         except Exception as exc:
             print(f"dataset finalize: {exc}", flush=True)
         try:
-            robot.disconnect()
+            disconnect_robot(robot, allow_legacy_base=args.enable_base)
         except Exception as exc:
             print(f"disconnect: {exc}", flush=True)
+        vex_base_bridge.close()
         power_logger.close()
         cmd_socket.close()
         obs_socket.close()
