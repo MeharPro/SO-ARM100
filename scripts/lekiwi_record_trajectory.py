@@ -14,6 +14,7 @@ import zmq
 
 from lekiwi_runtime import (
     ArmSafetyFilter,
+    ResilientObservationReader,
     TorqueLimitFileWatcher,
     add_servo_safety_args,
     add_torque_limit_args,
@@ -193,8 +194,9 @@ def main() -> None:
         enabled=args.safer_servo_mode,
         map_wrist_to_follower_start=True,
     )
+    observation_reader = ResilientObservationReader(robot, logger)
     try:
-        safety_filter.seed_from_observation(robot.get_observation())
+        safety_filter.seed_from_observation(observation_reader.get_observation())
     except Exception as exc:
         logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
     power_logger = PowerTelemetryLogger(robot, args, logger, "lekiwi_record_trajectory")
@@ -260,7 +262,7 @@ def main() -> None:
 
             torque_watcher.poll(robot)
 
-            observation = robot.get_observation()
+            observation = observation_reader.get_observation()
             if recording_started_at is not None:
                 sample = build_sample(observation, time.perf_counter() - recording_started_at)
                 samples.append(sample)
@@ -270,7 +272,11 @@ def main() -> None:
 
             encoded_observation = dict(observation)
             for cam_key in robot.cameras:
-                ret, buffer = cv2.imencode(".jpg", encoded_observation[cam_key], [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                frame = encoded_observation.get(cam_key)
+                if isinstance(frame, str) or frame is None:
+                    encoded_observation[cam_key] = ""
+                    continue
+                ret, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                 encoded_observation[cam_key] = base64.b64encode(buffer).decode("utf-8") if ret else ""
 
             try:

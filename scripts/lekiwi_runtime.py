@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ ARM_MOTORS = (
 TORQUE_LIMIT_MIN = 0
 TORQUE_LIMIT_MAX = 1000
 ARM_STATE_KEYS = tuple(f"{motor}.pos" for motor in ARM_MOTORS)
+BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
 WRIST_ROLL_KEY = "arm_wrist_roll.pos"
 GRIPPER_KEY = "arm_gripper.pos"
 WRIST_ROLL_MOTOR = "arm_wrist_roll"
@@ -98,6 +100,115 @@ def add_servo_safety_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Enable wrist continuity handling plus per-command arm step limiting.",
     )
+
+
+class ResilientObservationReader:
+    def __init__(
+        self,
+        robot: Any,
+        logger: logging.Logger,
+        *,
+        read_retries: int = 2,
+        warning_interval_s: float = 1.0,
+    ) -> None:
+        self.robot = robot
+        self.logger = logger
+        self.read_retries = max(int(read_retries), 1)
+        self.warning_interval_s = max(float(warning_interval_s), 0.0)
+        arm_state_cache = {
+            f"{motor}.pos": 0.0 for motor in getattr(robot, "arm_motors", ARM_MOTORS)
+        }
+        self.cached_state: dict[str, float] = {
+            **arm_state_cache,
+            **dict.fromkeys(BASE_STATE_KEYS, 0.0),
+        }
+        self.cached_frames: dict[str, Any] = {}
+        self.next_warning_at: dict[str, float] = {}
+
+    def _warn(self, key: str, message: str, *args: Any) -> None:
+        now = time.time()
+        next_warning_at = self.next_warning_at.get(key, 0.0)
+        if now < next_warning_at:
+            return
+        self.next_warning_at[key] = now + self.warning_interval_s
+        self.logger.warning(message, *args)
+
+    def _read_with_fallback(
+        self,
+        data_name: str,
+        motors: list[str],
+        cache_suffix: str,
+    ) -> dict[str, float]:
+        if not motors:
+            return {}
+
+        try:
+            return self.robot.bus.sync_read(data_name, motors, num_retry=self.read_retries)
+        except Exception as exc:
+            self._warn(
+                f"sync:{data_name}",
+                "Observation sync_read(%s) failed for %s: %s",
+                data_name,
+                motors,
+                exc,
+            )
+
+        values: dict[str, float] = {}
+        for motor in motors:
+            try:
+                values[motor] = self.robot.bus.read(data_name, motor, num_retry=self.read_retries)
+            except Exception as exc:
+                cache_key = f"{motor}{cache_suffix}"
+                values[motor] = self.cached_state.get(cache_key, 0.0)
+                self._warn(
+                    f"read:{data_name}:{motor}",
+                    "Observation read(%s, %s) failed, using cached value %.3f: %s",
+                    data_name,
+                    motor,
+                    values[motor],
+                    exc,
+                )
+
+        return values
+
+    def get_observation(self) -> dict[str, Any]:
+        arm_motors = list(getattr(self.robot, "arm_motors", []))
+        arm_pos = self._read_with_fallback("Present_Position", arm_motors, ".pos")
+
+        base_vel = dict.fromkeys(BASE_STATE_KEYS, 0.0)
+        base_motors = list(getattr(self.robot, "base_motors", []))
+        if len(base_motors) >= 3:
+            base_wheel_vel = self._read_with_fallback("Present_Velocity", base_motors, ".vel")
+            if all(motor in base_wheel_vel for motor in base_motors[:3]):
+                try:
+                    base_vel = self.robot._wheel_raw_to_body(
+                        base_wheel_vel[base_motors[0]],
+                        base_wheel_vel[base_motors[1]],
+                        base_wheel_vel[base_motors[2]],
+                    )
+                except Exception as exc:
+                    self._warn("base:wheel_to_body", "Observation base velocity conversion failed: %s", exc)
+
+        observation: dict[str, Any] = {f"{motor}.pos": arm_pos.get(motor, 0.0) for motor in arm_motors}
+        observation.update(base_vel)
+
+        for key, value in observation.items():
+            if isinstance(value, (int, float)) and key in self.cached_state:
+                self.cached_state[key] = float(value)
+
+        for cam_key, cam in getattr(self.robot, "cameras", {}).items():
+            try:
+                frame = cam.read_latest()
+            except Exception as exc:
+                self._warn(f"camera:{cam_key}", "Camera %s read failed: %s", cam_key, exc)
+                frame = None
+            if frame is None:
+                frame = self.cached_frames.get(cam_key)
+            else:
+                self.cached_frames[cam_key] = frame
+            observation[cam_key] = frame if frame is not None else ""
+
+        return observation
 
 
 class ArmSafetyFilter:

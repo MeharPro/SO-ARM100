@@ -13,6 +13,7 @@ import zmq
 
 from lekiwi_runtime import (
     ArmSafetyFilter,
+    ResilientObservationReader,
     TorqueLimitFileWatcher,
     add_servo_safety_args,
     add_torque_limit_args,
@@ -189,8 +190,9 @@ def main() -> None:
         enabled=args.safer_servo_mode,
         map_wrist_to_follower_start=args.capture_mode == "leader",
     )
+    observation_reader = ResilientObservationReader(robot, logger)
     try:
-        safety_filter.seed_from_observation(robot.get_observation())
+        safety_filter.seed_from_observation(observation_reader.get_observation())
     except Exception as exc:
         logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
     if args.capture_mode == "free-teach":
@@ -273,7 +275,7 @@ def main() -> None:
             except Exception as exc:
                 logger.warning("Command fetch failed: %s", exc)
 
-            observation = robot.get_observation()
+            observation = observation_reader.get_observation()
             torque_watcher.poll(robot)
 
             now = time.time()

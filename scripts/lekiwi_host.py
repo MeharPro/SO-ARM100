@@ -14,6 +14,7 @@ import zmq
 
 from lekiwi_runtime import (
     ArmSafetyFilter,
+    ResilientObservationReader,
     TorqueLimitFileWatcher,
     add_servo_safety_args,
     add_torque_limit_args,
@@ -200,10 +201,19 @@ def build_replay_action(state: dict[str, Any], include_base: bool) -> dict[str, 
     return action
 
 
-def publish_observation(robot: LeKiwi, obs_socket: Any) -> None:
-    observation = robot.get_observation()
-    for cam_key in robot.cameras:
-        ret, buffer = cv2.imencode(".jpg", observation[cam_key], [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+def publish_observation(observation_reader: ResilientObservationReader, obs_socket: Any) -> None:
+    try:
+        observation = observation_reader.get_observation()
+    except Exception as exc:
+        logger.warning("Observation read failed: %s", exc)
+        return
+
+    for cam_key in observation_reader.robot.cameras:
+        frame = observation.get(cam_key)
+        if isinstance(frame, str) or frame is None:
+            observation[cam_key] = ""
+            continue
+        ret, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         observation[cam_key] = base64.b64encode(buffer).decode("utf-8") if ret else ""
 
     try:
@@ -243,6 +253,7 @@ def drain_command_socket(cmd_socket: Any) -> None:
 def execute_replay(
     command: dict[str, Any],
     robot: LeKiwi,
+    observation_reader: ResilientObservationReader,
     torque_watcher: TorqueLimitFileWatcher,
     replay_filter: ArmSafetyFilter,
     power_logger: Any,
@@ -301,7 +312,7 @@ def execute_replay(
             replay_filter.update(sent_action)
             last_action = sent_action
             power_logger.maybe_sample()
-            publish_observation(robot, obs_socket)
+            publish_observation(observation_reader, obs_socket)
 
         if last_action is not None and hold_final_s > 0:
             hold_until = time.perf_counter() + hold_final_s
@@ -319,7 +330,7 @@ def execute_replay(
 
                 torque_watcher.poll(robot)
                 power_logger.maybe_sample()
-                publish_observation(robot, obs_socket)
+                publish_observation(observation_reader, obs_socket)
                 precise_sleep(min(sleep_step_s, max(hold_until - time.perf_counter(), 0.0)))
 
         print(f"[replay] complete path={trajectory_path}", flush=True)
@@ -387,8 +398,9 @@ def main() -> None:
         map_wrist_to_follower_start=True,
     )
     replay_safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    observation_reader = ResilientObservationReader(robot, logger)
     try:
-        observation = robot.get_observation()
+        observation = observation_reader.get_observation()
         live_safety_filter.seed_from_observation(observation)
         replay_safety_filter.seed_from_observation(observation)
     except Exception as exc:
@@ -429,6 +441,7 @@ def main() -> None:
                     pending_ui_command = execute_replay(
                         pending_ui_command,
                         robot,
+                        observation_reader,
                         torque_watcher,
                         replay_safety_filter,
                         power_logger,
@@ -471,7 +484,7 @@ def main() -> None:
                 watchdog_active = True
 
             torque_watcher.poll(robot)
-            publish_observation(robot, obs_socket)
+            publish_observation(observation_reader, obs_socket)
 
             power_logger.maybe_sample()
 
