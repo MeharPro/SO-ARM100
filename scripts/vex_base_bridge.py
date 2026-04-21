@@ -36,6 +36,18 @@ VEX_STATE_ALIASES = {
     "y.vel": ("y.vel", "y_vel", "vy"),
     "theta.vel": ("theta.vel", "theta_vel", "omega", "omega_deg_s"),
 }
+VEX_MOTOR_STATE_KEYS = (
+    "vex_front_right.pos",
+    "vex_front_left.pos",
+    "vex_rear_right.pos",
+    "vex_rear_left.pos",
+)
+VEX_MOTOR_STATE_ALIASES = {
+    "vex_front_right.pos": ("vex_front_right.pos", "frontRight.pos", "front_right.pos"),
+    "vex_front_left.pos": ("vex_front_left.pos", "frontLeft.pos", "front_left.pos"),
+    "vex_rear_right.pos": ("vex_rear_right.pos", "rearRight.pos", "rear_right.pos"),
+    "vex_rear_left.pos": ("vex_rear_left.pos", "rearLeft.pos", "rear_left.pos"),
+}
 VALID_VEX_AXES = {"axis1", "axis2", "axis3", "axis4"}
 DEFAULT_VEX_CONTROL_CONFIG = {
     "motors": {
@@ -136,6 +148,14 @@ def _extract_numeric(payload: dict[str, Any], aliases: tuple[str, ...]) -> float
         if isinstance(value, (int, float)):
             return float(value)
     return 0.0
+
+
+def _extract_optional_numeric(payload: dict[str, Any], aliases: tuple[str, ...]) -> float | None:
+    for key in aliases:
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
 
 
 def normalize_vex_control_config(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -321,10 +341,29 @@ def apply_drive_motion(motion):
     rear_right.spin(FORWARD)
 
 
+def read_motor_positions():
+    return {{
+        "vex_front_right.pos": front_right.position(DEGREES),
+        "vex_front_left.pos": front_left.position(DEGREES),
+        "vex_rear_right.pos": rear_right.position(DEGREES),
+        "vex_rear_left.pos": rear_left.position(DEGREES),
+    }}
+
+
 def print_motion(motion, source):
+    positions = read_motor_positions()
     print(
-        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"source":"%s"}}'
-        % (motion["x.vel"], motion["y.vel"], motion["theta.vel"], source)
+        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"vex_front_right.pos":%.4f,"vex_front_left.pos":%.4f,"vex_rear_right.pos":%.4f,"vex_rear_left.pos":%.4f,"source":"%s"}}'
+        % (
+            motion["x.vel"],
+            motion["y.vel"],
+            motion["theta.vel"],
+            positions["vex_front_right.pos"],
+            positions["vex_front_left.pos"],
+            positions["vex_rear_right.pos"],
+            positions["vex_rear_left.pos"],
+            source,
+        )
     )
 
 
@@ -368,6 +407,7 @@ class VexBaseBridge:
         self.serial_handle: Any | None = None
         self.buffer = ""
         self.latest_motion = dict.fromkeys(BASE_STATE_KEYS, 0.0)
+        self.latest_extra_state: dict[str, float] = {}
         self.latest_payload: dict[str, Any] | None = None
         self.latest_update_time = 0.0
         self.last_command_sent_at = 0.0
@@ -431,9 +471,16 @@ class VexBaseBridge:
             return dict.fromkeys(BASE_STATE_KEYS, 0.0)
         return dict(self.latest_motion)
 
+    def current_state(self) -> dict[str, float]:
+        return {
+            **self.latest_extra_state,
+            **self.current_motion(),
+        }
+
     def merge_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
         merged = dict(observation)
-        merged.update(self.poll())
+        self.poll()
+        merged.update(self.current_state())
         return merged
 
     def merge_action(self, action: dict[str, Any]) -> dict[str, float]:
@@ -475,14 +522,28 @@ class VexBaseBridge:
         if isinstance(source, dict):
             payload = source
 
+        motion_present = False
         motion = {
-            key: _extract_numeric(payload, aliases)
-            for key, aliases in VEX_STATE_ALIASES.items()
+            key: 0.0
+            for key in VEX_STATE_ALIASES
         }
-        if not any(abs(value) > 0 or key in payload for key, value in motion.items()):
+        for key, aliases in VEX_STATE_ALIASES.items():
+            motion[key] = _extract_numeric(payload, aliases)
+            if not motion_present and any(alias in payload for alias in aliases):
+                motion_present = True
+
+        extra_state = {}
+        for key, aliases in VEX_MOTOR_STATE_ALIASES.items():
+            value = _extract_optional_numeric(payload, aliases)
+            if value is not None:
+                extra_state[key] = value
+
+        if not motion_present and not extra_state:
             return
 
         self.latest_motion = motion
+        if extra_state:
+            self.latest_extra_state = extra_state
         self.latest_payload = payload
         self.latest_update_time = time.time()
 
@@ -531,9 +592,31 @@ def _extract_replay_samples(samples: list[dict[str, Any]]) -> list[tuple[int, fl
     return replay_samples
 
 
+def _extract_vex_start_positions(samples: list[dict[str, Any]]) -> dict[str, float] | None:
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        state = sample.get("state")
+        if not isinstance(state, dict):
+            continue
+
+        positions = {
+            key: float(state[key])
+            for key in VEX_MOTOR_STATE_KEYS
+            if isinstance(state.get(key), (int, float))
+        }
+        if len(positions) == len(VEX_MOTOR_STATE_KEYS):
+            return positions
+        if positions:
+            break
+
+    return None
+
+
 def build_vex_replay_program_source(
     samples: list[tuple[int, float, float, float]],
     control_config: dict[str, Any] | None,
+    start_positions: dict[str, float] | None = None,
 ) -> str:
     config = normalize_vex_control_config(control_config)
     tuning = config["tuning"]
@@ -546,6 +629,15 @@ def build_vex_replay_program_source(
         f"({t_ms}, {x_vel:.4f}, {y_vel:.4f}, {theta_vel:.4f})"
         for t_ms, x_vel, y_vel, theta_vel in samples
     )
+    if start_positions:
+        start_position_rows = ",\n    ".join(
+            f'"{key}": {float(start_positions[key]):.4f}'
+            for key in VEX_MOTOR_STATE_KEYS
+            if key in start_positions
+        )
+        start_positions_literal = "{\n    " + start_position_rows + "\n}"
+    else:
+        start_positions_literal = "{}"
     return f"""from vex import *
 
 brain = Brain()
@@ -557,9 +649,15 @@ MAX_LINEAR_SPEED_MPS = {float(tuning["maxLinearSpeedMps"]):.4f}
 MAX_TURN_SPEED_DPS = {float(tuning["maxTurnSpeedDps"]):.4f}
 DEADBAND_PERCENT = {int(tuning["deadbandPercent"])}
 TELEMETRY_INTERVAL_MS = 50
+PREPOSITION_TIMEOUT_MS = 6000
+PREPOSITION_TOLERANCE_DEG = 6.0
+PREPOSITION_MIN_SPEED_PCT = 15.0
+PREPOSITION_MAX_SPEED_PCT = 65.0
+PREPOSITION_KP = 0.35
 TRAJECTORY_MS = [
     {sample_rows}
 ]
+START_POSITIONS_DEG = {start_positions_literal}
 
 replay_index = 0
 replay_complete = False
@@ -612,6 +710,59 @@ def apply_drive_motion(motion):
     rear_right.spin(FORWARD)
 
 
+def read_motor_positions():
+    return {{
+        "vex_front_right.pos": front_right.position(DEGREES),
+        "vex_front_left.pos": front_left.position(DEGREES),
+        "vex_rear_right.pos": rear_right.position(DEGREES),
+        "vex_rear_left.pos": rear_left.position(DEGREES),
+    }}
+
+
+def hold_drive():
+    front_left.stop(HOLD)
+    rear_left.stop(HOLD)
+    front_right.stop(HOLD)
+    rear_right.stop(HOLD)
+
+
+def move_to_recorded_start():
+    if len(START_POSITIONS_DEG) != 4:
+        return False
+
+    deadline_ms = brain.timer.system() + PREPOSITION_TIMEOUT_MS
+    while True:
+        settled = True
+        positions = read_motor_positions()
+        for key, motor in (
+            ("vex_front_right.pos", front_right),
+            ("vex_front_left.pos", front_left),
+            ("vex_rear_right.pos", rear_right),
+            ("vex_rear_left.pos", rear_left),
+        ):
+            target = START_POSITIONS_DEG.get(key)
+            if target is None:
+                continue
+            error = target - positions.get(key, 0.0)
+            if abs(error) <= PREPOSITION_TOLERANCE_DEG:
+                motor.stop(HOLD)
+                continue
+
+            settled = False
+            speed_pct = clamp(abs(error) * PREPOSITION_KP, PREPOSITION_MIN_SPEED_PCT, PREPOSITION_MAX_SPEED_PCT)
+            motor.set_velocity(speed_pct, PERCENT)
+            motor.spin(FORWARD if error >= 0 else REVERSE)
+
+        if settled:
+            hold_drive()
+            return True
+        if brain.timer.system() >= deadline_ms:
+            hold_drive()
+            return False
+
+        wait(20, MSEC)
+
+
 def replay_motion(now_ms):
     global replay_index
     global replay_complete
@@ -631,9 +782,19 @@ def replay_motion(now_ms):
 
 
 def print_motion(motion, source):
+    positions = read_motor_positions()
     print(
-        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"source":"%s"}}'
-        % (motion["x.vel"], motion["y.vel"], motion["theta.vel"], source)
+        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"vex_front_right.pos":%.4f,"vex_front_left.pos":%.4f,"vex_rear_right.pos":%.4f,"vex_rear_left.pos":%.4f,"source":"%s"}}'
+        % (
+            motion["x.vel"],
+            motion["y.vel"],
+            motion["theta.vel"],
+            positions["vex_front_right.pos"],
+            positions["vex_front_left.pos"],
+            positions["vex_rear_right.pos"],
+            positions["vex_rear_left.pos"],
+            source,
+        )
     )
 
 
@@ -641,9 +802,11 @@ def main():
     last_telemetry_ms = -TELEMETRY_INTERVAL_MS
     wait(30, MSEC)
     print("\\033[2J")
+    move_to_recorded_start()
+    replay_started_ms = brain.timer.system()
 
     while True:
-        now_ms = brain.timer.system()
+        now_ms = brain.timer.system() - replay_started_ms
         active_motion = replay_motion(now_ms)
         if active_motion is None:
             active_motion = controller_motion()
@@ -784,7 +947,12 @@ class VexBaseReplayManager:
             return False
 
         replay_samples = _extract_replay_samples(samples)
-        program_source = build_vex_replay_program_source(replay_samples, self.control_config)
+        start_positions = _extract_vex_start_positions(samples)
+        program_source = build_vex_replay_program_source(
+            replay_samples,
+            self.control_config,
+            start_positions=start_positions,
+        )
         program_path = self._write_program(program_source)
 
         upload = self._run_vexcom(

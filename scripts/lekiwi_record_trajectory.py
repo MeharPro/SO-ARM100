@@ -25,7 +25,7 @@ from lekiwi_runtime import (
     parse_torque_limits_json,
     stop_robot_base,
 )
-from vex_base_bridge import VexBaseBridge, add_vex_base_args
+from vex_base_bridge import VEX_MOTOR_STATE_KEYS, VexBaseBridge, add_vex_base_args
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
 
 logging.basicConfig(level=logging.WARNING)
@@ -49,7 +49,6 @@ ARM_STATE_KEYS = (
     "arm_gripper.pos",
 )
 BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
-STATE_KEYS = ARM_STATE_KEYS + BASE_STATE_KEYS
 DEFAULT_RECORD_DIR = Path("~/lekiwi-trajectories").expanduser()
 
 
@@ -140,16 +139,21 @@ def build_output_path(requested: str | None) -> Path:
 
 
 def build_sample(observation: dict[str, float], t_s: float) -> dict[str, object]:
+    state = {key: float(observation.get(key, 0.0)) for key in ARM_STATE_KEYS + BASE_STATE_KEYS}
+    for key in VEX_MOTOR_STATE_KEYS:
+        value = observation.get(key)
+        if isinstance(value, (int, float)):
+            state[key] = float(value)
     return {
         "t_s": round(t_s, 6),
-        "state": {key: float(observation.get(key, 0.0)) for key in STATE_KEYS},
+        "state": state,
     }
 
 
 def build_command_sample(action: dict[str, float], t_s: float) -> dict[str, object]:
     return {
         "t_s": round(t_s, 6),
-        "action": {key: float(action.get(key, 0.0)) for key in STATE_KEYS},
+        "action": {key: float(action.get(key, 0.0)) for key in ARM_STATE_KEYS + BASE_STATE_KEYS},
     }
 
 
@@ -166,7 +170,7 @@ def write_trajectory(
 ) -> None:
     payload = {
         "format": "lekiwi-follower-trajectory",
-        "version": 2,
+        "version": 3,
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "recorded_on": "pi",
         "robot_id": args.robot_id,
@@ -176,6 +180,7 @@ def write_trajectory(
         "duration_s": round(float(samples[-1]["t_s"]), 6) if samples else 0.0,
         "arm_state_keys": list(ARM_STATE_KEYS),
         "base_state_keys": list(BASE_STATE_KEYS),
+        "vex_state_keys": list(VEX_MOTOR_STATE_KEYS),
         "samples": samples,
         "command_samples": command_samples,
     }

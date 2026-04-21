@@ -74,6 +74,15 @@ def apply_drive_motion(motion):
     rear_right.spin(FORWARD)
 
 
+def read_motor_positions():
+    return {
+        "vex_front_right.pos": front_right.position(DEGREES),
+        "vex_front_left.pos": front_left.position(DEGREES),
+        "vex_rear_right.pos": rear_right.position(DEGREES),
+        "vex_rear_left.pos": rear_left.position(DEGREES),
+    }
+
+
 def parse_numeric(payload, key, fallback=0.0):
     value = payload.get(key, fallback)
     if isinstance(value, (int, float)):
@@ -132,9 +141,19 @@ def serial_motion_active(now_ms):
 
 
 def print_motion(motion, source):
+    positions = read_motor_positions()
     print(
-        '{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"source":"%s"}'
-        % (motion["x.vel"], motion["y.vel"], motion["theta.vel"], source)
+        '{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"vex_front_right.pos":%.4f,"vex_front_left.pos":%.4f,"vex_rear_right.pos":%.4f,"vex_rear_left.pos":%.4f,"source":"%s"}'
+        % (
+            motion["x.vel"],
+            motion["y.vel"],
+            motion["theta.vel"],
+            positions["vex_front_right.pos"],
+            positions["vex_front_left.pos"],
+            positions["vex_rear_right.pos"],
+            positions["vex_rear_left.pos"],
+            source,
+        )
     )
 
 
