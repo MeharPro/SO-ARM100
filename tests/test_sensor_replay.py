@@ -168,6 +168,20 @@ class HeadingCrossTargetVexBridge(FakeVexBridge):
         super()._apply_motion(motion, dt_s)
 
 
+class WideHeadingCrossTargetVexBridge(FakeVexBridge):
+    def __init__(self, state: dict[str, float]) -> None:
+        super().__init__(state)
+        self.heading_pulses = 0
+
+    def _apply_motion(self, motion: dict[str, float], dt_s: float) -> None:
+        if abs(motion["theta.vel"]) > 1e-6:
+            self.heading_pulses += 1
+            if self.heading_pulses == 1:
+                self.state["heading"] = 7.513
+                return
+        super()._apply_motion(motion, dt_s)
+
+
 class LinearCrossTargetVexBridge(FakeVexBridge):
     def __init__(self, state: dict[str, float]) -> None:
         super().__init__(state)
@@ -471,6 +485,34 @@ class SensorReplayTests(unittest.TestCase):
         self.assertAlmostEqual(live_state["heading"], 0.0, delta=1.5)
         self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
         self.assertAlmostEqual(live_state["y"], 2.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
+
+    def test_preposition_trims_recoverable_wide_heading_cross_target(self) -> None:
+        samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+        live_state = {"x": 1.0, "y": 2.0, "heading": -7.83, "pose_epoch": 1}
+        observation_reader = FakeObservationReader(live_state)
+        vex_bridge = WideHeadingCrossTargetVexBridge(live_state)
+
+        with mock.patch.object(sensor_replay.time, "sleep", return_value=None):
+            aligned = preposition_vex_base_to_recorded_state(
+                vex_bridge,
+                observation_reader,
+                replay_state,
+                samples[0]["state"],  # type: ignore[arg-type]
+                timeout_s=SENSOR_PREPOSITION_TIMEOUT_S,
+                settle_s=0.0,
+            )
+
+        self.assertTrue(aligned)
+        self.assertEqual(self._command_axis_order(vex_bridge.commands), ["heading"])
+        self.assertGreater(vex_bridge.heading_pulses, 1)
+        self.assertLessEqual(vex_bridge.motion_ttls_ms[0], sensor_replay.PREPOSITION_HEADING_MEDIUM_PULSE_TTL_MS)
+        self.assertAlmostEqual(live_state["heading"], 0.0, delta=1.5)
 
     def test_simulated_randomized_start_pose_alignment(self) -> None:
         rng = random.Random(20260425)

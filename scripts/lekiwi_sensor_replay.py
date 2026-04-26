@@ -41,7 +41,7 @@ PREPOSITION_TOLERANCE_DEG = 6.0
 PREPOSITION_RESEND_INTERVAL_S = 0.12
 PREPOSITION_COMMAND_DT_MS = 1000
 PREPOSITION_COMMAND_TTL_MS = 100
-PREPOSITION_HEADING_COMMAND_TTL_MS = 100
+PREPOSITION_HEADING_COMMAND_TTL_MS = 60
 SENSOR_PREPOSITION_TIMEOUT_S = 6.5
 SENSOR_PREPOSITION_SETTLE_S = 0.35
 SENSOR_PREPOSITION_RESEND_INTERVAL_S = 0.10
@@ -51,13 +51,21 @@ PREPOSITION_LINEAR_MEDIUM_ERROR_M = 0.055
 PREPOSITION_LINEAR_LARGE_ERROR_M = 0.10
 PREPOSITION_HEADING_MEDIUM_ERROR_DEG = 5.0
 PREPOSITION_HEADING_LARGE_ERROR_DEG = 12.0
+PREPOSITION_HEADING_GAIN_DPS_PER_DEG = 0.9
+PREPOSITION_HEADING_MIN_TURN_DPS = 5.0
+PREPOSITION_HEADING_MAX_TURN_DPS = 12.0
+PREPOSITION_HEADING_SMALL_PULSE_TTL_MS = 80
+PREPOSITION_HEADING_MEDIUM_PULSE_TTL_MS = 100
+PREPOSITION_HEADING_LARGE_PULSE_TTL_MS = 120
+PREPOSITION_HEADING_CROSS_TRIM_DEG = 8.5
+PREPOSITION_HEADING_WIDE_CROSS_CONFIRMATIONS = 2
 PREPOSITION_SMALL_PULSE_TTL_MS = 120
 PREPOSITION_MEDIUM_PULSE_TTL_MS = 220
 PREPOSITION_LARGE_PULSE_TTL_MS = 300
 PREPOSITION_ALIGNED_CONFIRMATIONS = 3
 PREPOSITION_STAGE_ORDER = ("heading", "x", "y")
 PREPOSITION_MAX_AXIS_COMMANDS_WITHOUT_PROGRESS = 6
-PREPOSITION_MAX_TOTAL_MOTION_COMMANDS = 28
+PREPOSITION_MAX_TOTAL_MOTION_COMMANDS = 40
 PREPOSITION_MIN_PROGRESS_M = 0.002
 PREPOSITION_MIN_PROGRESS_DEG = 0.25
 PREPOSITION_SENSOR_PROGRESS_EPSILON_M = 0.0006
@@ -171,16 +179,33 @@ def _bounded_signed_correction(raw_value: float, *, limit: float, floor: float) 
 def _preposition_pulse_ttl_ms(axis: str, abs_error: float, *, axis_motion_count: int = 0) -> int:
     if axis == "heading":
         if abs_error >= PREPOSITION_HEADING_LARGE_ERROR_DEG:
-            return PREPOSITION_LARGE_PULSE_TTL_MS
+            return PREPOSITION_HEADING_LARGE_PULSE_TTL_MS
         if abs_error >= PREPOSITION_HEADING_MEDIUM_ERROR_DEG:
-            return PREPOSITION_MEDIUM_PULSE_TTL_MS
-        return PREPOSITION_SMALL_PULSE_TTL_MS
+            return PREPOSITION_HEADING_MEDIUM_PULSE_TTL_MS
+        return PREPOSITION_HEADING_SMALL_PULSE_TTL_MS
 
     if abs_error >= PREPOSITION_LINEAR_LARGE_ERROR_M:
         return PREPOSITION_LARGE_PULSE_TTL_MS
     if abs_error >= PREPOSITION_LINEAR_MEDIUM_ERROR_M:
         return PREPOSITION_MEDIUM_PULSE_TTL_MS
     return PREPOSITION_SMALL_PULSE_TTL_MS
+
+
+def _preposition_heading_turn_dps(
+    raw_error_deg: float,
+    *,
+    max_turn_speed_dps: float,
+) -> float:
+    """Use short, low-speed nudges for start heading alignment."""
+    turn_limit = min(
+        PREPOSITION_HEADING_MAX_TURN_DPS,
+        max(float(max_turn_speed_dps), PREPOSITION_HEADING_MIN_TURN_DPS),
+    )
+    return _bounded_signed_correction(
+        float(raw_error_deg) * PREPOSITION_HEADING_GAIN_DPS_PER_DEG,
+        limit=turn_limit,
+        floor=PREPOSITION_HEADING_MIN_TURN_DPS,
+    )
 
 
 def _drive_wheel_percentages(
@@ -1309,6 +1334,34 @@ def preposition_vex_base_to_recorded_state(
                         else SENSOR_PREPOSITION_LINEAR_SETTLE_S
                     )
                     continue
+                if abs(active_raw_error) <= PREPOSITION_HEADING_CROSS_TRIM_DEG:
+                    close_cross_counts[active_axis] = close_cross_counts.get(active_axis, 0) + 1
+                    best_axis_error = min(best_axis_error or abs_error, abs_error)
+                    previous_axis_error = active_raw_error
+                    commands_without_progress = 0
+                    error_increase_counts[active_axis] = 0
+                    vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
+                    if close_cross_counts[active_axis] <= PREPOSITION_HEADING_WIDE_CROSS_CONFIRMATIONS:
+                        print(
+                            f"{SENSOR_REPLAY_LOG_PREFIX} "
+                            + json.dumps(
+                                {
+                                    "phase": "preposition",
+                                    "event": "axis-trim",
+                                    "reason": "crossed-target-heading-wide",
+                                    "axis": active_axis,
+                                    "previous_error": round(crossed_from_error, 4),
+                                    "current_error": round(active_raw_error, 4),
+                                    "acceptance_tolerance": round(_axis_cross_accept_tolerance(active_axis), 4),
+                                    "trim_tolerance": PREPOSITION_HEADING_CROSS_TRIM_DEG,
+                                    "cross_count": close_cross_counts[active_axis],
+                                },
+                                separators=(",", ":"),
+                            ),
+                            flush=True,
+                        )
+                        time.sleep(SENSOR_PREPOSITION_HEADING_SETTLE_S)
+                        continue
                 vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
                 print(
                     f"{SENSOR_REPLAY_LOG_PREFIX} "
@@ -1479,6 +1532,11 @@ def preposition_vex_base_to_recorded_state(
             command.motion["y.vel"] = 0.0
         if active_axis != "heading":
             command.motion["theta.vel"] = 0.0
+        else:
+            command.motion["theta.vel"] = _preposition_heading_turn_dps(
+                float(active_raw_error or 0.0),
+                max_turn_speed_dps=replay_state.max_turn_speed_dps,
+            )
         command.motion = _limit_motion_by_wheel_percent(
             command.motion,
             max_linear_speed_mps=replay_state.max_linear_speed_mps,
