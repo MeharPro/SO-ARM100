@@ -75,6 +75,7 @@ ULTRASONIC_FILTER_WINDOW = 5
 ULTRASONIC_FILTER_MIN_SAMPLES = 3
 ULTRASONIC_FILTER_MAX_STEP_M = 0.03
 ULTRASONIC_FILTER_CHANGE_CONFIRMATIONS = 2
+RECORDED_HEADING_ZERO_TOLERANCE_DEG = 2.0
 
 WHEEL_CORRECTION_SIGNS = {
     "vex_front_right.pos": (-1.0, -1.0),
@@ -291,18 +292,53 @@ def _status_numeric(status: dict[str, Any] | None, key: str) -> float | None:
     return None
 
 
+def _marked_pose_epoch(value: Any) -> bool:
+    if not isinstance(value, (int, float)):
+        return False
+    try:
+        return int(float(value)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _recorded_heading_is_zero_reference(value: Any) -> bool:
+    if not isinstance(value, (int, float)):
+        return False
+    aligned = align_degrees_near_reference(float(value), 0.0)
+    return abs(aligned) <= RECORDED_HEADING_ZERO_TOLERANCE_DEG
+
+
 def _heading_reference_block_reason(feedback: dict[str, Any]) -> str | None:
     if feedback.get("recorded_heading_deg") is None:
         return None
     if feedback.get("live_heading_deg") is None:
         return "live-gyro-unavailable"
-    if feedback.get("recorded_pose_epoch") is None:
-        return "recorded-pose-epoch-missing"
-    if feedback.get("live_pose_epoch") is None:
+    live_pose_epoch = feedback.get("live_pose_epoch")
+    if live_pose_epoch is None:
         return "live-pose-epoch-missing"
-    if int(float(feedback["recorded_pose_epoch"])) != int(float(feedback["live_pose_epoch"])):
-        return "stale-gyro-origin"
+    if not _marked_pose_epoch(live_pose_epoch):
+        return "live-pose-origin-unzeroed"
+
+    recorded_pose_epoch = feedback.get("recorded_pose_epoch")
+    if recorded_pose_epoch is None:
+        if _recorded_heading_is_zero_reference(feedback.get("recorded_heading_deg")):
+            return None
+        return "recorded-pose-epoch-missing"
+    if not _marked_pose_epoch(recorded_pose_epoch) and not _recorded_heading_is_zero_reference(
+        feedback.get("recorded_heading_deg")
+    ):
+        return "recorded-pose-origin-unzeroed"
     return None
+
+
+def _heading_reference_block_detail(reason: str) -> str:
+    if reason in {"live-pose-epoch-missing", "live-pose-origin-unzeroed"}:
+        return "The live VEX gyro has not been zeroed for this replay; press Zero VEX Gyro at the recorded start heading, then replay after moving the base."
+    if reason in {"recorded-pose-epoch-missing", "recorded-pose-origin-unzeroed"}:
+        return "The recording has a nonzero gyro heading, but it was not tied to a marked VEX gyro zero origin."
+    if reason == "live-gyro-unavailable":
+        return "Live VEX gyro telemetry is unavailable."
+    return "Recorded gyro heading exists, but the live VEX gyro origin is not ready for replay."
 
 
 def _first_recorded_value(samples: list[dict[str, Any]], key: str) -> float | None:
@@ -528,11 +564,15 @@ class SensorAwareReplayState:
         live_y_m = self.ultrasonic_filters["y"].observe(live_y_raw_m)
         live_heading_deg = _status_value(live_gyro_status)
         live_pose_epoch = _status_numeric(live_gyro_status, "pose_epoch")
-        heading_origin_valid = (
-            recorded_pose_epoch is not None
-            and live_pose_epoch is not None
-            and int(recorded_pose_epoch) == int(live_pose_epoch)
+        heading_reference_block_reason = _heading_reference_block_reason(
+            {
+                "recorded_heading_deg": recorded_heading_deg,
+                "recorded_pose_epoch": recorded_pose_epoch,
+                "live_heading_deg": live_heading_deg,
+                "live_pose_epoch": live_pose_epoch,
+            }
         )
+        heading_origin_valid = recorded_heading_deg is not None and heading_reference_block_reason is None
 
         raw_x_error_m = (
             live_x_raw_m - recorded_x_m
@@ -556,7 +596,7 @@ class SensorAwareReplayState:
         )
 
         raw_heading_error_deg: float | None = None
-        if heading_origin_valid and recorded_heading_deg is not None and live_heading_deg is not None:
+        if heading_origin_valid and live_heading_deg is not None:
             aligned_target_deg = align_degrees_near_reference(recorded_heading_deg, live_heading_deg)
             raw_heading_error_deg = aligned_target_deg - live_heading_deg
 
@@ -585,15 +625,6 @@ class SensorAwareReplayState:
                 aligned_axes.append("heading")
             if abs(raw_heading_error_deg) >= THETA_RECENTER_THRESHOLD_DEG:
                 feedback_only = True
-
-        heading_reference_block_reason = _heading_reference_block_reason(
-            {
-                "recorded_heading_deg": recorded_heading_deg,
-                "recorded_pose_epoch": recorded_pose_epoch,
-                "live_heading_deg": live_heading_deg,
-                "live_pose_epoch": live_pose_epoch,
-            }
-        )
 
         return {
             "recorded_x_m": recorded_x_m,
@@ -938,7 +969,7 @@ def preposition_vex_base_to_recorded_state(
             False,
             reason=heading_block_reason,
             axis="heading",
-            detail="Recorded gyro heading exists, but the live VEX gyro origin is not the same origin as the recording.",
+            detail=_heading_reference_block_detail(heading_block_reason),
             feedback=feedback,
         )
     if not feedback["available_axes"]:
@@ -1018,7 +1049,7 @@ def preposition_vex_base_to_recorded_state(
                 False,
                 reason=heading_block_reason,
                 axis="heading",
-                detail="Recorded gyro heading exists, but the live VEX gyro origin is not the same origin as the recording.",
+                detail=_heading_reference_block_detail(heading_block_reason),
                 feedback=feedback,
             )
 

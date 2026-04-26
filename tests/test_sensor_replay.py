@@ -511,7 +511,7 @@ class SensorReplayTests(unittest.TestCase):
                 self.assertAlmostEqual(live_state["x"], 0.78, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
                 self.assertAlmostEqual(live_state["y"], 1.33, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
-    def test_preposition_aborts_stale_inertial_origin_before_ultrasonic_axes(self) -> None:
+    def test_preposition_requires_live_marked_gyro_origin_before_ultrasonic_axes(self) -> None:
         samples = [build_sample(heading_deg=-47.6121, pose_epoch=1)]
         replay_state = SensorAwareReplayState(
             samples,
@@ -534,7 +534,7 @@ class SensorReplayTests(unittest.TestCase):
             )
 
         self.assertFalse(aligned)
-        self.assertEqual(aligned.reason, "stale-gyro-origin")
+        self.assertEqual(aligned.reason, "live-pose-origin-unzeroed")
         self.assertEqual(aligned.axis, "heading")
         self.assertTrue(
             all(abs(motion["theta.vel"]) <= 1e-6 for command_type, motion in vex_bridge.commands if command_type != "hold")
@@ -572,6 +572,32 @@ class SensorReplayTests(unittest.TestCase):
         self.assertEqual(aligned.reason, "recorded-pose-epoch-missing")
         self.assertEqual(aligned.axis, "heading")
         self.assertEqual(self._command_axis_order(vex_bridge.commands), [])
+
+    def test_preposition_allows_different_positive_pose_epochs_after_rezero(self) -> None:
+        samples = [build_sample(heading_deg=0.0, pose_epoch=1)]
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+        live_state = {"x": 1.0, "y": 2.0, "heading": 8.0, "pose_epoch": 4}
+        observation_reader = FakeObservationReader(live_state)
+        vex_bridge = FakeVexBridge(live_state)
+
+        with mock.patch.object(sensor_replay.time, "sleep", return_value=None):
+            aligned = preposition_vex_base_to_recorded_state(
+                vex_bridge,
+                observation_reader,
+                replay_state,
+                samples[0]["state"],  # type: ignore[arg-type]
+                timeout_s=SENSOR_PREPOSITION_TIMEOUT_S,
+                settle_s=0.0,
+            )
+
+        self.assertTrue(aligned)
+        self.assertEqual(self._command_axis_order(vex_bridge.commands), ["heading"])
+        self.assertAlmostEqual(live_state["heading"], 0.0, delta=1.5)
 
     def test_preposition_trusts_rezeroed_manual_origin(self) -> None:
         samples = [build_sample(heading_deg=0.0, pose_epoch=1)]
