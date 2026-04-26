@@ -3,10 +3,12 @@ import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppSettings,
   DashboardState,
+  MarkRecordingGyroZeroRequest,
   PinnedMove,
   RecordingDetail,
   RecordingDetailRequest,
   ReplayTarget,
+  RecordingInputMode,
   RecordingEntry,
   RenameRecordingRequest,
   RecordingTimelinePoint,
@@ -15,6 +17,7 @@ import type {
   TrainingArtifact,
   TrainingProfile,
   TrimRecordingRequest,
+  VexReplayMode,
 } from "./types";
 
 const POLL_MS = 2500;
@@ -75,11 +78,37 @@ const VEX_AXIS_OPTIONS = [
   { value: "axis3", label: "Axis 3" },
   { value: "axis4", label: "Axis 4" },
 ] as const;
+const VEX_REPLAY_MODE_OPTIONS = [
+  { value: "ecu", label: "ECU mode" },
+  { value: "drive", label: "Drive mode" },
+] as const;
+const SENSOR_STATUS_LOG_PREFIX = "[sensor-status]";
+const VEX_POSITION_LOG_PREFIX = "[vex-position]";
 
 interface ServoTemperature {
   id: string;
   label: string;
   temperatureC: number | null;
+}
+
+interface SensorTelemetryEntry {
+  observedAtMs: number;
+  displayTime: string;
+  serviceLabel: string;
+  source: string | null;
+  line: string;
+  rawLine: string;
+}
+
+interface VexPositionStatusEntry {
+  observedAtMs: number;
+  displayTime: string;
+  serviceLabel: string;
+  status: string;
+  reason: string | null;
+  timeoutS: number | null;
+  message: string;
+  rawLine: string;
 }
 
 interface PowerTelemetry {
@@ -294,6 +323,242 @@ function statusTone(state: string): string {
   return "muted";
 }
 
+function robotSensorTone(sensor: DashboardState["robotSensors"]["gyro"] | null | undefined): string {
+  if (!sensor) {
+    return "muted";
+  }
+  if (sensor.state === "online") {
+    return "good";
+  }
+  if (sensor.state === "missing") {
+    return "bad";
+  }
+  if (sensor.state === "waiting" || sensor.state === "stale") {
+    return "warn";
+  }
+  return "muted";
+}
+
+function formatRobotSensorValue(sensor: DashboardState["robotSensors"]["gyro"] | null | undefined): string {
+  if (!sensor || typeof sensor.value !== "number" || !Number.isFinite(sensor.value)) {
+    return "n/a";
+  }
+  if (sensor.unit === "m") {
+    return formatDistanceMeters(sensor.value);
+  }
+  if (sensor.unit === "deg") {
+    return `${sensor.value.toFixed(1)} deg`;
+  }
+  return sensor.value.toFixed(2);
+}
+
+function formatRobotSensorSource(source: string | null | undefined): string {
+  return source ? source.replace(/-/g, " ") : "n/a";
+}
+
+function cleanServiceLogLine(line: string): string {
+  return line.replace(/^\d{1,2}:\d{2}:\d{2}\s[AP]M\s\[[^\]]+\]\s*/, "");
+}
+
+function getRecordingInputSource(
+  service: ServiceSnapshot | null | undefined,
+): "keyboard" | "leader" | "free-teach" | "control" {
+  const input = service?.meta?.input;
+  if (input === "keyboard") {
+    return "keyboard";
+  }
+  if (input === "leader") {
+    return "leader";
+  }
+  if (input === "free-teach") {
+    return "free-teach";
+  }
+  return "control";
+}
+
+function getRecordingWaitingLabel(service: ServiceSnapshot | null | undefined): string {
+  const inputSource = getRecordingInputSource(service);
+  if (inputSource === "keyboard") {
+    return "Waiting for keyboard input";
+  }
+  if (inputSource === "leader") {
+    return "Waiting for leader input";
+  }
+  if (inputSource === "free-teach") {
+    return "Hand-guide recording";
+  }
+  return "Waiting for control input";
+}
+
+function getRecordingArmedLabel(service: ServiceSnapshot | null | undefined): string {
+  const inputSource = getRecordingInputSource(service);
+  if (inputSource === "keyboard") {
+    return "Recorder is armed and ready for keyboard input.";
+  }
+  if (inputSource === "leader") {
+    return "Recorder is armed and ready for leader input.";
+  }
+  if (inputSource === "free-teach") {
+    return "Follower arm torque is disabled; move the arm by hand.";
+  }
+  return "Recorder is armed and ready.";
+}
+
+function formatSensorTelemetryReading(sensor: unknown): string {
+  if (!sensor || typeof sensor !== "object") {
+    return "n/a";
+  }
+
+  const payload = sensor as {
+    state?: unknown;
+    value?: unknown;
+    unit?: unknown;
+  };
+  const state = typeof payload.state === "string" ? payload.state : "unknown";
+  const value = typeof payload.value === "number" && Number.isFinite(payload.value) ? payload.value : null;
+  const unit = typeof payload.unit === "string" ? payload.unit : null;
+  if (value === null) {
+    return state;
+  }
+  if (unit === "m") {
+    return `${state} ${formatDistanceMeters(value)}`;
+  }
+  if (unit === "deg") {
+    return `${state} ${value.toFixed(1)} deg`;
+  }
+  return `${state} ${value.toFixed(2)}`;
+}
+
+function parseSensorTelemetryEntries(services: ServiceSnapshot[]): SensorTelemetryEntry[] {
+  const entries: SensorTelemetryEntry[] = [];
+  for (const service of services) {
+    for (const rawLine of service.logs) {
+      const cleaned = cleanServiceLogLine(rawLine);
+      if (!cleaned.startsWith(SENSOR_STATUS_LOG_PREFIX)) {
+        continue;
+      }
+
+      const payloadText = cleaned.slice(SENSOR_STATUS_LOG_PREFIX.length).trim();
+      try {
+        const payload = JSON.parse(payloadText) as {
+          timestamp?: unknown;
+          source?: unknown;
+          gyro?: unknown;
+          x?: unknown;
+          y?: unknown;
+        };
+        const observedAtMs =
+          typeof payload.timestamp === "string"
+            ? Date.parse(payload.timestamp)
+            : parseLocalLogTimestamp(rawLine);
+        const safeObservedAtMs = Number.isFinite(observedAtMs) ? observedAtMs : 0;
+        const displayTime = safeObservedAtMs ? new Date(safeObservedAtMs).toLocaleTimeString() : "unknown time";
+        const source = typeof payload.source === "string" ? payload.source : null;
+        entries.push({
+          observedAtMs: safeObservedAtMs,
+          displayTime,
+          serviceLabel: service.label,
+          source,
+          line:
+            `${displayTime} [${service.label}] ` +
+            `gyro=${formatSensorTelemetryReading(payload.gyro)} ` +
+            `x=${formatSensorTelemetryReading(payload.x)} ` +
+            `y=${formatSensorTelemetryReading(payload.y)}` +
+            (source ? ` source=${formatRobotSensorSource(source)}` : ""),
+          rawLine,
+        });
+      } catch {
+        entries.push({
+          observedAtMs: parseLocalLogTimestamp(rawLine) ?? 0,
+          displayTime: "unknown time",
+          serviceLabel: service.label,
+          source: null,
+          line: `${service.label}: ${cleaned}`,
+          rawLine,
+        });
+      }
+    }
+  }
+
+  return entries
+    .sort((left, right) => left.observedAtMs - right.observedAtMs)
+    .slice(-60);
+}
+
+function defaultVexPositionMessage(status: string, reason: string | null): string {
+  if (status === "aligned") {
+    return "VEX start positioning completed before arm replay.";
+  }
+  if (status === "skipped" && (reason === "timeout" || reason === "not-aligned")) {
+    return "VEX start positioning stopped, so arm replay was aborted.";
+  }
+  if (status === "skipped") {
+    return "VEX start positioning skipped.";
+  }
+  return "VEX start positioning status updated.";
+}
+
+function parseLatestVexPositionStatus(services: ServiceSnapshot[]): VexPositionStatusEntry | null {
+  let latest: VexPositionStatusEntry | null = null;
+
+  for (const service of services) {
+    for (const rawLine of service.logs) {
+      const cleaned = cleanServiceLogLine(rawLine);
+      if (!cleaned.startsWith(VEX_POSITION_LOG_PREFIX)) {
+        continue;
+      }
+
+      const payloadText = cleaned.slice(VEX_POSITION_LOG_PREFIX.length).trim();
+      let entry: VexPositionStatusEntry;
+      try {
+        const payload = JSON.parse(payloadText) as {
+          status?: unknown;
+          reason?: unknown;
+          timeout_s?: unknown;
+          message?: unknown;
+        };
+        const status = typeof payload.status === "string" ? payload.status : "unknown";
+        const reason = typeof payload.reason === "string" ? payload.reason : null;
+        const timeoutS =
+          typeof payload.timeout_s === "number" && Number.isFinite(payload.timeout_s) ? payload.timeout_s : null;
+        const observedAtMs = parseLocalLogTimestamp(rawLine) ?? 0;
+        const displayTime = observedAtMs ? new Date(observedAtMs).toLocaleTimeString() : "unknown time";
+        entry = {
+          observedAtMs,
+          displayTime,
+          serviceLabel: service.label,
+          status,
+          reason,
+          timeoutS,
+          message:
+            typeof payload.message === "string" && payload.message.trim()
+              ? payload.message.trim()
+              : defaultVexPositionMessage(status, reason),
+          rawLine,
+        };
+      } catch {
+        const observedAtMs = parseLocalLogTimestamp(rawLine) ?? 0;
+        entry = {
+          observedAtMs,
+          displayTime: observedAtMs ? new Date(observedAtMs).toLocaleTimeString() : "unknown time",
+          serviceLabel: service.label,
+          status: "unknown",
+          reason: null,
+          timeoutS: null,
+          message: cleaned,
+          rawLine,
+        };
+      }
+
+      if (!latest || entry.observedAtMs >= latest.observedAtMs) {
+        latest = entry;
+      }
+    }
+  }
+
+  return latest;
+}
+
 function latestLogLines(lines: string[], count: number): string[] {
   return lines.slice(Math.max(lines.length - count, 0));
 }
@@ -311,6 +576,16 @@ function labelServo(id: string | null): string {
     return "n/a";
   }
   return SERVO_LABELS[id] ?? id.replace(/^arm_/, "").replace(/_/g, " ");
+}
+
+function labelSensor(key: string): string {
+  if (key === "ultrasonic_sensor_1.distance_m") {
+    return "Ultrasonic 1";
+  }
+  if (key === "ultrasonic_sensor_2.distance_m") {
+    return "Ultrasonic 2";
+  }
+  return key.replace(/_/g, " ");
 }
 
 function isLocalLeaderCaptureMode(captureMode: TrainingProfile["captureMode"] | null | undefined): boolean {
@@ -341,6 +616,10 @@ function replayTargetLabel(target: ReplayTarget): string {
   return target === "leader" ? "Leader arm" : "Pi follower";
 }
 
+function vexReplayModeLabel(mode: VexReplayMode): string {
+  return mode === "ecu" ? "ECU mode" : "Drive mode";
+}
+
 function vexStatusLabel(vexBrain: DashboardState["vexBrain"] | null | undefined): string {
   if (!vexBrain?.connected) {
     return "missing";
@@ -351,7 +630,7 @@ function vexStatusLabel(vexBrain: DashboardState["vexBrain"] | null | undefined)
   return "detected";
 }
 
-function recordingHasReplayableBaseMotion(detail: RecordingDetail | null | undefined): boolean {
+function recordingHasReplayableBaseReference(detail: RecordingDetail | null | undefined): boolean {
   if (!detail || !detail.baseKeys.length) {
     return false;
   }
@@ -477,6 +756,10 @@ function formatServoPosition(value: number | undefined): string {
   return Number.isFinite(value) ? `${value.toFixed(1)} deg` : "n/a";
 }
 
+function formatDistanceMeters(value: number | undefined): string {
+  return Number.isFinite(value) ? `${(value * 100).toFixed(1)} cm` : "n/a";
+}
+
 function recordingTimelineCopy(source: RecordingDetail["timelineSource"]): string {
   return source === "commands"
     ? "Using recorded servo command timing for the playhead."
@@ -519,6 +802,10 @@ function RecordingPreviewPanel({
   const currentPoint = useMemo(
     () => findRecordingPoint(timelinePoints, playheadS),
     [playheadS, timelinePoints],
+  );
+  const currentSensorPoint = useMemo(
+    () => findRecordingPoint(detail?.samples ?? [], playheadS),
+    [detail?.samples, playheadS],
   );
 
   const displayArmKeys = useMemo(
@@ -734,6 +1021,13 @@ function RecordingPreviewPanel({
               <article key={key}>
                 <span>{labelServo(key)}</span>
                 <strong>{formatServoPosition(currentPoint?.values[key])}</strong>
+              </article>
+            ))}
+            {detail.sensorKeys.map((key) => (
+              <article key={key}>
+                <span>{labelSensor(key)}</span>
+                <strong>{formatDistanceMeters(currentSensorPoint?.values[key])}</strong>
+                <small>live sample</small>
               </article>
             ))}
           </div>
@@ -1045,6 +1339,7 @@ export default function App() {
   const [trainingDraft, setTrainingDraft] = useState<TrainingProfile | null>(null);
   const [trainingDirty, setTrainingDirty] = useState(false);
   const [recordLabel, setRecordLabel] = useState("");
+  const [recordInputMode, setRecordInputMode] = useState<RecordingInputMode>("auto");
   const [selectedRecording, setSelectedRecording] = useState<string>("");
   const [recordingNameDraft, setRecordingNameDraft] = useState("");
   const [trimStartDraft, setTrimStartDraft] = useState("0");
@@ -1063,22 +1358,36 @@ export default function App() {
   const [recordingDetailLoading, setRecordingDetailLoading] = useState(false);
   const [recordingDetailError, setRecordingDetailError] = useState("");
   const [replayIncludeBasePreference, setReplayIncludeBasePreference] = useState<boolean | null>(null);
+  const [vexReplayMode, setVexReplayMode] = useState<VexReplayMode>("ecu");
   const [playbackTimeS, setPlaybackTimeS] = useState(0);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
   const [selectedLogServiceLabel, setSelectedLogServiceLabel] = useState("");
   const toastTimer = useRef<number | null>(null);
   const torqueTimers = useRef<Record<string, number>>({});
   const playbackAnchorRef = useRef<{ startedAtMs: number; baseTimeS: number } | null>(null);
+  const stateRequestController = useRef<AbortController | null>(null);
 
   const loadState = async () => {
+    const controller = new AbortController();
+    stateRequestController.current?.abort();
+    stateRequestController.current = controller;
     try {
-      const next = await request<DashboardState>("/api/state");
+      const next = await request<DashboardState>("/api/state", { signal: controller.signal });
+      if (stateRequestController.current !== controller) {
+        return;
+      }
       setBackendError("");
       setState(next);
       if (!settingsDirty || !settingsDraft) {
         setSettingsDraft(next.settings);
       }
     } catch (error) {
+      if (stateRequestController.current !== controller) {
+        return;
+      }
+      if (error instanceof Error && error.name === "AbortError") {
+        return;
+      }
       setBackendError(error instanceof Error ? error.message : "Backend state is unavailable.");
     }
   };
@@ -1088,7 +1397,10 @@ export default function App() {
     const interval = window.setInterval(() => {
       void loadState().catch(() => undefined);
     }, POLL_MS);
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearInterval(interval);
+      stateRequestController.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -1159,12 +1471,12 @@ export default function App() {
     [selectedRecording, state?.recordings],
   );
   const selectedTrainingProfile = state?.training.selectedProfile ?? null;
-  const selectedRecordingHasBaseMotion = useMemo(
-    () => recordingHasReplayableBaseMotion(recordingDetail),
+  const selectedRecordingHasBaseReference = useMemo(
+    () => recordingHasReplayableBaseReference(recordingDetail),
     [recordingDetail],
   );
   const effectiveReplayIncludeBase =
-    replayTarget === "pi" ? (replayIncludeBasePreference ?? selectedRecordingHasBaseMotion) : false;
+    replayTarget === "pi" ? (replayIncludeBasePreference ?? false) : false;
 
   useEffect(() => {
     setRecordingNameDraft(selectedRecordingEntry?.name ?? "");
@@ -1292,9 +1604,7 @@ export default function App() {
   );
   const recordingStartedLog = useMemo(
     () =>
-      recordingService?.logs.find((line) =>
-        line.includes("First leader command received. Recording started."),
-      ) ?? null,
+      recordingService?.logs.find((line) => line.includes("Recording started.")) ?? null,
     [recordingService?.logs],
   );
   const recordingStartedMs = useMemo(
@@ -1302,6 +1612,23 @@ export default function App() {
     [recordingStartedLog],
   );
   const recordingHasCapturedMotion = Boolean(recordingStartedLog);
+  const serviceInMotionSensitiveState = (service: ServiceSnapshot): boolean =>
+    ["starting", "running", "stopping"].includes(service.state);
+  const hostBlocksVexGyroZero = Boolean(
+    state &&
+      serviceInMotionSensitiveState(state.services.host) &&
+      state.services.host.mode !== "keyboard-control",
+  );
+  const vexGyroZeroBusy = Boolean(
+    state &&
+      (hostBlocksVexGyroZero ||
+        [
+          state.services.replay,
+          state.services.piCalibration,
+          state.services.datasetCapture,
+          state.services.policyEval,
+        ].some(serviceInMotionSensitiveState)),
+  );
 
   useEffect(() => {
     if (!isRecordingActive) {
@@ -1319,11 +1646,12 @@ export default function App() {
     () => ({
       trajectoryPath: selectedRecording,
       target: replayTarget,
+      vexReplayMode,
       includeBase: effectiveReplayIncludeBase,
       speed: pinSpeed,
       holdFinalS: pinHoldFinal,
     }),
-    [effectiveReplayIncludeBase, pinHoldFinal, pinSpeed, replayTarget, selectedRecording],
+    [effectiveReplayIncludeBase, pinHoldFinal, pinSpeed, replayTarget, selectedRecording, vexReplayMode],
   );
   const recordingDurationS = recordingDetail?.durationS ?? selectedRecordingEntry?.durationS ?? 0;
   const trimStartValueS = parseNumber(trimStartDraft) ?? 0;
@@ -1363,6 +1691,31 @@ export default function App() {
         : null,
     [state],
   );
+  const sensorTelemetryEntries = useMemo(
+    () =>
+      state
+        ? parseSensorTelemetryEntries([
+            state.services.host,
+            state.services.replay,
+            state.services.datasetCapture,
+          ])
+        : [],
+    [state],
+  );
+  const sensorTelemetryLines = useMemo(
+    () => sensorTelemetryEntries.map((entry) => entry.line),
+    [sensorTelemetryEntries],
+  );
+  const latestVexPositionStatus = useMemo(
+    () =>
+      state
+        ? parseLatestVexPositionStatus([
+            state.services.host,
+            state.services.replay,
+          ])
+        : null,
+    [state],
+  );
 
   const torqueLimits = useMemo(
     () => ({
@@ -1394,6 +1747,8 @@ export default function App() {
   );
   const hotkeysArmed =
     state?.services.host.state === "running" && state.services.host.mode === "keyboard-control";
+  const keyboardBackupActive =
+    state?.services.teleop.state === "running" && state.services.teleop.mode === "keyboard-control";
   const warmReplayReady =
     state?.services.host.state === "running" &&
     (state.services.host.mode === "control" || state.services.host.mode === "keyboard-control");
@@ -1511,6 +1866,21 @@ export default function App() {
     }
   };
 
+  const handleCopySensorTelemetry = async () => {
+    const text = sensorTelemetryLines.join("\n");
+    if (!text) {
+      flashToast("No sensor telemetry to copy.");
+      return;
+    }
+
+    try {
+      await writeClipboardText(text);
+      flashToast("Sensor telemetry copied.");
+    } catch {
+      flashToast("Could not copy sensor telemetry.");
+    }
+  };
+
   const mutate = async (
     label: string,
     url: string,
@@ -1519,6 +1889,7 @@ export default function App() {
     try {
       setPendingAction(label);
       const next = await request<DashboardState>(url, init);
+      setBackendError("");
       setState(next);
       if (!settingsDirty) {
         setSettingsDraft(next.settings);
@@ -1582,6 +1953,24 @@ export default function App() {
       setSettingsDraft(next.settings);
       setSettingsDirty(false);
       flashToast("VEX telemetry synced.");
+    }
+  };
+
+  const handleZeroVexGyro = async () => {
+    if (settingsDirty) {
+      const saved = await handleSaveSettings(false);
+      if (!saved) {
+        return;
+      }
+    }
+
+    const next = await mutate("zero-vex-gyro", "/api/vex/gyro/zero", {
+      method: "POST",
+    });
+    if (next) {
+      setSettingsDraft(next.settings);
+      setSettingsDirty(false);
+      flashToast("VEX gyro zeroed.");
     }
   };
 
@@ -1817,6 +2206,25 @@ export default function App() {
     }
   };
 
+  const handleMarkRecordingGyroZero = async () => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const payload: MarkRecordingGyroZeroRequest = {
+      path: selectedRecordingEntry.path,
+    };
+    const next = await mutate("mark-recording-gyro-zero", "/api/recordings/mark-gyro-zero", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    if (next) {
+      flashToast("Recording start marked as gyro zero.");
+    }
+  };
+
   const handleCreatePin = async () => {
     if (!selectedRecording) {
       flashToast("Select a recording first.");
@@ -1950,8 +2358,7 @@ export default function App() {
                   <h2>Connect and Control</h2>
                 </div>
                 <p className="card-note">
-                  The backend retries the Pi five times, checks the leader-arm
-                  port first, and streams the action output below.
+                  The backend retries the Pi five times, auto-detects a single attached leader-arm port when the scripted path is stale, and streams the action output below.
                 </p>
               </div>
 
@@ -1970,6 +2377,16 @@ export default function App() {
                   Stop Control
                 </button>
                 <button
+                  disabled={disabled || keyboardBackupActive}
+                  onClick={() =>
+                    void mutate("start-keyboard-control", "/api/robot/start-keyboard-control", {
+                      method: "POST",
+                    })
+                  }
+                >
+                  Start Keyboard Backup
+                </button>
+                <button
                   disabled={disabled || hotkeysArmed}
                   onClick={() => void mutate("start-hotkeys", "/api/robot/start-hotkeys", { method: "POST" })}
                 >
@@ -1984,11 +2401,19 @@ export default function App() {
                 </button>
               </div>
               <div className="mode-strip">
+                <span className={`status-pill ${keyboardBackupActive ? "good" : "muted"}`}>
+                  {keyboardBackupActive ? "keyboard backup live" : "keyboard backup off"}
+                </span>
+                <p className="card-note">
+                  Keyboard backup runs without the leader arm. Arm: <code>Q/A</code> shoulder pan, <code>W/S</code> shoulder lift, <code>E/D</code> elbow, <code>R/F</code> wrist flex, <code>T/G</code> wrist roll, <code>Z/X</code> gripper. Base: <code>I/K</code> forward/back, <code>J/L</code> strafe, <code>U/O</code> turn. Press <code>Esc</code> in the keyboard teleop process or use Stop Control here.
+                </p>
+              </div>
+              <div className="mode-strip">
                 <span className={`status-pill ${hotkeysArmed ? "good" : "muted"}`}>
                   {hotkeysArmed ? "hotkeys armed" : "hotkeys disarmed"}
                 </span>
                 <p className="card-note">
-                  Arm hotkeys keeps the Pi host live without leader teleop so pinned Pi replays can start immediately.
+                  Arm hotkeys keeps the Pi host live without teleop so pinned Pi replays can start immediately.
                 </p>
               </div>
 
@@ -2185,6 +2610,87 @@ export default function App() {
                         </div>
                       </dl>
                     </article>
+                    <article className="status-card">
+                      <div className="status-card-head">
+                        <h3>Gyro</h3>
+                        <span className={`status-pill ${robotSensorTone(state.robotSensors.gyro)}`}>
+                          {state.robotSensors.gyro.state}
+                        </span>
+                      </div>
+                      <p>{state.robotSensors.gyro.message}</p>
+                      <dl>
+                        <div>
+                          <dt>Axis</dt>
+                          <dd>{state.robotSensors.gyro.axis ?? "rotation"}</dd>
+                        </div>
+                        <div>
+                          <dt>Value</dt>
+                          <dd>{formatRobotSensorValue(state.robotSensors.gyro)}</dd>
+                        </div>
+                        <div>
+                          <dt>Updated</dt>
+                          <dd>{prettyTimestamp(state.robotSensors.gyro.updatedAt)}</dd>
+                        </div>
+                        <div>
+                          <dt>Source</dt>
+                          <dd>{formatRobotSensorSource(state.robotSensors.gyro.source)}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                    <article className="status-card">
+                      <div className="status-card-head">
+                        <h3>Sensor 1 (X)</h3>
+                        <span className={`status-pill ${robotSensorTone(state.robotSensors.x)}`}>
+                          {state.robotSensors.x.state}
+                        </span>
+                      </div>
+                      <p>{state.robotSensors.x.message}</p>
+                      <dl>
+                        <div>
+                          <dt>Axis</dt>
+                          <dd>{state.robotSensors.x.axis?.toUpperCase() ?? "X"}</dd>
+                        </div>
+                        <div>
+                          <dt>Distance</dt>
+                          <dd>{formatRobotSensorValue(state.robotSensors.x)}</dd>
+                        </div>
+                        <div>
+                          <dt>Updated</dt>
+                          <dd>{prettyTimestamp(state.robotSensors.x.updatedAt)}</dd>
+                        </div>
+                        <div>
+                          <dt>Source</dt>
+                          <dd>{formatRobotSensorSource(state.robotSensors.x.source)}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                    <article className="status-card">
+                      <div className="status-card-head">
+                        <h3>Sensor 2 (Y)</h3>
+                        <span className={`status-pill ${robotSensorTone(state.robotSensors.y)}`}>
+                          {state.robotSensors.y.state}
+                        </span>
+                      </div>
+                      <p>{state.robotSensors.y.message}</p>
+                      <dl>
+                        <div>
+                          <dt>Axis</dt>
+                          <dd>{state.robotSensors.y.axis?.toUpperCase() ?? "Y"}</dd>
+                        </div>
+                        <div>
+                          <dt>Distance</dt>
+                          <dd>{formatRobotSensorValue(state.robotSensors.y)}</dd>
+                        </div>
+                        <div>
+                          <dt>Updated</dt>
+                          <dd>{prettyTimestamp(state.robotSensors.y.updatedAt)}</dd>
+                        </div>
+                        <div>
+                          <dt>Source</dt>
+                          <dd>{formatRobotSensorSource(state.robotSensors.y.source)}</dd>
+                        </div>
+                      </dl>
+                    </article>
                   </>
                 ) : null}
               </div>
@@ -2225,6 +2731,19 @@ export default function App() {
                     placeholder="Pick up cube"
                   />
                 </label>
+                <label>
+                  Recording mode
+                  <select
+                    value={recordInputMode}
+                    onChange={(event) => setRecordInputMode(event.target.value as RecordingInputMode)}
+                    disabled={disabled}
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="leader">Leader arm</option>
+                    <option value="keyboard">Keyboard</option>
+                    <option value="free-teach">Hand-guide</option>
+                  </select>
+                </label>
                 <div className="button-cluster inline">
                   <button
                     className="primary"
@@ -2232,17 +2751,23 @@ export default function App() {
                     onClick={() =>
                       void mutate("start-recording", "/api/recordings/start", {
                         method: "POST",
-                        body: JSON.stringify({ label: recordLabel }),
+                        body: JSON.stringify({ label: recordLabel, inputMode: recordInputMode }),
                       })
                     }
                   >
-                    Start Recording
+                    {recordInputMode === "free-teach" ? "Start Hand-Guide Recording" : "Start Recording"}
                   </button>
                   <button
                     disabled={disabled}
                     onClick={() => void mutate("stop-recording", "/api/recordings/stop", { method: "POST" })}
                   >
                     Stop Recording
+                  </button>
+                  <button
+                    disabled={disabled || !state || vexGyroZeroBusy}
+                    onClick={() => void handleZeroVexGyro()}
+                  >
+                    Zero VEX Gyro
                   </button>
                   <button
                     disabled={disabled}
@@ -2269,13 +2794,15 @@ export default function App() {
                           : formatElapsedSince(recordingService.startedAt, recordingClockMs)}
                       </strong>
                     ) : (
-                      <strong className="recording-live-waiting">Waiting for leader input</strong>
+                      <strong className="recording-live-waiting">
+                        {getRecordingWaitingLabel(recordingService)}
+                      </strong>
                     )}
                   </div>
                   <span className="recording-live-meta">
                     {recordingHasCapturedMotion
                       ? `Started ${prettyTimestamp(recordingService.startedAt)}`
-                      : "Recorder is armed and ready."}
+                      : getRecordingArmedLabel(recordingService)}
                   </span>
                 </div>
               ) : null}
@@ -2336,6 +2863,12 @@ export default function App() {
                       onClick={() => void handleRenameRecording()}
                     >
                       Save Name
+                    </button>
+                    <button
+                      disabled={disabled || !selectedRecordingEntry}
+                      onClick={() => void handleMarkRecordingGyroZero()}
+                    >
+                      Mark Gyro Zero
                     </button>
                   </div>
                   <RecordingPreviewPanel
@@ -2441,12 +2974,58 @@ export default function App() {
                         Replay VEX base {replayTarget === "pi" ? "with this move" : "(Pi follower only)"}
                       </span>
                     </label>
+                    <label>
+                      VEX replay mode
+                      <select
+                        value={vexReplayMode}
+                        disabled={replayTarget !== "pi" || !effectiveReplayIncludeBase}
+                        onChange={(event) =>
+                          setVexReplayMode(event.target.value === "ecu" ? "ecu" : "drive")
+                        }
+                      >
+                        {VEX_REPLAY_MODE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     {replayTarget === "pi" &&
                     replayIncludeBasePreference === null &&
-                    selectedRecordingHasBaseMotion ? (
-                      <p className="card-note">Auto-enabled because this recording contains VEX base motion.</p>
+                    selectedRecordingHasBaseReference ? (
+                      <p className="card-note">
+                        This recording contains VEX base motion. Leave this off unless you intentionally want to replay base movement; start-position correction still runs from the gyro and ultrasonic sensors.
+                      </p>
+                    ) : null}
+                    {replayTarget === "pi" && effectiveReplayIncludeBase ? (
+                      <p className="card-note">
+                        {vexReplayMode === "ecu"
+                          ? "ECU mode uploads recorded VEX wheel targets to the Brain and reapplies HOLD on idle VEX motors."
+                          : "Drive mode uploads recorded VEX base velocities to the Brain."}
+                      </p>
                     ) : null}
                   </div>
+                  {latestVexPositionStatus ? (
+                    <div className="mode-strip compact">
+                      <span
+                        className={`status-pill ${
+                          latestVexPositionStatus.status === "aligned"
+                            ? "good"
+                            : latestVexPositionStatus.status === "skipped"
+                              ? "warn"
+                              : "muted"
+                        }`}
+                      >
+                        VEX positioning {latestVexPositionStatus.status}
+                      </span>
+                      <p className="card-note">
+                        {latestVexPositionStatus.message}
+                        {latestVexPositionStatus.timeoutS !== null
+                          ? ` Limit ${latestVexPositionStatus.timeoutS.toFixed(1)}s.`
+                          : ""}
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="button-cluster inline">
                     <button
                       className="primary"
@@ -2545,7 +3124,7 @@ export default function App() {
                         <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
                       </div>
                       <p className="pin-meta">
-                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {move.includeBase ? "VEX base + arm" : "Arm only"}
+                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {move.includeBase ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})` : "Arm only"}
                       </p>
                       <div className="button-cluster inline">
                         <button
@@ -3106,6 +3685,10 @@ export default function App() {
                   <div className="settings-note">
                     VEX Brain status: {state?.vexBrain.message ?? "Checking VEX Brain status..."}
                   </div>
+                  <p className="card-note">
+                    Base recordings now read turn-rate telemetry from the VEX inertial sensor and expect it on the
+                    configured smart port.
+                  </p>
 
                   <div className="form-grid">
                     <label>
@@ -3146,6 +3729,24 @@ export default function App() {
                           updateSettingsField("vex", {
                             ...settingsDraft.vex,
                             replaySlot: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Inertial sensor port
+                      <input
+                        type="number"
+                        min="1"
+                        max="21"
+                        value={settingsDraft.vex.inertial.port}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            inertial: {
+                              ...settingsDraft.vex.inertial,
+                              port: Number(event.target.value),
+                            },
                           })
                         }
                       />
@@ -3548,7 +4149,7 @@ export default function App() {
                   <h2>Per-Process Output</h2>
                 </div>
                 <p className="card-note">
-                  Raw stdout and stderr from the Pi host, teleop process, replay runner, and calibration commands.
+                  Raw stdout and stderr from the Pi host, teleop process, replay runner, and calibration commands, plus parsed gyro and ultrasonic telemetry from the Pi sensor feed.
                 </p>
               </div>
 
@@ -3614,18 +4215,50 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="activity-feed">
-                <div className="log-panel-head">
-                  <h3>Backend Activity</h3>
-                  <span className={`status-pill ${pendingAction ? "warn" : "muted"}`}>
-                    {pendingAction ? `running: ${pendingAction}` : "idle"}
-                  </span>
+              <div className="log-grid">
+                <div className="sensor-feed">
+                  <div className="log-panel-head">
+                    <div>
+                      <h3>Sensor Telemetry</h3>
+                      <div className="logs-viewer-meta">
+                        <span>Gyro: {state ? formatRobotSensorValue(state.robotSensors.gyro) : "n/a"}</span>
+                        <span>X: {state ? formatRobotSensorValue(state.robotSensors.x) : "n/a"}</span>
+                        <span>Y: {state ? formatRobotSensorValue(state.robotSensors.y) : "n/a"}</span>
+                      </div>
+                    </div>
+                    <div className="inline-console-actions">
+                      <button
+                        className="console-copy-button"
+                        disabled={!sensorTelemetryLines.length}
+                        onClick={() => void handleCopySensorTelemetry()}
+                      >
+                        Copy Sensor Feed
+                      </button>
+                      <span className={`status-pill ${robotSensorTone(state?.robotSensors.gyro)}`}>
+                        {state?.robotSensors.gyro.state ?? "idle"}
+                      </span>
+                    </div>
+                  </div>
+                  <pre>
+                    {sensorTelemetryLines.length
+                      ? sensorTelemetryLines.join("\n")
+                      : "No sensor telemetry yet. Start Control, Recording, Replay, or Pi dataset capture to stream gyro, X, and Y updates here."}
+                  </pre>
                 </div>
-                <pre>
-                  {state?.activityLog.length
-                    ? state.activityLog.join("\n")
-                    : "No backend activity yet."}
-                </pre>
+
+                <div className="activity-feed">
+                  <div className="log-panel-head">
+                    <h3>Backend Activity</h3>
+                    <span className={`status-pill ${pendingAction ? "warn" : "muted"}`}>
+                      {pendingAction ? `running: ${pendingAction}` : "idle"}
+                    </span>
+                  </div>
+                  <pre>
+                    {state?.activityLog.length
+                      ? state.activityLog.join("\n")
+                      : "No backend activity yet."}
+                  </pre>
+                </div>
               </div>
             </section>
           )}

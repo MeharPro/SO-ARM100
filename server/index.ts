@@ -10,11 +10,13 @@ import type {
   CreatePinnedMoveRequest,
   DeployTrainingCheckpointRequest,
   DeleteTrainingProfileRequest,
+  MarkRecordingGyroZeroRequest,
   RecordingDetailRequest,
   RenameRecordingRequest,
   ReplayRequest,
   SelectTrainingProfileRequest,
   StartPolicyEvalRequest,
+  StartRecordingRequest,
   StartTrainingCaptureRequest,
   StartTrainingRunRequest,
   StartTrainingSyncRequest,
@@ -64,6 +66,13 @@ app.post(
 app.post(
   "/api/robot/start-hotkeys",
   asyncRoute(async (_req, res) => {
+    res.json(await controller.startHotkeyHost());
+  }),
+);
+
+app.post(
+  "/api/robot/start-keyboard-control",
+  asyncRoute(async (_req, res) => {
     res.json(await controller.startKeyboardControl());
   }),
 );
@@ -86,6 +95,13 @@ app.post(
   "/api/vex/telemetry/sync",
   asyncRoute(async (_req, res) => {
     res.json(await controller.syncVexTelemetryProgram());
+  }),
+);
+
+app.post(
+  "/api/vex/gyro/zero",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.zeroVexGyro());
   }),
 );
 
@@ -152,8 +168,7 @@ app.post(
 app.post(
   "/api/recordings/start",
   asyncRoute(async (req, res) => {
-    const label = typeof req.body?.label === "string" ? req.body.label : "";
-    res.json(await controller.startRecording(label));
+    res.json(await controller.startRecording(req.body as StartRecordingRequest));
   }),
 );
 
@@ -182,6 +197,13 @@ app.post(
   "/api/recordings/rename",
   asyncRoute(async (req, res) => {
     res.json(await controller.renameRecording(req.body as RenameRecordingRequest));
+  }),
+);
+
+app.post(
+  "/api/recordings/mark-gyro-zero",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.markRecordingGyroZero(req.body as MarkRecordingGyroZeroRequest));
   }),
 );
 

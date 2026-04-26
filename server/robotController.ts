@@ -41,16 +41,21 @@ import type {
   DeployTrainingCheckpointRequest,
   DeleteTrainingProfileRequest,
   LeaderStatus,
+  MarkRecordingGyroZeroRequest,
   PinnedMove,
   RecordingDetail,
   RecordingDetailRequest,
   RenameRecordingRequest,
   RecordingEntry,
   ReplayRequest,
+  RobotSensorState,
+  RobotSensorStatus,
+  RobotSensorsStatus,
   SelectTrainingProfileRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
   StartPolicyEvalRequest,
+  StartRecordingRequest,
   StartTrainingCaptureRequest,
   StartTrainingRunRequest,
   StartTrainingSyncRequest,
@@ -67,10 +72,15 @@ const HOST_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_host.py");
 const POWER_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_power.py");
 const RUNTIME_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_runtime.py");
 const VEX_BASE_BRIDGE_SCRIPT = path.join(ROOT_DIR, "scripts", "vex_base_bridge.py");
+const SENSOR_REPLAY_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_sensor_replay.py");
 const PI_CALIBRATION_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_calibrate.py");
 const RECORD_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_record_trajectory.py");
 const REPLAY_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_replay_trajectory.py");
 const UI_TELEOP_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_ui_teleop.py");
+const KEYBOARD_TELEOP_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_keyboard_teleop.py");
+const CONTROL_LOOP_HZ = 90;
+const KEYBOARD_TELEOP_FPS = 90;
+const KEYBOARD_TELEOP_PRINT_EVERY = 30;
 const DATASET_CAPTURE_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_record_dataset_host.py");
 const LOCAL_LEADER_CAPTURE_SCRIPT = path.join(
   ROOT_DIR,
@@ -93,6 +103,8 @@ const HOST_READY_PORTS = [5555, 5556];
 const TRAINING_METADATA_REFRESH_MS = 15000;
 const POWER_LOG_SYNC_INTERVAL_MS = 15000;
 const VEX_STATUS_REFRESH_MS = 5000;
+const LIVE_SENSOR_STATUS_STALE_MS = 6000;
+const SENSOR_STATUS_LOG_PREFIX = "[sensor-status]";
 const ARM_MOTORS = [
   "arm_shoulder_pan",
   "arm_shoulder_lift",
@@ -147,6 +159,7 @@ function normalizeReplayRequest(
   return {
     trajectoryPath: payload.trajectoryPath.trim(),
     target: payload.target === "leader" ? "leader" : "pi",
+    vexReplayMode: payload.vexReplayMode === "drive" ? "drive" : "ecu",
     speed: payload.speed > 0 ? payload.speed : defaults.defaultReplaySpeed,
     includeBase: payload.target === "leader" ? false : Boolean(payload.includeBase),
     holdFinalS:
@@ -208,7 +221,7 @@ export class RobotController {
         this.cachedRecordings = await this.fetchRecordings(settings, resolvedPiHost, true);
         this.lastRecordingRefresh = Date.now();
       } catch (error) {
-        this.noteError(error);
+        this.noteBackgroundRemoteError(error);
       }
     }
 
@@ -216,7 +229,7 @@ export class RobotController {
       try {
         await this.syncRemotePowerLogs(settings, resolvedPiHost, true);
       } catch (error) {
-        this.noteError(error);
+        this.noteBackgroundRemoteError(error);
       } finally {
         this.lastPowerLogSync = Date.now();
       }
@@ -229,6 +242,13 @@ export class RobotController {
       replaySnapshot,
       datasetCaptureSnapshot,
     );
+    const robotSensors = this.getRobotSensorsStatus(
+      piReachable,
+      vexBrain,
+      hostSnapshot,
+      replaySnapshot,
+      datasetCaptureSnapshot,
+    );
 
     let trainingConfig = training;
     if (Date.now() - this.lastTrainingMetadataRefresh > TRAINING_METADATA_REFRESH_MS) {
@@ -236,7 +256,7 @@ export class RobotController {
         trainingConfig = await this.refreshTrainingArtifacts(trainingConfig, settings, resolvedPiHost);
         this.lastTrainingMetadataRefresh = Date.now();
       } catch (error) {
-        this.noteError(error);
+        this.noteBackgroundRemoteError(error);
       }
     }
 
@@ -257,6 +277,7 @@ export class RobotController {
       resolvedPiHost,
       leader,
       vexBrain,
+      robotSensors,
       recordings: this.cachedRecordings,
       lastError: this.lastError,
       activityLog: [...this.activityLog],
@@ -308,6 +329,32 @@ export class RobotController {
       this.logActivity("Sync VEX telemetry requested.");
       const host = await this.preparePi(settings, "sync VEX telemetry");
       await this.syncVexTelemetryProgramOnPi(settings, host, "manual VEX telemetry sync", true);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async zeroVexGyro(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      this.logActivity("Zero VEX gyro requested.");
+      const host = await this.preparePi(settings, "zero VEX gyro");
+      await this.ensureRemoteHelpers(settings, host);
+      const { stdout } = await this.execRemoteScript(
+        this.buildVexGyroZeroScript(settings),
+        host,
+        settings,
+      );
+      const parsed = stdout ? JSON.parse(stdout) : null;
+      if (!parsed?.success) {
+        const status =
+          typeof parsed?.status === "string" && parsed.status.trim()
+            ? parsed.status.trim()
+            : "VEX gyro zero failed.";
+        throw new Error(status);
+      }
+      this.lastVexBrainStatusRefresh = 0;
+      this.logActivity("VEX gyro origin zeroed over USB.");
       this.lastError = null;
       return this.getState();
     });
@@ -785,7 +832,7 @@ export class RobotController {
     });
   }
 
-  async startKeyboardControl(): Promise<DashboardState> {
+  async startHotkeyHost(): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Keyboard hotkey host requested.");
@@ -814,6 +861,57 @@ export class RobotController {
         await this.waitForHostReady(host, "Keyboard hotkey host");
       } catch (error) {
         await this.hostRunner.stop("Keyboard hotkey host failed to launch.");
+        throw error;
+      }
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async startKeyboardControl(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      this.logActivity("Keyboard backup control requested.");
+      const host = await this.preparePi(settings, "start keyboard backup control");
+
+      assertHelperExists(HOST_SCRIPT);
+      assertHelperExists(POWER_SCRIPT);
+      assertHelperExists(RUNTIME_SCRIPT);
+      assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
+      await this.ensureRemoteHelpers(settings, host);
+      if (settings.vex.autoRunTelemetry) {
+        await this.syncVexTelemetryProgramOnPi(
+          settings,
+          host,
+          "start keyboard backup control",
+          false,
+        );
+      }
+      await this.writeRemoteTorqueLimits(settings, host);
+      const keyboardJointLimitsJson = await this.loadKeyboardJointLimitsJson(settings, host);
+
+      await this.stopRobotExclusiveProcesses("Preparing keyboard backup control.");
+      await this.clearRemoteHostCommand(settings, host);
+
+      await this.hostRunner.start(
+        this.buildHostScript(settings, true),
+        this.toConnectConfig(settings, host),
+        "keyboard-control",
+        { host, hotkeysArmed: true, keyboardBackup: true },
+      );
+
+      try {
+        await this.waitForHostReady(host, "Keyboard backup host");
+        await this.teleopRunner.start(
+          this.buildKeyboardTeleopScript(settings, host, keyboardJointLimitsJson),
+          "keyboard-control",
+          { host, input: "keyboard" },
+        );
+        await this.waitForLocalProcessReady("Keyboard backup teleop", this.teleopRunner, 2500);
+      } catch (error) {
+        await this.teleopRunner.stop("Keyboard backup control failed to launch.");
+        await this.hostRunner.stop("Keyboard backup control failed to launch.");
         throw error;
       }
 
@@ -1006,20 +1104,43 @@ export class RobotController {
     });
   }
 
-  async startRecording(label: string): Promise<DashboardState> {
+  async startRecording(payload: StartRecordingRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
-      this.logActivity(`Start recording requested${label.trim() ? ` (${label.trim()})` : ""}.`);
-      const leader = await this.ensureLeaderConnected(settings);
+      const hostSnapshot = this.hostRunner.getSnapshot();
+      const teleopSnapshot = this.teleopRunner.getSnapshot();
+      const label = typeof payload?.label === "string" ? payload.label.trim() : "";
+      const requestedInputMode = this.normalizeRecordingInputMode(payload?.inputMode);
+      const useFreeTeachInput = requestedInputMode === "free-teach";
+      const useKeyboardInput =
+        requestedInputMode === "keyboard" ||
+        (requestedInputMode === "auto" && this.shouldUseKeyboardRecording(hostSnapshot, teleopSnapshot));
+      this.logActivity(`Start recording requested${label ? ` (${label})` : ""}.`);
+      this.logActivity(
+        `Recording input source: ${
+          useFreeTeachInput
+            ? "hand-guided follower arm with torque disabled"
+            : useKeyboardInput
+              ? "keyboard controls"
+              : "leader arm teleop"
+        }.`,
+      );
+      const leader = useKeyboardInput || useFreeTeachInput ? null : await this.ensureLeaderConnected(settings);
       const host = await this.preparePi(settings, "start recording");
 
       assertHelperExists(RECORD_SCRIPT);
       assertHelperExists(RUNTIME_SCRIPT);
+      if (useKeyboardInput) {
+        assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
+      }
       await this.ensureRemoteHelpers(settings, host);
-      if (settings.vex.autoRunTelemetry) {
+      if (!useFreeTeachInput && settings.vex.autoRunTelemetry) {
         await this.syncVexTelemetryProgramOnPi(settings, host, "start recording", false);
       }
       await this.writeRemoteTorqueLimits(settings, host);
+      const keyboardJointLimitsJson = useKeyboardInput
+        ? await this.loadKeyboardJointLimitsJson(settings, host)
+        : "{}";
 
       await this.replayRunner.stop("Recording takes over the robot.");
       await this.localReplayRunner.stop("Recording takes over the robot.");
@@ -1033,22 +1154,38 @@ export class RobotController {
 
       const timestamp = formatFileTimestamp();
       const trajectoryPath = `${settings.trajectories.remoteDir}/trajectory-${timestamp}.json`;
+      const recordingInput = useFreeTeachInput ? "free-teach" : useKeyboardInput ? "keyboard" : "leader";
 
       await this.hostRunner.start(
-        this.buildRecordScript(settings, trajectoryPath, label.trim()),
+        this.buildRecordScript(settings, trajectoryPath, label, recordingInput),
         this.toConnectConfig(settings, host),
         "recording",
         {
           host,
           trajectoryPath,
-          label: label.trim(),
+          label,
+          input: recordingInput,
         },
       );
 
       try {
         await this.waitForHostReady(host, "Recorder");
-        await this.teleopRunner.start(this.buildTeleopScript(settings, host, leader), "recording");
-        await this.waitForLocalProcessReady("Mac teleop", this.teleopRunner);
+        if (useFreeTeachInput) {
+          this.logActivity("Hand-guide recorder is live with follower arm torque disabled.");
+        } else if (useKeyboardInput) {
+          await this.teleopRunner.start(
+            this.buildKeyboardTeleopScript(settings, host, keyboardJointLimitsJson),
+            "recording",
+            { host, input: "keyboard" },
+          );
+          await this.waitForLocalProcessReady("Keyboard recording teleop", this.teleopRunner, 2500);
+        } else {
+          if (!leader) {
+            throw new Error("Leader arm teleop is unavailable for recording.");
+          }
+          await this.teleopRunner.start(this.buildTeleopScript(settings, host, leader), "recording");
+          await this.waitForLocalProcessReady("Mac teleop", this.teleopRunner);
+        }
       } catch (error) {
         await this.hostRunner.stop("Teleop failed to launch, stopping the recorder.");
         throw error;
@@ -1064,7 +1201,13 @@ export class RobotController {
   async stopRecording(): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const state = this.hostRunner.getSnapshot();
+      const teleopState = this.teleopRunner.getSnapshot();
       const { settings } = this.configStore.getConfig();
+      const wasKeyboardRecording =
+        state.mode === "recording" &&
+        (state.meta.input === "keyboard" ||
+          teleopState.meta.input === "keyboard" ||
+          teleopState.mode === "keyboard-control");
       this.logActivity("Stop recording requested.");
 
       await this.teleopRunner.stop("Stopping teleop for recording save.");
@@ -1076,6 +1219,15 @@ export class RobotController {
       if (host) {
         this.cachedRecordings = await this.fetchRecordings(settings, host);
         this.lastRecordingRefresh = Date.now();
+      }
+
+      if (wasKeyboardRecording) {
+        const keyboardHost =
+          host ?? (await this.preparePi(settings, "restore keyboard control after recording"));
+        this.logActivity("Restoring keyboard backup control after keyboard recording.");
+        await this.startKeyboardControlSession(settings, keyboardHost, {
+          restoredAfterRecording: true,
+        }, false);
       }
 
       this.lastError = null;
@@ -1123,6 +1275,25 @@ export class RobotController {
       this.logActivity(`Renaming recording ${recordingPath} to ${label}.`);
       const host = await this.preparePi(settings, "rename recording");
       await this.writeRecordingLabel(settings, host, recordingPath, label);
+      this.cachedRecordings = await this.fetchRecordings(settings, host);
+      this.lastRecordingRefresh = Date.now();
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async markRecordingGyroZero(payload: MarkRecordingGyroZeroRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+
+      if (!recordingPath) {
+        throw new Error("Choose a recording before marking its gyro zero.");
+      }
+
+      this.logActivity(`Marking recording ${recordingPath} start as VEX gyro zero.`);
+      const host = await this.preparePi(settings, "mark recording gyro zero");
+      await this.markRecordingStartGyroZero(settings, host, recordingPath);
       this.cachedRecordings = await this.fetchRecordings(settings, host);
       this.lastRecordingRefresh = Date.now();
       this.lastError = null;
@@ -1326,6 +1497,23 @@ export class RobotController {
     this.logActivity(`Error: ${this.lastError}`);
   }
 
+  private noteBackgroundRemoteError(error: unknown): void {
+    if (this.isTransientRemoteTransportError(error)) {
+      return;
+    }
+    this.noteError(error);
+  }
+
+  private isTransientRemoteTransportError(error: unknown): boolean {
+    const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    return (
+      message.includes("econnreset") ||
+      message.includes("connection reset") ||
+      message.includes("socket hang up") ||
+      message.includes("client-socket disconnected")
+    );
+  }
+
   private async preparePi(settings: AppSettings, actionLabel: string): Promise<string> {
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1405,6 +1593,75 @@ export class RobotController {
     const exited = await runner.waitForExit(timeoutMs);
     if (exited) {
       throw new Error(this.formatStartupExit(label, exited));
+    }
+  }
+
+  private isServiceActive(snapshot: ServiceSnapshot): boolean {
+    return snapshot.state === "starting" || snapshot.state === "running" || snapshot.state === "stopping";
+  }
+
+  private shouldUseKeyboardRecording(
+    hostSnapshot: ServiceSnapshot,
+    teleopSnapshot: ServiceSnapshot,
+  ): boolean {
+    if (this.isServiceActive(teleopSnapshot) && teleopSnapshot.mode === "keyboard-control") {
+      return true;
+    }
+
+    return this.isServiceActive(hostSnapshot) && hostSnapshot.mode === "keyboard-control";
+  }
+
+  private normalizeRecordingInputMode(
+    value: StartRecordingRequest["inputMode"],
+  ): "auto" | "leader" | "keyboard" | "free-teach" {
+    if (value === "leader" || value === "keyboard" || value === "free-teach") {
+      return value;
+    }
+    return "auto";
+  }
+
+  private async startKeyboardControlSession(
+    settings: AppSettings,
+    host: string,
+    meta: Record<string, unknown> = {},
+    syncVexTelemetry = true,
+  ): Promise<void> {
+    assertHelperExists(HOST_SCRIPT);
+    assertHelperExists(POWER_SCRIPT);
+    assertHelperExists(RUNTIME_SCRIPT);
+    assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
+    await this.ensureRemoteHelpers(settings, host);
+    if (syncVexTelemetry && settings.vex.autoRunTelemetry) {
+      await this.syncVexTelemetryProgramOnPi(
+        settings,
+        host,
+        "start keyboard backup control",
+        false,
+      );
+    }
+    await this.writeRemoteTorqueLimits(settings, host);
+    const keyboardJointLimitsJson = await this.loadKeyboardJointLimitsJson(settings, host);
+
+    await this.clearRemoteHostCommand(settings, host);
+    await this.hostRunner.start(
+      this.buildHostScript(settings, true),
+      this.toConnectConfig(settings, host),
+      "keyboard-control",
+      { host, hotkeysArmed: true, keyboardBackup: true, ...meta },
+    );
+
+    try {
+      await this.waitForHostReady(host, "Keyboard backup host");
+      await this.teleopRunner.start(
+        this.buildKeyboardTeleopScript(settings, host, keyboardJointLimitsJson),
+        "keyboard-control",
+        { host, input: "keyboard", ...meta },
+      );
+      await this.waitForLocalProcessReady("Keyboard backup teleop", this.teleopRunner, 2500);
+    } catch (error) {
+      await this.teleopRunner.stop("Keyboard backup control failed to launch.");
+      await this.hostRunner.stop("Keyboard backup control failed to launch.");
+      throw error;
     }
   }
 
@@ -1603,6 +1860,25 @@ export class RobotController {
     ].join("\n");
   }
 
+  private buildKeyboardTeleopScript(
+    settings: AppSettings,
+    host: string,
+    jointLimitsJson: string,
+  ): string {
+    assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
+    return [
+      this.buildMacActivation(settings),
+      `python ${shellQuote(KEYBOARD_TELEOP_SCRIPT)} \\`,
+      `  --remote-host ${shellQuote(host)} \\`,
+      `  --robot-id ${shellQuote(settings.host.robotId)} \\`,
+      `  --fps ${KEYBOARD_TELEOP_FPS} \\`,
+      `  --print-every ${KEYBOARD_TELEOP_PRINT_EVERY} \\`,
+      `  --base-linear-speed ${settings.vex.tuning.maxLinearSpeedMps} \\`,
+      `  --base-turn-speed ${settings.vex.tuning.maxTurnSpeedDps} \\`,
+      `  --joint-limits-json ${shellQuote(jointLimitsJson)}`,
+    ].join("\n");
+  }
+
   private buildPiCalibrationScript(settings: AppSettings): string {
     return [
       this.buildPiActivation(settings),
@@ -1659,6 +1935,7 @@ export class RobotController {
 
   private buildVexControlConfig(settings: AppSettings): Record<string, unknown> {
     return {
+      inertial: structuredClone(settings.vex.inertial),
       motors: structuredClone(settings.vex.motors),
       controls: structuredClone(settings.vex.controls),
       tuning: structuredClone(settings.vex.tuning),
@@ -1716,6 +1993,69 @@ JSON
 
     await this.execRemoteScript(script, host, settings);
     this.remoteTorqueCache.set(cacheKey, serializedTorqueLimits);
+  }
+
+  private buildKeyboardJointLimitsScript(settings: AppSettings): string {
+    return `
+${this.buildPiActivation(settings)}
+export PYTHONPATH=${shellQuote(`${settings.pi.remoteHelperDir}/scripts`)}:$PYTHONPATH
+export LEKIWI_UI_ROBOT_ID=${shellQuote(settings.host.robotId)}
+export LEKIWI_UI_ROBOT_PORT=${shellQuote(settings.pi.robotPort)}
+python - <<'PY'
+import json
+import os
+
+from lekiwi_runtime import build_normalized_arm_position_limits
+from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
+
+fields = getattr(LeKiwiConfig, "__dataclass_fields__", {})
+kwargs = {
+    "id": os.environ["LEKIWI_UI_ROBOT_ID"],
+    "port": os.environ["LEKIWI_UI_ROBOT_PORT"],
+}
+optional_values = {
+    "use_degrees": True,
+    "cameras": {},
+    "enable_base": False,
+}
+for name, value in optional_values.items():
+    if name in fields:
+        kwargs[name] = value
+
+robot = LeKiwi(LeKiwiConfig(**kwargs))
+limits = build_normalized_arm_position_limits(robot, preserve_continuous_wrist_roll=True)
+print(json.dumps(limits, sort_keys=True, separators=(",", ":")))
+PY
+`.trim();
+  }
+
+  private async loadKeyboardJointLimitsJson(
+    settings: AppSettings,
+    host: string,
+  ): Promise<string> {
+    try {
+      const { stdout } = await this.execRemoteScript(
+        this.buildKeyboardJointLimitsScript(settings),
+        host,
+        settings,
+      );
+      if (!stdout) {
+        return "{}";
+      }
+
+      const parsed = JSON.parse(stdout);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return "{}";
+      }
+
+      return JSON.stringify(parsed);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logActivity(
+        `Keyboard joint-limit preload skipped; Pi host clamps remain active. ${message}`,
+      );
+      return "{}";
+    }
   }
 
   private getTeleoperateScriptPath(settings: AppSettings): string {
@@ -1902,6 +2242,83 @@ PY
 `.trim();
   }
 
+  private buildVexGyroZeroScript(settings: AppSettings): string {
+    return `
+export PYTHONPATH=${shellQuote(`${settings.pi.remoteHelperDir}/scripts`)}:$PYTHONPATH
+export LEKIWI_VEX_CONTROL_CONFIG=${shellQuote(JSON.stringify(this.buildVexControlConfig(settings)))}
+export LEKIWI_VEX_TELEMETRY_SLOT=${shellQuote(String(settings.vex.telemetrySlot))}
+export LEKIWI_VEX_TELEMETRY_NAME=${shellQuote(settings.vex.telemetryProgramName)}
+python3 - <<'PY'
+import json
+import logging
+import os
+import time
+
+from vex_base_bridge import (
+    VexBaseBridge,
+    VexBaseTelemetryManager,
+    ensure_vex_command_stream,
+    normalize_vex_control_config,
+)
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger("vex_gyro_zero")
+
+control_config = normalize_vex_control_config(json.loads(os.environ["LEKIWI_VEX_CONTROL_CONFIG"]))
+bridge = VexBaseBridge(
+    requested_port="auto",
+    baudrate=115200,
+    stale_after_s=0.35,
+    command_timeout_s=0.35,
+    logger=logger,
+)
+telemetry = VexBaseTelemetryManager(
+    requested_vexcom_path="auto",
+    telemetry_slot=int(os.environ["LEKIWI_VEX_TELEMETRY_SLOT"]),
+    cache_dir="~/.lekiwi-vex/programs",
+    logger=logger,
+)
+
+result = {
+    "enabled": bridge.enabled or telemetry.enabled,
+    "commandStream": False,
+    "success": False,
+    "status": telemetry.status_message,
+    "gyro": None,
+}
+
+try:
+    bridge.connect()
+    result["enabled"] = bridge.enabled or telemetry.enabled
+    result["commandStream"] = ensure_vex_command_stream(
+        bridge,
+        telemetry,
+        control_config,
+        program_name=os.environ["LEKIWI_VEX_TELEMETRY_NAME"],
+        logger=logger,
+        startup_delay_s=1.0,
+        telemetry_timeout_s=6.0,
+    )
+    if not result["commandStream"]:
+        result["status"] = "VEX Brain did not accept the USB gyro-zero command stream."
+    else:
+        result["success"] = bridge.set_pose_origin(ttl_ms=1200, timeout_s=2.0)
+        time.sleep(0.2)
+        bridge.poll()
+        gyro = bridge.gyro_status_snapshot()
+        result["gyro"] = gyro
+        if result["success"]:
+            result["status"] = gyro.get("message") or "VEX gyro origin zeroed."
+        else:
+            result["status"] = "Timed out waiting for the VEX Brain to confirm gyro zero."
+finally:
+    bridge.close()
+
+print(json.dumps(result))
+PY
+`.trim();
+  }
+
   private async syncVexTelemetryProgramOnPi(
     settings: AppSettings,
     host: string,
@@ -1970,6 +2387,276 @@ PY
     };
   }
 
+  private buildRobotSensorStatus(
+    label: string,
+    axis: string | null,
+    state: RobotSensorState,
+    message: string,
+    overrides: Partial<RobotSensorStatus> = {},
+  ): RobotSensorStatus {
+    return {
+      label,
+      axis,
+      state,
+      connected: false,
+      value: null,
+      unit: null,
+      updatedAt: null,
+      source: null,
+      message,
+      ...overrides,
+    };
+  }
+
+  private normalizeRobotSensorState(value: unknown): RobotSensorState {
+    return value === "online" ||
+      value === "stale" ||
+      value === "waiting" ||
+      value === "missing" ||
+      value === "idle"
+      ? value
+      : "idle";
+  }
+
+  private normalizeRobotSensorStatus(
+    candidate: unknown,
+    label: string,
+    axis: string | null,
+  ): RobotSensorStatus {
+    if (!candidate || typeof candidate !== "object") {
+      return this.buildRobotSensorStatus(label, axis, "idle", `${label} status is unavailable.`);
+    }
+
+    const payload = candidate as Record<string, unknown>;
+    const updatedAt =
+      typeof payload.updated_at === "string"
+        ? payload.updated_at
+        : typeof payload.updatedAt === "string"
+          ? payload.updatedAt
+          : null;
+    const value =
+      typeof payload.value === "number" && Number.isFinite(payload.value) ? payload.value : null;
+    const unit = typeof payload.unit === "string" ? payload.unit : null;
+    const source = typeof payload.source === "string" ? payload.source : null;
+    const message =
+      typeof payload.message === "string" && payload.message.trim()
+        ? payload.message.trim()
+        : `${label} status is unavailable.`;
+
+    return this.buildRobotSensorStatus(
+      label,
+      axis,
+      this.normalizeRobotSensorState(payload.state),
+      message,
+      {
+        connected: Boolean(payload.connected),
+        value,
+        unit,
+        updatedAt,
+        source,
+      },
+    );
+  }
+
+  private coerceRobotSensorFreshness(status: RobotSensorStatus): RobotSensorStatus {
+    if (!status.updatedAt || status.state === "missing" || status.state === "idle") {
+      return status;
+    }
+
+    const updatedAtMs = Date.parse(status.updatedAt);
+    if (!Number.isFinite(updatedAtMs)) {
+      return status;
+    }
+
+    const ageMs = Date.now() - updatedAtMs;
+    if (ageMs <= LIVE_SENSOR_STATUS_STALE_MS || status.state === "stale") {
+      return status;
+    }
+
+    const ageS = Math.max(1, Math.round(ageMs / 1000));
+    return {
+      ...status,
+      state: "stale",
+      message: `${status.message} Last update ${ageS}s ago.`,
+    };
+  }
+
+  private parseRobotSensorLogLine(
+    line: string,
+  ): { observedAtMs: number; payload: Record<string, unknown> } | null {
+    const cleaned = this.cleanServiceLogLine(line);
+    if (!cleaned.startsWith(SENSOR_STATUS_LOG_PREFIX)) {
+      return null;
+    }
+
+    const rawPayload = cleaned.slice(SENSOR_STATUS_LOG_PREFIX.length).trim();
+    try {
+      const payload = JSON.parse(rawPayload);
+      if (!payload || typeof payload !== "object") {
+        return null;
+      }
+
+      const payloadRecord = payload as Record<string, unknown>;
+      const payloadTimestamp =
+        typeof payloadRecord.timestamp === "string" ? Date.parse(payloadRecord.timestamp) : Number.NaN;
+      const logTimestamp = this.parseServiceLogTimestamp(line);
+      const observedAtMs = Number.isFinite(payloadTimestamp)
+        ? payloadTimestamp
+        : logTimestamp
+          ? Date.parse(logTimestamp)
+          : 0;
+
+      return {
+        observedAtMs: Number.isFinite(observedAtMs) ? observedAtMs : 0,
+        payload: payloadRecord,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private extractLatestRobotSensorPayload(
+    ...snapshots: ServiceSnapshot[]
+  ): Record<string, unknown> | null {
+    let latest: { observedAtMs: number; payload: Record<string, unknown> } | null = null;
+
+    for (const snapshot of snapshots) {
+      const match = [...snapshot.logs]
+        .reverse()
+        .map((line) => this.parseRobotSensorLogLine(line))
+        .find((candidate): candidate is { observedAtMs: number; payload: Record<string, unknown> } => {
+          return candidate !== null;
+        });
+      if (!match) {
+        continue;
+      }
+      if (latest === null || match.observedAtMs >= latest.observedAtMs) {
+        latest = match;
+      }
+    }
+
+    return latest?.payload ?? null;
+  }
+
+  private buildFallbackGyroStatus(
+    piReachable: boolean,
+    vexBrain: VexBrainStatus,
+  ): RobotSensorStatus {
+    if (!piReachable) {
+      return this.buildRobotSensorStatus(
+        "Gyro",
+        "rotation",
+        "missing",
+        "Pi is offline, so gyro status is unavailable.",
+        { unit: "deg" },
+      );
+    }
+
+    if (vexBrain.telemetryActive) {
+      return this.buildRobotSensorStatus(
+        "Gyro",
+        "rotation",
+        "online",
+        vexBrain.message,
+        {
+          connected: true,
+          unit: "deg",
+          source: vexBrain.source,
+        },
+      );
+    }
+
+    if (vexBrain.connected) {
+      return this.buildRobotSensorStatus(
+        "Gyro",
+        "rotation",
+        "waiting",
+        vexBrain.message,
+        {
+          connected: true,
+          unit: "deg",
+          source: vexBrain.source,
+        },
+      );
+    }
+
+    return this.buildRobotSensorStatus(
+      "Gyro",
+      "rotation",
+      "missing",
+      vexBrain.message,
+      { unit: "deg" },
+    );
+  }
+
+  private buildFallbackDistanceSensorStatus(
+    label: string,
+    axis: string,
+    piReachable: boolean,
+    liveServiceActive: boolean,
+  ): RobotSensorStatus {
+    if (!piReachable) {
+      return this.buildRobotSensorStatus(
+        label,
+        axis,
+        "missing",
+        "Pi is offline, so sensor status is unavailable.",
+        { unit: "m" },
+      );
+    }
+
+    if (liveServiceActive) {
+      return this.buildRobotSensorStatus(
+        label,
+        axis,
+        "waiting",
+        `Waiting for live ${axis.toUpperCase()} distance telemetry from the Pi.`,
+        { unit: "m" },
+      );
+    }
+
+    return this.buildRobotSensorStatus(
+      label,
+      axis,
+      "idle",
+      `Start Control, Recording, Replay, or Pi dataset capture to stream ${label}.`,
+      { unit: "m" },
+    );
+  }
+
+  private getRobotSensorsStatus(
+    piReachable: boolean,
+    vexBrain: VexBrainStatus,
+    hostSnapshot: ServiceSnapshot,
+    replaySnapshot: ServiceSnapshot,
+    datasetCaptureSnapshot: ServiceSnapshot,
+  ): RobotSensorsStatus {
+    const liveServiceActive = [hostSnapshot, replaySnapshot, datasetCaptureSnapshot].some(
+      (snapshot) => snapshot.state !== "idle",
+    );
+    const livePayload = liveServiceActive
+      ? this.extractLatestRobotSensorPayload(hostSnapshot, replaySnapshot, datasetCaptureSnapshot)
+      : null;
+
+    const gyro = livePayload?.gyro
+      ? this.coerceRobotSensorFreshness(
+          this.normalizeRobotSensorStatus(livePayload.gyro, "Gyro", "rotation"),
+        )
+      : this.buildFallbackGyroStatus(piReachable, vexBrain);
+    const x = livePayload?.x
+      ? this.coerceRobotSensorFreshness(
+          this.normalizeRobotSensorStatus(livePayload.x, "Sensor 1", "x"),
+        )
+      : this.buildFallbackDistanceSensorStatus("Sensor 1", "x", piReachable, liveServiceActive);
+    const y = livePayload?.y
+      ? this.coerceRobotSensorFreshness(
+          this.normalizeRobotSensorStatus(livePayload.y, "Sensor 2", "y"),
+        )
+      : this.buildFallbackDistanceSensorStatus("Sensor 2", "y", piReachable, liveServiceActive);
+
+    return { gyro, x, y };
+  }
+
   private async getVexBrainStatus(
     settings: AppSettings,
     resolvedPiHost: string | null,
@@ -2028,7 +2715,7 @@ PY
 
   private async getLeaderStatus(settings: AppSettings): Promise<LeaderStatus> {
     const teleoperateScriptPath = this.getTeleoperateScriptPath(settings);
-    const availablePorts = await this.listLocalLeaderPorts();
+    const availablePorts = this.deduplicateLeaderPorts(await this.listLocalLeaderPorts());
 
     let expectedPort: string | null = null;
     try {
@@ -2048,7 +2735,18 @@ PY
       };
     }
 
+    const autoDetectedPort = availablePorts.length === 1 ? availablePorts[0] : null;
+
     if (!expectedPort) {
+      if (autoDetectedPort) {
+        return {
+          teleoperateScriptPath,
+          expectedPort: autoDetectedPort,
+          connected: true,
+          availablePorts,
+          message: `Leader arm detected on ${autoDetectedPort}. The UI will use the detected port.`,
+        };
+      }
       return {
         teleoperateScriptPath,
         expectedPort: null,
@@ -2065,6 +2763,16 @@ PY
         connected: true,
         availablePorts,
         message: `Leader arm detected on ${expectedPort}.`,
+      };
+    }
+
+    if (autoDetectedPort) {
+      return {
+        teleoperateScriptPath,
+        expectedPort: autoDetectedPort,
+        connected: true,
+        availablePorts,
+        message: `Leader arm detected on ${autoDetectedPort}. teleoperate.py expects ${expectedPort}, so the UI will use the detected port instead.`,
       };
     }
 
@@ -2088,6 +2796,34 @@ PY
     }
     this.logActivity(leader.message);
     return leader;
+  }
+
+  private deduplicateLeaderPorts(ports: string[]): string[] {
+    const grouped = new Map<string, string[]>();
+    for (const port of ports) {
+      const key = this.normalizeLeaderPortKey(port);
+      grouped.set(key, [...(grouped.get(key) ?? []), port]);
+    }
+
+    return [...grouped.values()]
+      .map((options) => {
+        return (
+          options.find((item) => path.basename(item).startsWith("tty.")) ??
+          options.slice().sort()[0]
+        );
+      })
+      .sort();
+  }
+
+  private normalizeLeaderPortKey(port: string): string {
+    const name = path.basename(port);
+    if (name.startsWith("tty.")) {
+      return name.slice(4);
+    }
+    if (name.startsWith("cu.")) {
+      return name.slice(3);
+    }
+    return name;
   }
 
   private async listLocalLeaderPorts(): Promise<string[]> {
@@ -2120,6 +2856,7 @@ PY
       `  --torque-limits-path ${shellQuote(this.getRemoteTorqueLimitsPath(settings))} \\`,
       `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
+      `  --loop-hz ${CONTROL_LOOP_HZ} \\`,
       `  --enable-base false \\`,
       `${vexBaseFlags}${uiCommandFlag}${saferServoModeFlag}`,
     ].join("\n");
@@ -2129,9 +2866,11 @@ PY
     settings: AppSettings,
     trajectoryPath: string,
     label: string,
+    recordingInput: "leader" | "keyboard" | "free-teach",
   ): string {
     const labelFlag = label ? ` \\\n  --label ${shellQuote(label)}` : "";
     const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
+    const vexBaseFlags = this.buildVexBaseFlags(settings);
     return [
       this.buildPiActivation(settings),
       `mkdir -p ${shellQuote(settings.trajectories.remoteDir)}`,
@@ -2146,7 +2885,9 @@ PY
       `  --base-max-raw-velocity ${settings.host.baseMaxRawVelocity} \\`,
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
       `  --enable-base false \\`,
-      `  --output ${shellQuote(trajectoryPath)}${labelFlag}${saferServoModeFlag}`,
+      `${vexBaseFlags} \\`,
+      `  --output ${shellQuote(trajectoryPath)} \\`,
+      `  --recording-mode ${shellQuote(recordingInput)}${labelFlag}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -2169,6 +2910,7 @@ PY
       `${vexBaseFlags} \\`,
       `  --input ${shellQuote(replay.trajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
+      `  --vex-replay-mode ${shellQuote(replay.vexReplayMode)} \\`,
       `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${saferServoModeFlag}`,
     ].join("\n");
   }
@@ -2273,6 +3015,7 @@ PY
     const hostSnapshot = this.hostRunner.getSnapshot();
     return (
       replay.target === "pi" &&
+      !replay.includeBase &&
       hostSnapshot.state === "running" &&
       this.hostSupportsInlineReplay(hostSnapshot.mode)
     );
@@ -2302,6 +3045,7 @@ PY
       speed: replay.speed,
       holdFinalS: replay.holdFinalS,
       includeBase: replay.includeBase,
+      vexReplayMode: replay.vexReplayMode,
     });
     this.logActivity(`Queued replay command on the warm host at ${host}.`);
   }
@@ -2336,6 +3080,7 @@ PY
           speed: number;
           holdFinalS: number;
           includeBase: boolean;
+          vexReplayMode: "drive" | "ecu";
         }
       | { command: "stop-replay" },
   ): Promise<void> {
@@ -2348,6 +3093,7 @@ PY
             speed: command.speed,
             hold_final_s: command.holdFinalS,
             include_base: command.includeBase,
+            vex_replay_mode: command.vexReplayMode,
             requested_at: new Date().toISOString(),
           }
         : {
@@ -2406,6 +3152,7 @@ fi
         this.fastPut(sftp, POWER_SCRIPT, `${helperDir}/lekiwi_power.py`),
         this.fastPut(sftp, RUNTIME_SCRIPT, `${helperDir}/lekiwi_runtime.py`),
         this.fastPut(sftp, VEX_BASE_BRIDGE_SCRIPT, `${helperDir}/vex_base_bridge.py`),
+        this.fastPut(sftp, SENSOR_REPLAY_SCRIPT, `${helperDir}/lekiwi_sensor_replay.py`),
         this.fastPut(sftp, PI_CALIBRATION_SCRIPT, `${helperDir}/lekiwi_calibrate.py`),
         this.fastPut(sftp, RECORD_SCRIPT, `${helperDir}/lekiwi_record_trajectory.py`),
         this.fastPut(sftp, REPLAY_SCRIPT, `${helperDir}/lekiwi_replay_trajectory.py`),
@@ -2595,9 +3342,11 @@ if not isinstance(payload, dict):
 
 arm_keys = [key for key in payload.get("arm_state_keys", []) if isinstance(key, str)]
 base_keys = [key for key in payload.get("base_state_keys", []) if isinstance(key, str)]
-keys = arm_keys + base_keys
+sensor_keys = [key for key in payload.get("sensor_state_keys", []) if isinstance(key, str)]
+sample_keys = arm_keys + base_keys + sensor_keys
+command_keys = arm_keys + base_keys
 
-def normalize_points(items, value_key):
+def normalize_points(items, value_key, keys):
     points = []
     if not isinstance(items, list):
         return points
@@ -2615,8 +3364,8 @@ def normalize_points(items, value_key):
         points.append({"tS": round(float(raw_t_s), 6), "values": point})
     return points
 
-samples = normalize_points(payload.get("samples"), "state")
-command_samples = normalize_points(payload.get("command_samples"), "action")
+samples = normalize_points(payload.get("samples"), "state", sample_keys)
+command_samples = normalize_points(payload.get("command_samples"), "action", command_keys)
 
 raw_duration = payload.get("duration_s")
 if isinstance(raw_duration, (int, float)):
@@ -2637,6 +3386,7 @@ print(
             "commandSampleCount": len(command_samples),
             "armKeys": arm_keys,
             "baseKeys": base_keys,
+            "sensorKeys": sensor_keys,
             "timelineSource": "commands" if command_samples else "state",
             "samples": samples,
             "commandSamples": command_samples,
@@ -2678,12 +3428,34 @@ PY
       const client = new Client();
       let stdout = "";
       let stderr = "";
+      let settled = false;
+
+      const fail = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      };
+      const succeed = (value: { stdout: string; stderr: string }) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(value);
+      };
+      const handleError = (error: Error) => {
+        fail(error);
+      };
+      const cleanupErrorHandler = () => {
+        client.off("error", handleError);
+      };
 
       client.once("ready", () => {
         client.exec(`/bin/bash -lc ${shellQuote(script)}`, (error, channel) => {
           if (error) {
             client.end();
-            reject(error);
+            fail(error);
             return;
           }
 
@@ -2696,17 +3468,20 @@ PY
           });
 
           channel.once("close", (code: number | undefined | null) => {
+            cleanupErrorHandler();
             client.end();
             if (code && code !== 0) {
-              reject(new Error(stderr.trim() || stdout.trim() || `Remote command failed with code ${code}.`));
+              fail(new Error(stderr.trim() || stdout.trim() || `Remote command failed with code ${code}.`));
               return;
             }
-            resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
+            succeed({ stdout: stdout.trim(), stderr: stderr.trim() });
           });
         });
       });
 
-      client.once("error", reject);
+      client.on("error", handleError);
+      client.once("close", cleanupErrorHandler);
+      client.once("end", cleanupErrorHandler);
       client.connect(connection);
     });
   }
@@ -2720,26 +3495,54 @@ PY
     const client = new Client();
 
     return new Promise<T>((resolve, reject) => {
+      let settled = false;
+
+      const fail = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      };
+      const succeed = (value: T) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(value);
+      };
+      const handleError = (error: Error) => {
+        fail(error);
+      };
+      const cleanupErrorHandler = () => {
+        client.off("error", handleError);
+      };
+
       client.once("ready", () => {
         client.sftp(async (error, sftp) => {
           if (error || !sftp) {
+            cleanupErrorHandler();
             client.end();
-            reject(error ?? new Error("SFTP could not be opened."));
+            fail(error ?? new Error("SFTP could not be opened."));
             return;
           }
 
           try {
             const result = await callback(sftp);
+            cleanupErrorHandler();
             client.end();
-            resolve(result);
+            succeed(result);
           } catch (callbackError) {
+            cleanupErrorHandler();
             client.end();
-            reject(callbackError);
+            fail(callbackError instanceof Error ? callbackError : new Error(String(callbackError)));
           }
         });
       });
 
-      client.once("error", reject);
+      client.on("error", handleError);
+      client.once("close", cleanupErrorHandler);
+      client.once("end", cleanupErrorHandler);
       client.connect(connection);
     });
   }
@@ -2782,6 +3585,7 @@ PY
       POWER_SCRIPT,
       RUNTIME_SCRIPT,
       VEX_BASE_BRIDGE_SCRIPT,
+      SENSOR_REPLAY_SCRIPT,
       PI_CALIBRATION_SCRIPT,
       RECORD_SCRIPT,
       REPLAY_SCRIPT,
@@ -2830,6 +3634,82 @@ if not isinstance(payload, dict):
 
 payload["label"] = label
 path.write_text(json.dumps(payload, indent=2) + "\\n")
+PY
+`.trim();
+
+    await this.execRemoteScript(script, host, settings);
+  }
+
+  private async markRecordingStartGyroZero(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+  ): Promise<void> {
+    const script = `
+export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
+export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+python - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+GYRO_ROTATION_KEY = "vex_inertial_rotation.deg"
+GYRO_HEADING_KEY = "vex_inertial_heading.deg"
+GYRO_RATE_KEY = "vex_inertial_rate_z.dps"
+POSE_EPOCH_KEY = "vex_pose_epoch"
+
+root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
+path = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser().resolve()
+
+if root not in path.parents:
+    raise SystemExit("Recording path is outside the trajectory directory.")
+if not path.is_file():
+    raise SystemExit(f"Recording does not exist: {path}")
+
+payload = json.loads(path.read_text())
+if not isinstance(payload, dict):
+    raise SystemExit("Recording payload is invalid.")
+
+samples = payload.get("samples")
+if not isinstance(samples, list) or not samples:
+    raise SystemExit("Recording does not contain any samples.")
+
+first_sample = samples[0]
+if not isinstance(first_sample, dict):
+    raise SystemExit("Recording first sample is invalid.")
+
+state = first_sample.get("state")
+if not isinstance(state, dict):
+    raise SystemExit("Recording first sample does not contain state.")
+
+state[GYRO_ROTATION_KEY] = 0.0
+state[GYRO_HEADING_KEY] = 0.0
+state[GYRO_RATE_KEY] = 0.0
+state[POSE_EPOCH_KEY] = 1.0
+
+def append_unique_list(key, values):
+    existing = payload.get(key)
+    if not isinstance(existing, list):
+        existing = []
+    normalized = [item for item in existing if isinstance(item, str)]
+    for value in values:
+        if value not in normalized:
+            normalized.append(value)
+    payload[key] = normalized
+
+append_unique_list("vex_inertial_state_keys", [GYRO_ROTATION_KEY, GYRO_HEADING_KEY, GYRO_RATE_KEY])
+append_unique_list("vex_pose_state_keys", [POSE_EPOCH_KEY])
+append_unique_list("vex_state_keys", [GYRO_ROTATION_KEY, GYRO_HEADING_KEY, GYRO_RATE_KEY, POSE_EPOCH_KEY])
+payload["gyro_zero_reference"] = {
+    "type": "manual-recording-start",
+    "heading_deg": 0.0,
+    "pose_epoch": 1,
+    "marked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+}
+
+path.write_text(json.dumps(payload, indent=2) + "\\n")
+print(json.dumps({"ok": True, "path": str(path)}))
 PY
 `.trim();
 
@@ -3131,6 +4011,29 @@ PY
     const connection = this.toConnectConfig(settings, host);
     await new Promise<void>((resolve, reject) => {
       const client = new Client();
+      let settled = false;
+
+      const fail = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      };
+      const succeed = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve();
+      };
+      const handleError = (error: Error) => {
+        fail(error);
+      };
+      const cleanupErrorHandler = () => {
+        client.off("error", handleError);
+      };
+
       client.once("ready", () => {
         const remoteCommand = [
           `if [ ! -d ${shellQuote(remoteDir)} ]; then`,
@@ -3142,8 +4045,9 @@ PY
 
         client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
           if (error) {
+            cleanupErrorHandler();
             client.end();
-            reject(error);
+            fail(error);
             return;
           }
 
@@ -3161,24 +4065,28 @@ PY
           channel.pipe(untar.stdin);
 
           untar.once("close", (code) => {
+            cleanupErrorHandler();
             client.end();
             if (code && code !== 0) {
-              reject(new Error(`Local tar extraction failed with code ${code}.`));
+              fail(new Error(`Local tar extraction failed with code ${code}.`));
               return;
             }
-            resolve();
+            succeed();
           });
 
           channel.once("close", (code: number | undefined | null) => {
             if (code && code !== 0) {
+              cleanupErrorHandler();
               client.end();
-              reject(new Error(`Remote dataset archive failed with code ${code}.`));
+              fail(new Error(`Remote dataset archive failed with code ${code}.`));
             }
           });
         });
       });
 
-      client.once("error", reject);
+      client.on("error", handleError);
+      client.once("close", cleanupErrorHandler);
+      client.once("end", cleanupErrorHandler);
       client.connect(connection);
     });
   }
@@ -3197,6 +4105,29 @@ PY
     const connection = this.toConnectConfig(settings, host);
     await new Promise<void>((resolve, reject) => {
       const client = new Client();
+      let settled = false;
+
+      const fail = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      };
+      const succeed = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve();
+      };
+      const handleError = (error: Error) => {
+        fail(error);
+      };
+      const cleanupErrorHandler = () => {
+        client.off("error", handleError);
+      };
+
       client.once("ready", () => {
         const remoteCommand = [
           `rm -rf ${shellQuote(remoteDir)}`,
@@ -3206,8 +4137,9 @@ PY
 
         client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
           if (error) {
+            cleanupErrorHandler();
             client.end();
-            reject(error);
+            fail(error);
             return;
           }
 
@@ -3226,23 +4158,27 @@ PY
 
           tarProcess.once("close", (code) => {
             if (code && code !== 0) {
+              cleanupErrorHandler();
               client.end();
-              reject(new Error(`Local tar archive failed with code ${code}.`));
+              fail(new Error(`Local tar archive failed with code ${code}.`));
             }
           });
 
           channel.once("close", (code: number | undefined | null) => {
+            cleanupErrorHandler();
             client.end();
             if (code && code !== 0) {
-              reject(new Error(`Remote extract failed with code ${code}.`));
+              fail(new Error(`Remote extract failed with code ${code}.`));
               return;
             }
-            resolve();
+            succeed();
           });
         });
       });
 
-      client.once("error", reject);
+      client.on("error", handleError);
+      client.once("close", cleanupErrorHandler);
+      client.once("end", cleanupErrorHandler);
       client.connect(connection);
     });
   }

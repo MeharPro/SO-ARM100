@@ -291,6 +291,12 @@ export class RemoteProcessRunner {
         this.client = null;
         reject(error);
       };
+      const handleError = (error: Error) => {
+        fail(error);
+      };
+      const cleanupErrorHandler = () => {
+        client.off("error", handleError);
+      };
 
       client.once("ready", () => {
         client.exec(`/bin/bash -lc ${shellQuote(script)}`, (error, channel) => {
@@ -322,6 +328,7 @@ export class RemoteProcessRunner {
               }
 
               this.channel = null;
+              cleanupErrorHandler();
               client.end();
               this.client = null;
               this.exitPromise = null;
@@ -346,7 +353,9 @@ export class RemoteProcessRunner {
         });
       });
 
-      client.once("error", fail);
+      client.on("error", handleError);
+      client.once("close", cleanupErrorHandler);
+      client.once("end", cleanupErrorHandler);
       client.connect(connection);
     });
   }

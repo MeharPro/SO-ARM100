@@ -88,6 +88,10 @@ export class ConfigStore {
           vex: {
             ...this.defaults.settings.vex,
             ...raw.settings?.vex,
+            inertial: {
+              ...this.defaults.settings.vex.inertial,
+              ...raw.settings?.vex?.inertial,
+            },
             motors: {
               ...this.defaults.settings.vex.motors,
               ...raw.settings?.vex?.motors,
@@ -134,6 +138,7 @@ export class ConfigStore {
       name: typeof raw?.name === "string" ? raw.name : "Pinned move",
       trajectoryPath: typeof raw?.trajectoryPath === "string" ? raw.trajectoryPath : "",
       target: raw?.target === "leader" ? "leader" : "pi",
+      vexReplayMode: raw?.vexReplayMode === "drive" ? "drive" : "ecu",
       speed: Number(raw?.speed) > 0 ? Number(raw?.speed) : 1,
       includeBase: Boolean(raw?.includeBase),
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
@@ -175,6 +180,9 @@ export class ConfigStore {
           normalized.vex.telemetryProgramName.trim()
             ? normalized.vex.telemetryProgramName.trim()
             : this.defaults.settings.vex.telemetryProgramName,
+        inertial: {
+          port: clampPort(normalized.vex.inertial?.port ?? this.defaults.settings.vex.inertial.port),
+        },
         motors: {
           frontRight: {
             port: clampPort(normalized.vex.motors.frontRight.port),

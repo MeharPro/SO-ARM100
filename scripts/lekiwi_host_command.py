@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--hold-final-s", type=float, default=0.5)
     parser.add_argument("--include-base", action="store_true")
+    parser.add_argument("--vex-replay-mode", choices=("drive", "ecu"), default="ecu")
     return parser.parse_args()
 
 
@@ -34,6 +35,7 @@ def main() -> None:
                 "speed": args.speed,
                 "hold_final_s": args.hold_final_s,
                 "include_base": args.include_base,
+                "vex_replay_mode": args.vex_replay_mode,
             }
         )
 

@@ -740,7 +740,7 @@ code {
 }
 
 .record-toolbar {
-  grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 320px) minmax(180px, 240px) minmax(0, 1fr);
   align-items: end;
 }
 
@@ -1136,7 +1136,8 @@ label {
 
 .logs-service-list,
 .logs-viewer,
-.activity-feed {
+.activity-feed,
+.sensor-feed {
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1196,7 +1197,8 @@ label {
 }
 
 .logs-viewer,
-.activity-feed {
+.activity-feed,
+.sensor-feed {
   padding: 1rem;
   display: flex;
   flex-direction: column;
@@ -1217,7 +1219,8 @@ label {
 }
 
 .logs-viewer-pre,
-.activity-feed pre {
+.activity-feed pre,
+.sensor-feed pre {
   margin: 0;
   flex: 1;
   min-height: 260px;
@@ -1234,7 +1237,8 @@ label {
   overflow: auto;
 }
 
-.activity-feed pre {
+.activity-feed pre,
+.sensor-feed pre {
   min-height: 180px;
 }
 

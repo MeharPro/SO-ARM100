@@ -55,23 +55,26 @@ def motion_to_percent(motion):
     )
 
 
+def spin_drive_motor(motor, percent):
+    if abs(percent) <= 0.01:
+        motor.stop(HOLD)
+        return
+    motor.set_velocity(abs(percent), PERCENT)
+    motor.spin(FORWARD if percent >= 0 else REVERSE)
+
+
 def apply_drive_motion(motion):
     forward_pct, strafe_pct, turn_pct = motion_to_percent(motion)
 
     front_left_pct = forward_pct + turn_pct + strafe_pct
-    rear_left_pct = forward_pct - turn_pct + strafe_pct
+    rear_left_pct = forward_pct + turn_pct - strafe_pct
     front_right_pct = forward_pct - turn_pct - strafe_pct
-    rear_right_pct = forward_pct + turn_pct - strafe_pct
+    rear_right_pct = forward_pct - turn_pct + strafe_pct
 
-    front_left.set_velocity(front_left_pct, PERCENT)
-    rear_left.set_velocity(rear_left_pct, PERCENT)
-    front_right.set_velocity(front_right_pct, PERCENT)
-    rear_right.set_velocity(rear_right_pct, PERCENT)
-
-    front_left.spin(FORWARD)
-    rear_left.spin(FORWARD)
-    front_right.spin(FORWARD)
-    rear_right.spin(FORWARD)
+    spin_drive_motor(front_left, front_left_pct)
+    spin_drive_motor(rear_left, rear_left_pct)
+    spin_drive_motor(front_right, front_right_pct)
+    spin_drive_motor(rear_right, rear_right_pct)
 
 
 def read_motor_positions():

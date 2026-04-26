@@ -47,6 +47,9 @@ export const defaultConfig: StoredConfig = {
       replaySlot: 7,
       autoRunTelemetry: true,
       telemetryProgramName: "Base Telemetry",
+      inertial: {
+        port: 4,
+      },
       motors: {
         frontRight: {
           port: 1,

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import base64
 import json
@@ -14,22 +16,32 @@ import zmq
 
 from lekiwi_runtime import (
     ArmSafetyFilter,
+    COMMAND_SOURCE_KEYBOARD,
+    LiveRobotSensorStatusEmitter,
     ResilientObservationReader,
+    ServoProtectionSupervisor,
     TorqueLimitFileWatcher,
     apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
+    build_normalized_arm_position_limits,
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
     stop_robot_base,
 )
+from lekiwi_sensor_replay import (
+    SENSOR_PREPOSITION_TIMEOUT_S,
+    SensorAwareReplayState,
+    preposition_vex_base_to_recorded_state,
+    recorded_state_has_sensor_reference,
+)
 from vex_base_bridge import (
     VexBaseBridge,
-    VexBaseReplayManager,
     VexBaseTelemetryManager,
     add_vex_base_args,
+    ensure_vex_command_stream,
     normalize_vex_control_config,
 )
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
@@ -47,6 +59,7 @@ ARM_STATE_KEYS = (
     "arm_gripper.pos",
 )
 BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
+VEX_POSITION_LOG_PREFIX = "[vex-position]"
 
 if "PowerTelemetryLogger" not in globals():
     helper_path = Path(__file__).with_name("lekiwi_power.py")
@@ -160,12 +173,21 @@ class UiCommandWatcher:
             print(f"[replay] error include_base is invalid in {self.path}: {exc}", flush=True)
             return None
 
+        vex_replay_mode = payload.get("vex_replay_mode", "ecu")
+        if vex_replay_mode not in {"drive", "ecu"}:
+            print(
+                f"[replay] error vex_replay_mode must be 'drive' or 'ecu' in {self.path}",
+                flush=True,
+            )
+            return None
+
         return {
             "command": "replay",
             "trajectory_path": trajectory_path.strip(),
             "speed": speed,
             "hold_final_s": max(0.0, hold_final_s),
             "include_base": include_base,
+            "vex_replay_mode": vex_replay_mode,
         }
 
     def _unlink(self) -> None:
@@ -215,15 +237,30 @@ def publish_observation(
     observation_reader: ResilientObservationReader,
     obs_socket: Any,
     vex_base_bridge: VexBaseBridge | None = None,
-) -> None:
+    sensor_status_emitter: LiveRobotSensorStatusEmitter | None = None,
+    servo_protection: ServoProtectionSupervisor | None = None,
+    *,
+    sensor_status_source: str = "host-control",
+) -> dict[str, Any] | None:
     try:
         observation = observation_reader.get_observation()
     except Exception as exc:
         logger.warning("Observation read failed: %s", exc)
-        return
+        return None
 
     if vex_base_bridge is not None:
         observation = vex_base_bridge.merge_observation(observation)
+
+    if sensor_status_emitter is not None:
+        sensor_status_emitter.emit(
+            observation_reader,
+            observation,
+            source=sensor_status_source,
+            vex_base_bridge=vex_base_bridge,
+        )
+
+    if servo_protection is not None:
+        observation = servo_protection.enrich_observation(observation)
 
     for cam_key in observation_reader.robot.cameras:
         frame = observation.get(cam_key)
@@ -239,6 +276,8 @@ def publish_observation(
         pass
     except Exception as exc:
         logger.warning("Observation publish failed: %s", exc)
+
+    return observation
 
 
 def stop_replay_motion(
@@ -272,10 +311,32 @@ def drain_command_socket(cmd_socket: Any) -> None:
             return
 
 
+def print_vex_position_status(
+    status: str,
+    *,
+    reason: str | None = None,
+    timeout_s: float = SENSOR_PREPOSITION_TIMEOUT_S,
+    message: str | None = None,
+    arm_replay: str = "continuing",
+) -> None:
+    payload: dict[str, Any] = {
+        "status": status,
+        "timeout_s": round(float(timeout_s), 3) if float(timeout_s) > 0 else None,
+        "arm_replay": arm_replay,
+    }
+    if reason:
+        payload["reason"] = reason
+    if message:
+        payload["message"] = message
+    print(f"{VEX_POSITION_LOG_PREFIX} {json.dumps(payload, separators=(',', ':'))}", flush=True)
+
+
 def execute_replay(
     command: dict[str, Any],
     robot: LeKiwi,
     observation_reader: ResilientObservationReader,
+    sensor_status_emitter: LiveRobotSensorStatusEmitter,
+    servo_protection: ServoProtectionSupervisor,
     torque_watcher: TorqueLimitFileWatcher,
     replay_filter: ArmSafetyFilter,
     power_logger: Any,
@@ -283,13 +344,16 @@ def execute_replay(
     obs_socket: Any,
     ui_command_watcher: UiCommandWatcher,
     vex_base_bridge: VexBaseBridge | None,
-    vex_base_replay: VexBaseReplayManager | None,
     vex_base_telemetry: VexBaseTelemetryManager | None,
     vex_control_config: dict[str, Any],
     vex_telemetry_program_name: str,
     loop_hz: float,
     allow_legacy_base: bool,
 ) -> dict[str, Any] | None:
+    if servo_protection.latched:
+        print("[replay] ignored because the arm safety latch is active. Restart the Pi host after inspection.", flush=True)
+        return None
+
     try:
         trajectory_path, samples = load_trajectory(command["trajectory_path"])
     except Exception as exc:
@@ -299,23 +363,127 @@ def execute_replay(
     speed = float(command["speed"])
     hold_final_s = float(command["hold_final_s"])
     include_base = bool(command["include_base"])
+    vex_replay_mode = command.get("vex_replay_mode", "ecu")
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
     replay_to_vex_base = include_base and not allow_legacy_base
+    start_state = samples[0]["state"] if samples and isinstance(samples[0], dict) else None
+    auto_preposition_base = (
+        not allow_legacy_base
+        and isinstance(start_state, dict)
+        and recorded_state_has_sensor_reference(start_state)
+    )
+    prepare_vex_base = replay_to_vex_base or auto_preposition_base
 
-    if replay_to_vex_base and (vex_base_replay is None or not vex_base_replay.enabled):
-        print("[replay] error VEX base replay requested, but vexcom or the V5 Brain communication port is unavailable.", flush=True)
-        return None
-    if replay_to_vex_base and vex_base_replay is not None and not vex_base_replay.launch_replay(samples):
-        print("[replay] error failed to upload the VEX base replay program to the Brain.", flush=True)
-        return None
+    if prepare_vex_base:
+        if vex_base_bridge is None:
+            if replay_to_vex_base:
+                print("[replay] error VEX base replay requested, but the serial bridge is unavailable.", flush=True)
+                return None
+            print(
+                "[replay] warning recorded ultrasonic/gyro start alignment is available, but the VEX serial bridge is unavailable.",
+                flush=True,
+            )
+            print_vex_position_status(
+                "skipped",
+                reason="serial-bridge-unavailable",
+                message="VEX start positioning skipped because the serial bridge is unavailable.",
+            )
+            prepare_vex_base = False
+            auto_preposition_base = False
+        else:
+            vex_base_bridge.connect()
+            if vex_base_telemetry is not None:
+                vex_base_telemetry.refresh()
+            if not ensure_vex_command_stream(
+                vex_base_bridge,
+                vex_base_telemetry,
+                vex_control_config,
+                program_name=vex_telemetry_program_name,
+                logger=logger,
+            ):
+                if replay_to_vex_base:
+                    print("[replay] error failed to start the live VEX command/telemetry program.", flush=True)
+                    return None
+                print(
+                    "[replay] warning recorded ultrasonic/gyro start alignment is available, but the live VEX command/telemetry program could not be started.",
+                    flush=True,
+                )
+                print_vex_position_status(
+                    "skipped",
+                    reason="command-stream-unavailable",
+                    message="VEX start positioning skipped because the Brain did not accept live USB commands.",
+                )
+                prepare_vex_base = False
+                auto_preposition_base = False
 
     print(
         "[replay] start "
-        f"path={trajectory_path} samples={len(samples)} speed={speed:.3f} include_base={str(include_base).lower()}",
+        f"path={trajectory_path} samples={len(samples)} speed={speed:.3f} include_base={str(include_base).lower()} vex_mode={vex_replay_mode} start_align={str(auto_preposition_base).lower()}",
         flush=True,
     )
 
     last_action: dict[str, float] | None = None
+    replay_state = None
+    last_base_command_at: float | None = None
+    vex_base_control_used = False
+    if prepare_vex_base and vex_base_bridge is not None:
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode=vex_replay_mode,
+            speed=speed,
+            control_config=vex_control_config,
+        )
+        if isinstance(start_state, dict):
+            if auto_preposition_base:
+                print("[replay] aligning VEX base to recorded ultrasonic/gyro start pose.", flush=True)
+            stop_requested = False
+
+            def should_stop_preposition() -> bool:
+                nonlocal stop_requested
+                next_command = ui_command_watcher.poll()
+                if next_command and next_command["command"] == "stop-replay":
+                    stop_requested = True
+                    return True
+                return False
+
+            prepositioned = preposition_vex_base_to_recorded_state(
+                vex_base_bridge,
+                observation_reader,
+                replay_state,
+                start_state,
+                should_stop=should_stop_preposition,
+            )
+            vex_base_control_used = True
+            if not prepositioned:
+                if stop_requested:
+                    print(f"[replay] stopped path={trajectory_path}", flush=True)
+                    return None
+                failure_reason = getattr(prepositioned, "reason", None) or "not-aligned"
+                failure_axis = getattr(prepositioned, "axis", None)
+                failure_detail = getattr(prepositioned, "detail", None)
+                failure_message = "VEX start positioning stopped"
+                if failure_axis:
+                    failure_message += f" on {failure_axis}"
+                if failure_detail:
+                    failure_message += f": {failure_detail}"
+                failure_message += "; arm replay was aborted."
+                print(
+                    "[replay] warning stopped recentering the VEX base before the recorded X/Y/gyro start was aligned.",
+                    flush=True,
+                )
+                print_vex_position_status(
+                    "skipped",
+                    reason=failure_reason,
+                    message=failure_message,
+                    arm_replay="aborted",
+                )
+                return None
+            elif auto_preposition_base:
+                print_vex_position_status(
+                    "aligned",
+                    message="VEX start positioning completed before arm replay.",
+                )
+        replay_state.prepare()
     drain_command_socket(cmd_socket)
     start = time.perf_counter()
 
@@ -350,12 +518,45 @@ def execute_replay(
                 allow_legacy_base=allow_legacy_base,
             )
             replay_filter.update(sent_action)
+            servo_protection.record_command(sent_action)
             last_action = sent_action
             power_logger.maybe_sample()
-            publish_observation(observation_reader, obs_socket, vex_base_bridge)
+            if replay_to_vex_base and replay_state is not None and vex_base_bridge is not None:
+                command_now = time.perf_counter()
+                command_dt_s = (
+                    command_now - last_base_command_at
+                    if last_base_command_at is not None
+                    else max(0.02, target_t)
+                )
+                base_command = replay_state.build_replay_command(
+                    state,
+                    command_dt_s=command_dt_s,
+                )
+                if base_command.mode == "ecu" and base_command.ecu_targets is not None:
+                    vex_base_bridge.send_ecu_targets(
+                        base_command.ecu_targets,
+                        motion=base_command.motion,
+                        command_dt_ms=base_command.command_dt_ms,
+                    )
+                else:
+                    vex_base_bridge.send_motion(base_command.motion)
+                last_base_command_at = command_now
+            observation = publish_observation(
+                observation_reader,
+                obs_socket,
+                vex_base_bridge,
+                sensor_status_emitter,
+                servo_protection,
+                sensor_status_source="host-replay",
+            )
+            if observation is not None and servo_protection.observe(observation, power_logger.last_sample):
+                print("[replay] stopped because the arm safety latch tripped.", flush=True)
+                return None
 
         if last_action is not None and hold_final_s > 0:
             hold_until = time.perf_counter() + hold_final_s
+            if replay_to_vex_base and vex_base_bridge is not None:
+                vex_base_bridge.send_hold()
             while time.perf_counter() < hold_until:
                 next_command = ui_command_watcher.poll()
                 if next_command is not None:
@@ -370,7 +571,17 @@ def execute_replay(
 
                 torque_watcher.poll(robot)
                 power_logger.maybe_sample()
-                publish_observation(observation_reader, obs_socket, vex_base_bridge)
+                observation = publish_observation(
+                    observation_reader,
+                    obs_socket,
+                    vex_base_bridge,
+                    sensor_status_emitter,
+                    servo_protection,
+                    sensor_status_source="host-replay",
+                )
+                if observation is not None and servo_protection.observe(observation, power_logger.last_sample):
+                    print("[replay] stopped because the arm safety latch tripped.", flush=True)
+                    return None
                 precise_sleep(min(sleep_step_s, max(hold_until - time.perf_counter(), 0.0)))
 
         print(f"[replay] complete path={trajectory_path}", flush=True)
@@ -384,22 +595,8 @@ def execute_replay(
             last_action,
             allow_legacy_base=allow_legacy_base,
         )
-        if replay_to_vex_base and vex_base_telemetry is not None and vex_base_telemetry.enabled:
-            restored = vex_base_telemetry.install_and_run(
-                vex_control_config,
-                program_name=vex_telemetry_program_name,
-                run_after_install=True,
-            )
-            if restored:
-                print(
-                    f"[replay] restored-vex-telemetry slot={vex_base_telemetry.telemetry_slot} name={vex_telemetry_program_name}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"[replay] warning failed to restore VEX telemetry on slot={vex_base_telemetry.telemetry_slot}",
-                    flush=True,
-                )
+        if (replay_to_vex_base or vex_base_control_used) and vex_base_bridge is not None:
+            vex_base_bridge.send_hold()
         drain_command_socket(cmd_socket)
 
 
@@ -453,17 +650,29 @@ def main() -> None:
     apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
+    absolute_position_limits = build_normalized_arm_position_limits(
+        robot,
+        preserve_continuous_wrist_roll=args.safer_servo_mode,
+    )
     ui_command_watcher = UiCommandWatcher(args.ui_command_path)
     live_safety_filter = ArmSafetyFilter(
         enabled=args.safer_servo_mode,
         map_wrist_to_follower_start=True,
+        absolute_position_limits=absolute_position_limits,
+        skip_step_limit_sources=(COMMAND_SOURCE_KEYBOARD,),
     )
-    replay_safety_filter = ArmSafetyFilter(enabled=args.safer_servo_mode)
+    replay_safety_filter = ArmSafetyFilter(
+        enabled=args.safer_servo_mode,
+        absolute_position_limits=absolute_position_limits,
+    )
+    servo_protection = ServoProtectionSupervisor(robot, logger)
     observation_reader = ResilientObservationReader(robot, logger)
+    sensor_status_emitter = LiveRobotSensorStatusEmitter()
     try:
         observation = observation_reader.get_observation()
         live_safety_filter.seed_from_observation(observation)
         replay_safety_filter.seed_from_observation(observation)
+        servo_protection.seed_from_observation(observation)
     except Exception as exc:
         logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
 
@@ -482,13 +691,6 @@ def main() -> None:
         requested_vexcom_path=args.vex_vexcom_path,
         telemetry_slot=args.vex_telemetry_slot,
         cache_dir=args.vex_program_cache_dir,
-        logger=logger,
-    )
-    vex_base_replay = VexBaseReplayManager(
-        requested_vexcom_path=args.vex_vexcom_path,
-        replay_slot=args.vex_replay_slot,
-        cache_dir=args.vex_replay_cache_dir,
-        control_config=vex_control_config,
         logger=logger,
     )
 
@@ -511,9 +713,11 @@ def main() -> None:
     )
     print(vex_base_bridge.status_message, flush=True)
     print(vex_base_telemetry.status_message, flush=True)
-    print(vex_base_replay.status_message, flush=True)
     if args.safer_servo_mode:
-        print("Safer servo mode enabled: wrist continuity and bounded arm steps are active.", flush=True)
+        print(
+            "Safer servo mode enabled: calibrated joint clamps, wrist continuity, and bounded arm steps are active.",
+            flush=True,
+        )
 
     start = time.perf_counter()
     try:
@@ -528,6 +732,8 @@ def main() -> None:
                         pending_ui_command,
                         robot,
                         observation_reader,
+                        sensor_status_emitter,
+                        servo_protection,
                         torque_watcher,
                         replay_safety_filter,
                         power_logger,
@@ -535,7 +741,6 @@ def main() -> None:
                         obs_socket,
                         ui_command_watcher,
                         vex_base_bridge,
-                        vex_base_replay,
                         vex_base_telemetry,
                         vex_control_config,
                         args.vex_telemetry_program_name,
@@ -554,14 +759,16 @@ def main() -> None:
 
             try:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
-                action = live_safety_filter.normalize(dict(json.loads(msg)))
-                sent_action = apply_robot_action(
-                    robot,
-                    action,
-                    allow_legacy_base=args.enable_base,
-                )
-                live_safety_filter.update(sent_action)
-                replay_safety_filter.update(sent_action)
+                if not servo_protection.latched:
+                    action = live_safety_filter.normalize(dict(json.loads(msg)))
+                    sent_action = apply_robot_action(
+                        robot,
+                        action,
+                        allow_legacy_base=args.enable_base,
+                    )
+                    live_safety_filter.update(sent_action)
+                    replay_safety_filter.update(sent_action)
+                    servo_protection.record_command(sent_action)
                 last_cmd_time = time.time()
                 watchdog_active = False
             except zmq.Again:
@@ -580,9 +787,18 @@ def main() -> None:
                 watchdog_active = True
 
             torque_watcher.poll(robot)
-            publish_observation(observation_reader, obs_socket, vex_base_bridge)
-
+            observation = publish_observation(
+                observation_reader,
+                obs_socket,
+                vex_base_bridge,
+                sensor_status_emitter,
+                servo_protection,
+                sensor_status_source="host-control",
+            )
             power_logger.maybe_sample()
+            if observation is not None and servo_protection.observe(observation, power_logger.last_sample):
+                stop_robot_base(robot, allow_legacy_base=args.enable_base)
+                watchdog_active = True
 
             elapsed = time.time() - loop_start
             time.sleep(max(1.0 / args.loop_hz - elapsed, 0.0))

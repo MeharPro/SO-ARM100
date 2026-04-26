@@ -36,6 +36,7 @@ export interface TrajectorySettings {
 }
 
 export type VexControllerAxis = "axis1" | "axis2" | "axis3" | "axis4";
+export type VexReplayMode = "drive" | "ecu";
 
 export interface VexDriveMotorSettings {
   port: number;
@@ -57,11 +58,16 @@ export interface VexDriveTuning {
   maxTurnSpeedDps: number;
 }
 
+export interface VexInertialSettings {
+  port: number;
+}
+
 export interface VexSettings {
   telemetrySlot: number;
   replaySlot: number;
   autoRunTelemetry: boolean;
   telemetryProgramName: string;
+  inertial: VexInertialSettings;
   motors: {
     frontRight: VexDriveMotorSettings;
     frontLeft: VexDriveMotorSettings;
@@ -164,6 +170,7 @@ export interface PinnedMove {
   name: string;
   trajectoryPath: string;
   target: ReplayTarget;
+  vexReplayMode: VexReplayMode;
   speed: number;
   includeBase: boolean;
   holdFinalS: number;
@@ -184,6 +191,13 @@ export interface RecordingDetailRequest {
   path: string;
 }
 
+export type RecordingInputMode = "auto" | "leader" | "keyboard" | "free-teach";
+
+export interface StartRecordingRequest {
+  label: string;
+  inputMode?: RecordingInputMode;
+}
+
 export interface RecordingTimelinePoint {
   tS: number;
   values: Record<string, number>;
@@ -196,6 +210,7 @@ export interface RecordingDetail {
   commandSampleCount: number;
   armKeys: string[];
   baseKeys: string[];
+  sensorKeys: string[];
   timelineSource: "commands" | "state";
   samples: RecordingTimelinePoint[];
   commandSamples: RecordingTimelinePoint[];
@@ -204,6 +219,10 @@ export interface RecordingDetail {
 export interface RenameRecordingRequest {
   path: string;
   label: string;
+}
+
+export interface MarkRecordingGyroZeroRequest {
+  path: string;
 }
 
 export interface TrimRecordingRequest {
@@ -229,6 +248,26 @@ export interface VexBrainStatus {
   message: string;
 }
 
+export type RobotSensorState = "online" | "stale" | "waiting" | "missing" | "idle";
+
+export interface RobotSensorStatus {
+  label: string;
+  axis: string | null;
+  state: RobotSensorState;
+  connected: boolean;
+  value: number | null;
+  unit: string | null;
+  updatedAt: string | null;
+  source: string | null;
+  message: string;
+}
+
+export interface RobotSensorsStatus {
+  gyro: RobotSensorStatus;
+  x: RobotSensorStatus;
+  y: RobotSensorStatus;
+}
+
 export interface DashboardState {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
@@ -245,6 +284,7 @@ export interface DashboardState {
   resolvedPiHost: string | null;
   leader: LeaderStatus;
   vexBrain: VexBrainStatus;
+  robotSensors: RobotSensorsStatus;
   recordings: RecordingEntry[];
   lastError: string | null;
   activityLog: string[];
@@ -270,6 +310,7 @@ export interface ServoCalibrationRequest {
 export interface ReplayRequest {
   trajectoryPath: string;
   target: ReplayTarget;
+  vexReplayMode: VexReplayMode;
   speed: number;
   includeBase: boolean;
   holdFinalS: number;

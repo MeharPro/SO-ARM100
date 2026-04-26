@@ -13,12 +13,15 @@ import zmq
 
 from lekiwi_runtime import (
     ArmSafetyFilter,
+    LiveRobotSensorStatusEmitter,
     ResilientObservationReader,
+    ServoProtectionSupervisor,
     TorqueLimitFileWatcher,
     apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
     apply_torque_limits,
+    build_normalized_arm_position_limits,
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
@@ -191,16 +194,30 @@ def main() -> None:
     apply_torque_limits(robot, parse_torque_limits_json(args.torque_limits_json))
     torque_watcher = TorqueLimitFileWatcher(args.torque_limits_path)
     torque_watcher.poll(robot, force=True)
+    absolute_position_limits = build_normalized_arm_position_limits(
+        robot,
+        preserve_continuous_wrist_roll=args.safer_servo_mode,
+    )
     safety_filter = ArmSafetyFilter(
         enabled=args.safer_servo_mode,
         map_wrist_to_follower_start=args.capture_mode == "leader",
+        absolute_position_limits=absolute_position_limits,
+    )
+    is_free_teach = args.capture_mode == "free-teach"
+    servo_protection = ServoProtectionSupervisor(
+        robot,
+        logger,
+        stall_detection_enabled=not is_free_teach,
     )
     observation_reader = ResilientObservationReader(robot, logger)
+    sensor_status_emitter = LiveRobotSensorStatusEmitter()
     try:
-        safety_filter.seed_from_observation(observation_reader.get_observation())
+        observation = observation_reader.get_observation()
+        safety_filter.seed_from_observation(observation)
+        servo_protection.seed_from_observation(observation)
     except Exception as exc:
         logger.warning("Failed to seed servo safety filter from the current robot state: %s", exc)
-    if args.capture_mode == "free-teach":
+    if is_free_teach:
         robot.bus.disable_torque(robot.arm_motors, num_retry=10)
 
     dataset = load_or_create_dataset(args, robot)
@@ -240,6 +257,8 @@ def main() -> None:
         print("Free-teach mode: recording starts immediately and arm torque stays disabled.", flush=True)
     if args.safer_servo_mode:
         print("Safer servo mode enabled for dataset capture.", flush=True)
+    if is_free_teach:
+        print("Powered-servo stall detection is bypassed while follower arm torque is disabled.", flush=True)
 
     current_action = make_zero_action()
     episodes_recorded = dataset.num_episodes
@@ -291,6 +310,13 @@ def main() -> None:
                 logger.warning("Command fetch failed: %s", exc)
 
             observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
+            published_observation = servo_protection.enrich_observation(observation)
+            sensor_status_emitter.emit(
+                observation_reader,
+                published_observation,
+                source="dataset-capture",
+                vex_base_bridge=vex_base_bridge,
+            )
             torque_watcher.poll(robot)
 
             now = time.time()
@@ -308,6 +334,7 @@ def main() -> None:
                     allow_legacy_base=args.enable_base,
                 )
                 safety_filter.update(sent_action)
+                servo_protection.record_command(sent_action)
                 processed_obs = robot_observation_processor(observation)
                 recorded_action = vex_base_bridge.merge_action(sent_action)
                 frame = {
@@ -340,6 +367,7 @@ def main() -> None:
                     allow_legacy_base=args.enable_base,
                 )
                 safety_filter.update(sent_action)
+                servo_protection.record_command(sent_action)
                 if time.perf_counter() - reset_start >= args.reset_time_s:
                     phase = "recording"
                     episode_start = time.perf_counter()
@@ -348,7 +376,7 @@ def main() -> None:
                         flush=True,
                     )
 
-            encoded_observation = dict(observation)
+            encoded_observation = dict(published_observation)
             for cam_key in robot.cameras:
                 ret, buffer = cv2.imencode(".jpg", encoded_observation[cam_key], [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                 encoded_observation[cam_key] = base64.b64encode(buffer).decode("utf-8") if ret else ""
@@ -361,6 +389,10 @@ def main() -> None:
                 logger.warning("Observation publish failed: %s", exc)
 
             power_logger.maybe_sample()
+            if servo_protection.observe(observation, power_logger.last_sample):
+                stop_robot_base(robot, allow_legacy_base=args.enable_base)
+                print("Dataset capture stopped because the arm safety latch tripped.", flush=True)
+                break
             remaining = max(1.0 / args.loop_hz - (time.perf_counter() - loop_start), 0.0)
             if remaining > 0:
                 time.sleep(remaining)

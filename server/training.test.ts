@@ -64,6 +64,7 @@ test("config store defaults legacy pinned moves to Pi replay", () => {
   const loaded = store.getConfig();
 
   assert.equal(loaded.pinnedMoves[0]?.target, "pi");
+  assert.equal(loaded.pinnedMoves[0]?.vexReplayMode, "ecu");
 });
 
 test("training profile validation rejects unsupported camera modes", () => {
