@@ -339,7 +339,19 @@ export class RobotController {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Zero VEX gyro requested.");
       const host = await this.preparePi(settings, "zero VEX gyro");
-      await this.ensureRemoteHelpers(settings, host);
+      const commandHost = this.canUseWarmHostVexCommand()
+        ? this.getActiveHostAddress() ?? host
+        : host;
+      await this.ensureRemoteHelpers(settings, commandHost);
+
+      if (this.canUseWarmHostVexCommand()) {
+        await this.zeroVexGyroViaWarmHost(settings, commandHost);
+        this.lastVexBrainStatusRefresh = 0;
+        this.logActivity("VEX gyro origin zeroed through the running Pi host.");
+        this.lastError = null;
+        return this.getState();
+      }
+
       const { stdout } = await this.execRemoteScript(
         this.buildVexGyroZeroScript(settings),
         host,
@@ -3034,6 +3046,77 @@ PY
     return metaHost ?? this.lastResolvedHost;
   }
 
+  private canUseWarmHostVexCommand(): boolean {
+    const hostSnapshot = this.hostRunner.getSnapshot();
+    return (
+      hostSnapshot.state === "running" &&
+      this.hostSupportsInlineReplay(hostSnapshot.mode)
+    );
+  }
+
+  private async zeroVexGyroViaWarmHost(settings: AppSettings, host: string): Promise<void> {
+    const requestId = `zero-vex-gyro-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await this.writeRemoteHostCommand(settings, host, {
+      command: "zero-vex-gyro",
+      requestId,
+    });
+    const result = await this.waitForWarmHostVexCommandResult(requestId, 6000);
+    if (!result) {
+      throw new Error("Timed out waiting for the running Pi host to confirm VEX gyro zero.");
+    }
+    if (!result.success) {
+      throw new Error(result.status || "The running Pi host failed to zero the VEX gyro.");
+    }
+  }
+
+  private async waitForWarmHostVexCommandResult(
+    requestId: string,
+    timeoutMs: number,
+  ): Promise<{ success: boolean; status: string } | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const parsed = this.findWarmHostVexCommandResult(requestId);
+      if (parsed) {
+        return parsed;
+      }
+      await sleep(100);
+    }
+    return this.findWarmHostVexCommandResult(requestId);
+  }
+
+  private findWarmHostVexCommandResult(
+    requestId: string,
+  ): { success: boolean; status: string } | null {
+    const marker = "[vex-command] ";
+    const logs = this.hostRunner.getSnapshot().logs;
+    for (let index = logs.length - 1; index >= 0; index -= 1) {
+      const line = logs[index] ?? "";
+      const markerIndex = line.indexOf(marker);
+      if (markerIndex < 0) {
+        continue;
+      }
+      const jsonText = line.slice(markerIndex + marker.length).trim();
+      try {
+        const payload = JSON.parse(jsonText) as Record<string, unknown>;
+        if (
+          payload.command === "zero-vex-gyro" &&
+          payload.request_id === requestId
+        ) {
+          return {
+            success: payload.success === true,
+            status:
+              typeof payload.status === "string" && payload.status.trim()
+                ? payload.status.trim()
+                : "VEX gyro zero command finished.",
+          };
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
   private async sendWarmHostReplay(
     settings: AppSettings,
     host: string,
@@ -3082,24 +3165,33 @@ PY
           includeBase: boolean;
           vexReplayMode: "drive" | "ecu";
         }
-      | { command: "stop-replay" },
+      | { command: "stop-replay" }
+      | { command: "zero-vex-gyro"; requestId: string },
   ): Promise<void> {
     const commandPath = this.getRemoteHostCommandPath(settings);
-    const payload =
-      command.command === "replay"
-        ? {
-            command: "replay",
-            trajectory_path: command.trajectoryPath,
-            speed: command.speed,
-            hold_final_s: command.holdFinalS,
-            include_base: command.includeBase,
-            vex_replay_mode: command.vexReplayMode,
-            requested_at: new Date().toISOString(),
-          }
-        : {
-            command: "stop-replay",
-            requested_at: new Date().toISOString(),
-          };
+    let payload: Record<string, unknown>;
+    if (command.command === "replay") {
+      payload = {
+        command: "replay",
+        trajectory_path: command.trajectoryPath,
+        speed: command.speed,
+        hold_final_s: command.holdFinalS,
+        include_base: command.includeBase,
+        vex_replay_mode: command.vexReplayMode,
+        requested_at: new Date().toISOString(),
+      };
+    } else if (command.command === "zero-vex-gyro") {
+      payload = {
+        command: "zero-vex-gyro",
+        request_id: command.requestId,
+        requested_at: new Date().toISOString(),
+      };
+    } else {
+      payload = {
+        command: "stop-replay",
+        requested_at: new Date().toISOString(),
+      };
+    }
     const serialized = JSON.stringify(payload);
     const script = `
 mkdir -p ${shellQuote(path.posix.dirname(commandPath))}

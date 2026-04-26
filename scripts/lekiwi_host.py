@@ -143,6 +143,12 @@ class UiCommandWatcher:
         command = payload.get("command")
         if command == "stop-replay":
             return {"command": "stop-replay"}
+        if command in {"zero-vex-gyro", "zero_vex_gyro"}:
+            request_id = payload.get("request_id")
+            return {
+                "command": "zero-vex-gyro",
+                "request_id": request_id if isinstance(request_id, str) else "",
+            }
         if command != "replay":
             print(f"[replay] error unsupported command in {self.path}: {command!r}", flush=True)
             return None
@@ -329,6 +335,38 @@ def print_vex_position_status(
     if message:
         payload["message"] = message
     print(f"{VEX_POSITION_LOG_PREFIX} {json.dumps(payload, separators=(',', ':'))}", flush=True)
+
+
+def execute_zero_vex_gyro_command(
+    command: dict[str, Any],
+    vex_base_bridge: VexBaseBridge | None,
+) -> None:
+    result: dict[str, Any] = {
+        "command": "zero-vex-gyro",
+        "request_id": command.get("request_id") or "",
+        "success": False,
+        "status": "VEX base bridge is unavailable.",
+        "gyro": None,
+    }
+    if vex_base_bridge is None:
+        print(f"[vex-command] {json.dumps(result, separators=(',', ':'))}", flush=True)
+        return
+
+    try:
+        result["success"] = vex_base_bridge.set_pose_origin(ttl_ms=1200, timeout_s=2.0)
+        time.sleep(0.2)
+        vex_base_bridge.poll()
+        gyro = vex_base_bridge.gyro_status_snapshot()
+        result["gyro"] = gyro
+        result["status"] = (
+            gyro.get("message")
+            if result["success"] and isinstance(gyro, dict) and gyro.get("message")
+            else "Timed out waiting for the VEX Brain to confirm gyro zero."
+        )
+    except Exception as exc:
+        result["status"] = f"VEX gyro zero failed: {exc}"
+
+    print(f"[vex-command] {json.dumps(result, separators=(',', ':'))}", flush=True)
 
 
 def execute_replay(
@@ -747,6 +785,9 @@ def main() -> None:
                         args.loop_hz,
                         args.enable_base,
                     )
+                elif pending_ui_command["command"] == "zero-vex-gyro":
+                    execute_zero_vex_gyro_command(pending_ui_command, vex_base_bridge)
+                    pending_ui_command = None
                 else:
                     try:
                         stop_robot_base(robot, allow_legacy_base=args.enable_base)
