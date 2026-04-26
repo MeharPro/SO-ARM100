@@ -25,6 +25,7 @@ from lekiwi_sensor_replay import (
 )
 from vex_base_bridge import VEX_MOTOR_STATE_KEYS
 from vex_base_bridge import build_vex_telemetry_program_source
+from vex_base_bridge import VexBaseBridge
 
 
 def build_sample(
@@ -694,8 +695,11 @@ class SensorReplayTests(unittest.TestCase):
         compile(source, "<generated-vex-telemetry>", "exec")
 
         self.assertIn("#vex:disable=repl", source)
-        self.assertIn("import uselect", source)
-        self.assertIn("stdin_poll.register(sys.stdin, uselect.POLLIN)", source)
+        self.assertIn("serial_reader_thread = Thread(serial_command_reader)", source)
+        self.assertIn("chunk = sys.stdin.read(1)", source)
+        self.assertIn("start_serial_command_reader()", source)
+        self.assertNotIn("import uselect", source)
+        self.assertNotIn("stdin_poll.register(sys.stdin, uselect.POLLIN)", source)
         self.assertNotIn('open("/dev/serial1", "rb")', source)
         self.assertIn('if command == "!origin"', source)
         self.assertIn("inertial_1.reset_rotation()", source)
@@ -706,6 +710,31 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn('"vex_mixer_version":%d', source)
         self.assertIn("remote_takeover = True", source)
         self.assertIn('remote_mode = "hold"', source)
+
+    def test_command_stream_probe_requires_runtime_zero_velocity_command(self) -> None:
+        bridge = VexBaseBridge(
+            requested_port="auto",
+            baudrate=115200,
+            stale_after_s=0.35,
+            command_timeout_s=0.35,
+            logger=mock.Mock(),
+        )
+        bridge.serial_handle = object()
+        bridge.wait_for_update = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        bridge.send_motion = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        bridge.send_hold = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        bridge.wait_for_source = mock.Mock(return_value=True)  # type: ignore[method-assign]
+
+        self.assertTrue(bridge.remote_command_stream_active(timeout_s=1.25))
+
+        bridge.send_motion.assert_called_once_with(
+            {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0},
+            ttl_ms=350,
+        )
+        bridge.wait_for_source.assert_called_once()
+        self.assertEqual(bridge.wait_for_source.call_args.args[0], {"pi-drive"})
+        self.assertEqual(bridge.wait_for_source.call_args.kwargs["timeout_s"], 1.25)
+        bridge.send_hold.assert_called_once_with(ttl_ms=350)
 
     def test_generated_vex_program_uses_normal_vex_axis_defaults(self) -> None:
         source = build_vex_telemetry_program_source({})

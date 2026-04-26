@@ -353,7 +353,6 @@ def build_vex_telemetry_program_source(control_config: dict[str, Any] | None) ->
     return f"""#vex:disable=repl
 from vex import *
 import sys
-import uselect
 
 brain = Brain()
 controller_1 = Controller(PRIMARY)
@@ -388,9 +387,8 @@ remote_dt_ms = 20
 remote_expires_ms = 0
 last_targets = {{}}
 pose_epoch = 0
-stdin_poll = uselect.poll()
-stdin_poll.register(sys.stdin, uselect.POLLIN)
-stdin_buffer = ""
+serial_command_lines = []
+serial_reader_thread = None
 
 
 def clamp(value, low, high):
@@ -596,21 +594,37 @@ def remote_command_active(now_ms):
     return remote_takeover and remote_mode != "" and now_ms <= remote_expires_ms
 
 
-def poll_serial_commands():
-    global stdin_buffer
+def serial_command_reader():
+    serial_buffer = ""
+    while True:
+        try:
+            chunk = sys.stdin.read(1)
+        except Exception:
+            wait(20, MSEC)
+            continue
 
-    while stdin_poll.poll(0):
-        chunk = sys.stdin.read(1)
-        if chunk is None:
-            break
+        if not chunk:
+            wait(5, MSEC)
+            continue
         if isinstance(chunk, bytes):
             chunk = chunk.decode("utf-8", "ignore")
-        stdin_buffer += chunk
+        serial_buffer += chunk
 
-        while "\\n" in stdin_buffer:
-            line, stdin_buffer = stdin_buffer.split("\\n", 1)
+        while "\\n" in serial_buffer:
+            line, serial_buffer = serial_buffer.split("\\n", 1)
             if line:
-                handle_command_line(line)
+                serial_command_lines.append(line)
+
+
+def start_serial_command_reader():
+    global serial_reader_thread
+    if serial_reader_thread is None:
+        serial_reader_thread = Thread(serial_command_reader)
+
+
+def poll_serial_commands():
+    while len(serial_command_lines) > 0:
+        handle_command_line(serial_command_lines.pop(0))
 
 
 def apply_remote_ecu():
@@ -675,6 +689,7 @@ def print_motion(motion, source):
 def main():
     last_telemetry_ms = -TELEMETRY_INTERVAL_MS
     initialize_inertial()
+    start_serial_command_reader()
     wait(30, MSEC)
     print("\\033[2J")
 
@@ -1002,13 +1017,15 @@ class VexBaseBridge:
         if not self.wait_for_update(timeout_s=timeout_s):
             return False
         probe_started_at = time.time()
-        if not self.send_hold(ttl_ms=350):
+        if not self.send_motion(dict.fromkeys(BASE_STATE_KEYS, 0.0), ttl_ms=350):
             return False
-        return self.wait_for_source(
-            {"pi-hold"},
+        accepted = self.wait_for_source(
+            {"pi-drive"},
             since_s=probe_started_at,
             timeout_s=timeout_s,
         )
+        self.send_hold(ttl_ms=350)
+        return accepted
 
     def mixer_version_current(self) -> bool:
         version = self.latest_extra_state.get("vex_mixer_version")
