@@ -501,7 +501,7 @@ def set_pose_origin():
     if inertial_available():
         inertial_1.reset_rotation()
         inertial_1.reset_heading()
-    pose_epoch = 1
+    pose_epoch += 1
 
 
 def handle_command_line(line):

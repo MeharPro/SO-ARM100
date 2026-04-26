@@ -291,6 +291,20 @@ def _status_numeric(status: dict[str, Any] | None, key: str) -> float | None:
     return None
 
 
+def _heading_reference_block_reason(feedback: dict[str, Any]) -> str | None:
+    if feedback.get("recorded_heading_deg") is None:
+        return None
+    if feedback.get("live_heading_deg") is None:
+        return "live-gyro-unavailable"
+    if feedback.get("recorded_pose_epoch") is None:
+        return "recorded-pose-epoch-missing"
+    if feedback.get("live_pose_epoch") is None:
+        return "live-pose-epoch-missing"
+    if int(float(feedback["recorded_pose_epoch"])) != int(float(feedback["live_pose_epoch"])):
+        return "stale-gyro-origin"
+    return None
+
+
 def _first_recorded_value(samples: list[dict[str, Any]], key: str) -> float | None:
     for sample in samples:
         state = sample.get("state") if isinstance(sample, dict) else None
@@ -572,6 +586,15 @@ class SensorAwareReplayState:
             if abs(raw_heading_error_deg) >= THETA_RECENTER_THRESHOLD_DEG:
                 feedback_only = True
 
+        heading_reference_block_reason = _heading_reference_block_reason(
+            {
+                "recorded_heading_deg": recorded_heading_deg,
+                "recorded_pose_epoch": recorded_pose_epoch,
+                "live_heading_deg": live_heading_deg,
+                "live_pose_epoch": live_pose_epoch,
+            }
+        )
+
         return {
             "recorded_x_m": recorded_x_m,
             "recorded_y_m": recorded_y_m,
@@ -594,8 +617,9 @@ class SensorAwareReplayState:
             "heading_error_deg": heading_error_deg,
             "available_axes": available_axes,
             "aligned_axes": aligned_axes,
-            "aligned": bool(available_axes) and len(aligned_axes) == len(available_axes),
+            "aligned": bool(available_axes) and heading_reference_block_reason is None and len(aligned_axes) == len(available_axes),
             "feedback_only": feedback_only,
+            "heading_reference_block_reason": heading_reference_block_reason,
         }
 
     def feedback_context(
@@ -887,11 +911,37 @@ def preposition_vex_base_to_recorded_state(
     distance_status = observation_reader.get_sensor_status_snapshot()
     gyro_status = vex_base_bridge.gyro_status_snapshot()
     replay_state.prepare()
-    if not replay_state.has_feedback(
+    feedback = replay_state.feedback_context(
         start_state,
         live_sensor_status=distance_status,
         live_gyro_status=gyro_status,
-    ):
+    )
+    heading_block_reason = _heading_reference_block_reason(feedback)
+    if heading_block_reason is not None:
+        vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
+        print(
+            f"{SENSOR_REPLAY_LOG_PREFIX} "
+            + json.dumps(
+                {
+                    "phase": "preposition",
+                    "event": "stopped",
+                    "reason": heading_block_reason,
+                    "axis": "heading",
+                    "recorded_pose_epoch": feedback.get("recorded_pose_epoch"),
+                    "live_pose_epoch": feedback.get("live_pose_epoch"),
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return _preposition_result(
+            False,
+            reason=heading_block_reason,
+            axis="heading",
+            detail="Recorded gyro heading exists, but the live VEX gyro origin is not the same origin as the recording.",
+            feedback=feedback,
+        )
+    if not feedback["available_axes"]:
         vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
         print(
             f"{SENSOR_REPLAY_LOG_PREFIX} "
@@ -946,6 +996,31 @@ def preposition_vex_base_to_recorded_state(
             live_sensor_status=distance_status,
             live_gyro_status=gyro_status,
         )
+        heading_block_reason = _heading_reference_block_reason(feedback)
+        if heading_block_reason is not None:
+            vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
+            print(
+                f"{SENSOR_REPLAY_LOG_PREFIX} "
+                + json.dumps(
+                    {
+                        "phase": "preposition",
+                        "event": "stopped",
+                        "reason": heading_block_reason,
+                        "axis": "heading",
+                        "recorded_pose_epoch": feedback.get("recorded_pose_epoch"),
+                        "live_pose_epoch": feedback.get("live_pose_epoch"),
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            return _preposition_result(
+                False,
+                reason=heading_block_reason,
+                axis="heading",
+                detail="Recorded gyro heading exists, but the live VEX gyro origin is not the same origin as the recording.",
+                feedback=feedback,
+            )
 
         active_axis: str | None = None
         active_raw_error: float | None = None

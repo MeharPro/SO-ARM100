@@ -227,6 +227,17 @@ class SensorReplayTests(unittest.TestCase):
                 axis_order.append(axis)
         return axis_order
 
+    def _assert_motion_commands_are_axis_isolated(self, commands: list[tuple[str, dict[str, float]]]) -> None:
+        for command_type, motion in commands:
+            if command_type == "hold":
+                continue
+            nonzero_axes = [
+                key
+                for key in ("x.vel", "y.vel", "theta.vel")
+                if abs(float(motion.get(key, 0.0) or 0.0)) > 1e-6
+            ]
+            self.assertLessEqual(len(nonzero_axes), 1, f"motion command leaked across axes: {motion}")
+
     def test_preposition_aligns_heading_then_x_then_y(self) -> None:
         samples = [build_sample()]
         replay_state = SensorAwareReplayState(
@@ -252,6 +263,7 @@ class SensorReplayTests(unittest.TestCase):
         self.assertTrue(aligned)
 
         self.assertEqual(self._command_axis_order(vex_bridge.commands), ["heading", "x", "y"])
+        self._assert_motion_commands_are_axis_isolated(vex_bridge.commands)
         self.assertTrue(
             all(
                 command_type == "motion"
@@ -498,7 +510,7 @@ class SensorReplayTests(unittest.TestCase):
                 self.assertAlmostEqual(live_state["x"], 0.78, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
                 self.assertAlmostEqual(live_state["y"], 1.33, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
-    def test_preposition_skips_stale_inertial_origin(self) -> None:
+    def test_preposition_aborts_stale_inertial_origin_before_ultrasonic_axes(self) -> None:
         samples = [build_sample(heading_deg=-47.6121, pose_epoch=1)]
         replay_state = SensorAwareReplayState(
             samples,
@@ -520,13 +532,45 @@ class SensorReplayTests(unittest.TestCase):
                 settle_s=0.0,
             )
 
-        self.assertTrue(aligned)
+        self.assertFalse(aligned)
+        self.assertEqual(aligned.reason, "stale-gyro-origin")
+        self.assertEqual(aligned.axis, "heading")
         self.assertTrue(
             all(abs(motion["theta.vel"]) <= 1e-6 for command_type, motion in vex_bridge.commands if command_type != "hold")
         )
         self.assertAlmostEqual(live_state["heading"], 0.0, delta=1e-6)
-        self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
-        self.assertAlmostEqual(live_state["y"], 2.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
+        self.assertAlmostEqual(live_state["x"], 1.05, delta=1e-6)
+        self.assertAlmostEqual(live_state["y"], 2.10, delta=1e-6)
+
+    def test_preposition_aborts_recorded_heading_without_pose_epoch(self) -> None:
+        sample = build_sample(heading_deg=12.0, pose_epoch=1)
+        state = dict(sample["state"])  # type: ignore[arg-type]
+        state.pop(sensor_replay.VEX_POSE_EPOCH_KEY, None)
+        samples = [{"t_s": 0.0, "state": state}]
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+        live_state = {"x": 1.05, "y": 2.10, "heading": 12.0, "pose_epoch": 1}
+        observation_reader = FakeObservationReader(live_state)
+        vex_bridge = FakeVexBridge(live_state)
+
+        with mock.patch.object(sensor_replay.time, "sleep", return_value=None):
+            aligned = preposition_vex_base_to_recorded_state(
+                vex_bridge,
+                observation_reader,
+                replay_state,
+                state,
+                timeout_s=SENSOR_PREPOSITION_TIMEOUT_S,
+                settle_s=0.0,
+            )
+
+        self.assertFalse(aligned)
+        self.assertEqual(aligned.reason, "recorded-pose-epoch-missing")
+        self.assertEqual(aligned.axis, "heading")
+        self.assertEqual(self._command_axis_order(vex_bridge.commands), [])
 
     def test_preposition_trusts_rezeroed_manual_origin(self) -> None:
         samples = [build_sample(heading_deg=0.0, pose_epoch=1)]
@@ -656,7 +700,7 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn('if command == "!origin"', source)
         self.assertIn("inertial_1.reset_rotation()", source)
         self.assertIn("inertial_1.reset_heading()", source)
-        self.assertIn("pose_epoch = 1", source)
+        self.assertIn("pose_epoch += 1", source)
         self.assertIn('"vex_pose_epoch":%d', source)
         self.assertIn("VEX_MIXER_VERSION = 5", source)
         self.assertIn('"vex_mixer_version":%d', source)
