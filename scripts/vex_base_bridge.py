@@ -91,7 +91,7 @@ DEFAULT_VEX_CONTROL_CONFIG = {
         "rearLeft": {"port": 10, "reversed": False},
     },
     "controls": {
-        "forwardAxis": "axis2",
+        "forwardAxis": "axis3",
         "strafeAxis": "axis4",
         "turnAxis": "axis1",
         "invertForward": False,
@@ -352,6 +352,8 @@ def build_vex_telemetry_program_source(control_config: dict[str, Any] | None) ->
     turn_expr = _axis_expression(controls["turnAxis"], bool(controls["invertTurn"]))
     return f"""#vex:disable=repl
 from vex import *
+import sys
+import uselect
 
 brain = Brain()
 controller_1 = Controller(PRIMARY)
@@ -386,8 +388,9 @@ remote_dt_ms = 20
 remote_expires_ms = 0
 last_targets = {{}}
 pose_epoch = 0
-serial_command_lines = []
-serial_reader_thread = None
+stdin_poll = uselect.poll()
+stdin_poll.register(sys.stdin, uselect.POLLIN)
+stdin_buffer = ""
 
 
 def clamp(value, low, high):
@@ -593,45 +596,21 @@ def remote_command_active(now_ms):
     return remote_takeover and remote_mode != "" and now_ms <= remote_expires_ms
 
 
-def serial_command_reader():
-    serial_buffer = ""
-    try:
-        serial_stream = open("/dev/serial1", "rb")
-        print("REMOTE serial1 ready")
-    except Exception as exc:
-        print("REMOTE serial1 unavailable %s" % exc)
-        return
+def poll_serial_commands():
+    global stdin_buffer
 
-    while True:
-        try:
-            chunk = serial_stream.read(1)
-        except Exception as exc:
-            print("REMOTE serial1 read error %s" % exc)
-            wait(250, MSEC)
-            continue
-
-        if not chunk:
-            wait(5, MSEC)
-            continue
+    while stdin_poll.poll(0):
+        chunk = sys.stdin.read(1)
+        if chunk is None:
+            break
         if isinstance(chunk, bytes):
             chunk = chunk.decode("utf-8", "ignore")
+        stdin_buffer += chunk
 
-        serial_buffer += chunk
-        while "\\n" in serial_buffer:
-            line, serial_buffer = serial_buffer.split("\\n", 1)
+        while "\\n" in stdin_buffer:
+            line, stdin_buffer = stdin_buffer.split("\\n", 1)
             if line:
-                serial_command_lines.append(line)
-
-
-def start_serial_command_reader():
-    global serial_reader_thread
-    if serial_reader_thread is None:
-        serial_reader_thread = Thread(serial_command_reader)
-
-
-def poll_serial_commands():
-    while len(serial_command_lines) > 0:
-        handle_command_line(serial_command_lines.pop(0))
+                handle_command_line(line)
 
 
 def apply_remote_ecu():
@@ -696,7 +675,6 @@ def print_motion(motion, source):
 def main():
     last_telemetry_ms = -TELEMETRY_INTERVAL_MS
     initialize_inertial()
-    start_serial_command_reader()
     wait(30, MSEC)
     print("\\033[2J")
 

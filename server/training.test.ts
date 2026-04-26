@@ -67,6 +67,40 @@ test("config store defaults legacy pinned moves to Pi replay", () => {
   assert.equal(loaded.pinnedMoves[0]?.vexReplayMode, "ecu");
 });
 
+test("config store upgrades untouched legacy VEX forward axis default", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
+  const configDir = path.join(tempRoot, ".lekiwi-ui");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      settings: {
+        ...defaultConfig.settings,
+        vex: {
+          ...defaultConfig.settings.vex,
+          controlPresetVersion: undefined,
+          controls: {
+            ...defaultConfig.settings.vex.controls,
+            forwardAxis: "axis2",
+            strafeAxis: "axis4",
+            turnAxis: "axis1",
+          },
+        },
+      },
+      pinnedMoves: [],
+      training: defaultConfig.training,
+    }),
+  );
+
+  const store = new ConfigStore(defaultConfig, tempRoot);
+  const loaded = store.getConfig();
+
+  assert.equal(loaded.settings.vex.controlPresetVersion, 2);
+  assert.equal(loaded.settings.vex.controls.forwardAxis, "axis3");
+  assert.equal(loaded.settings.vex.controls.strafeAxis, "axis4");
+  assert.equal(loaded.settings.vex.controls.turnAxis, "axis1");
+});
+
 test("training profile validation rejects unsupported camera modes", () => {
   const profile = createDefaultTrainingProfile(process.cwd(), "Bad Cameras");
   profile.camerasMode = "{}";

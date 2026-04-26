@@ -73,10 +73,10 @@ const RECOMMENDED_SAFE_ARM_TORQUE_LIMITS: Record<string, number> = {
 };
 const LOCAL_TRAINING_ROOT = "/Users/meharkhanna/robot-arm/output";
 const VEX_AXIS_OPTIONS = [
-  { value: "axis1", label: "Axis 1" },
-  { value: "axis2", label: "Axis 2" },
-  { value: "axis3", label: "Axis 3" },
-  { value: "axis4", label: "Axis 4" },
+  { value: "axis1", label: "Axis 1, right stick horizontal" },
+  { value: "axis2", label: "Axis 2, right stick vertical" },
+  { value: "axis3", label: "Axis 3, left stick vertical" },
+  { value: "axis4", label: "Axis 4, left stick horizontal" },
 ] as const;
 const VEX_REPLAY_MODE_OPTIONS = [
   { value: "ecu", label: "ECU mode" },

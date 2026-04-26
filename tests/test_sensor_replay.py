@@ -305,7 +305,7 @@ class SensorReplayTests(unittest.TestCase):
         self.assertEqual(self._command_axis_order(vex_bridge.commands), ["x"])
         self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
-    def test_preposition_uses_medium_pulses_for_large_linear_error(self) -> None:
+    def test_preposition_uses_larger_pulses_for_large_linear_error(self) -> None:
         samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
         replay_state = SensorAwareReplayState(
             samples,
@@ -338,11 +338,8 @@ class SensorReplayTests(unittest.TestCase):
             max(self._max_wheel_percent(motion, replay_state) for motion in x_commands),
             sensor_replay.PREPOSITION_MAX_WHEEL_PERCENT + 1e-6,
         )
-        self.assertLess(max(self._max_wheel_percent(motion, replay_state) for motion in x_commands), 14.0)
-        self.assertEqual(vex_bridge.motion_ttls_ms[0], sensor_replay.PREPOSITION_MEDIUM_PULSE_TTL_MS)
-        self.assertTrue(
-            all(ttl <= sensor_replay.PREPOSITION_SMALL_PULSE_TTL_MS for ttl in vex_bridge.motion_ttls_ms[1:])
-        )
+        self.assertEqual(vex_bridge.motion_ttls_ms[0], sensor_replay.PREPOSITION_LARGE_PULSE_TTL_MS)
+        self.assertTrue(all(ttl <= sensor_replay.PREPOSITION_LARGE_PULSE_TTL_MS for ttl in vex_bridge.motion_ttls_ms))
         self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
     def test_preposition_moves_away_when_ultrasonic_distance_is_too_close(self) -> None:
@@ -378,7 +375,6 @@ class SensorReplayTests(unittest.TestCase):
             max(self._max_wheel_percent(motion, replay_state) for motion in x_commands),
             sensor_replay.PREPOSITION_MAX_WHEEL_PERCENT + 1e-6,
         )
-        self.assertLess(max(self._max_wheel_percent(motion, replay_state) for motion in x_commands), 14.0)
         self.assertLess(x_commands[0]["x.vel"], 0.0)
         self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
@@ -654,7 +650,9 @@ class SensorReplayTests(unittest.TestCase):
         compile(source, "<generated-vex-telemetry>", "exec")
 
         self.assertIn("#vex:disable=repl", source)
-        self.assertIn('open("/dev/serial1", "rb")', source)
+        self.assertIn("import uselect", source)
+        self.assertIn("stdin_poll.register(sys.stdin, uselect.POLLIN)", source)
+        self.assertNotIn('open("/dev/serial1", "rb")', source)
         self.assertIn('if command == "!origin"', source)
         self.assertIn("inertial_1.reset_rotation()", source)
         self.assertIn("inertial_1.reset_heading()", source)
@@ -664,6 +662,14 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn('"vex_mixer_version":%d', source)
         self.assertIn("remote_takeover = True", source)
         self.assertIn('remote_mode = "hold"', source)
+
+    def test_generated_vex_program_uses_normal_vex_axis_defaults(self) -> None:
+        source = build_vex_telemetry_program_source({})
+
+        self.assertIn("forward_pct = apply_deadband(controller_1.axis3.position())", source)
+        self.assertIn("strafe_pct = apply_deadband(controller_1.axis4.position())", source)
+        self.assertIn("turn_pct = apply_deadband(controller_1.axis1.position())", source)
+        self.assertNotIn("forward_pct = apply_deadband(controller_1.axis2.position())", source)
 
     def test_generated_vex_program_uses_default_x_drive_mixer(self) -> None:
         source = build_vex_telemetry_program_source({})

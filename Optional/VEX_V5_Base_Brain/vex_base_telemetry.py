@@ -36,7 +36,7 @@ def apply_deadband(value):
 
 
 def controller_motion():
-    forward_pct = apply_deadband(controller_1.axis2.position())
+    forward_pct = apply_deadband(controller_1.axis3.position())
     strafe_pct = apply_deadband(controller_1.axis4.position())
     turn_pct = apply_deadband(controller_1.axis1.position())
 

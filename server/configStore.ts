@@ -61,6 +61,17 @@ export class ConfigStore {
 
     try {
       const raw = JSON.parse(fs.readFileSync(this.configPath, "utf8")) as Partial<StoredConfig>;
+      const rawVex = raw.settings?.vex;
+      const rawVexControls = rawVex?.controls;
+      const rawVexControlPresetVersion = Number(rawVex?.controlPresetVersion);
+      const shouldUpgradeLegacyVexAxisDefaults =
+        !Number.isFinite(rawVexControlPresetVersion) &&
+        rawVexControls?.forwardAxis === "axis2" &&
+        (rawVexControls?.strafeAxis ?? this.defaults.settings.vex.controls.strafeAxis) === "axis4" &&
+        (rawVexControls?.turnAxis ?? this.defaults.settings.vex.controls.turnAxis) === "axis1" &&
+        !Boolean(rawVexControls?.invertForward) &&
+        !Boolean(rawVexControls?.invertStrafe) &&
+        !Boolean(rawVexControls?.invertTurn);
       return {
         settings: this.normalizeSettings({
           ...this.defaults.settings,
@@ -115,6 +126,7 @@ export class ConfigStore {
             controls: {
               ...this.defaults.settings.vex.controls,
               ...raw.settings?.vex?.controls,
+              ...(shouldUpgradeLegacyVexAxisDefaults ? { forwardAxis: "axis3" as const } : {}),
             },
             tuning: {
               ...this.defaults.settings.vex.tuning,
@@ -172,6 +184,9 @@ export class ConfigStore {
       },
       vex: {
         ...normalized.vex,
+        controlPresetVersion: Number.isFinite(Number(normalized.vex.controlPresetVersion))
+          ? Math.max(2, Math.round(Number(normalized.vex.controlPresetVersion)))
+          : this.defaults.settings.vex.controlPresetVersion,
         telemetrySlot: clampSlot(normalized.vex.telemetrySlot, this.defaults.settings.vex.telemetrySlot),
         replaySlot: clampSlot(normalized.vex.replaySlot, this.defaults.settings.vex.replaySlot),
         autoRunTelemetry: Boolean(normalized.vex.autoRunTelemetry),

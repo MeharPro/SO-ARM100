@@ -63,6 +63,7 @@ export interface VexInertialSettings {
 }
 
 export interface VexSettings {
+  controlPresetVersion: number;
   telemetrySlot: number;
   replaySlot: number;
   autoRunTelemetry: boolean;

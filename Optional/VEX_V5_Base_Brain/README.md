@@ -53,7 +53,7 @@ read back from the Brain through the official `vexcom` tool. It uses:
 - `PORT2` front left
 - `PORT9` rear right, reversed
 - `PORT10` rear left
-- `axis2` forward/back
+- `axis3` forward/back
 - `axis4` strafe
 - `axis1` turn
 

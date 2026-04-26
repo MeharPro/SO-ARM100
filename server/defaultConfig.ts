@@ -43,6 +43,7 @@ export const defaultConfig: StoredConfig = {
       defaultHoldFinalS: 0.5,
     },
     vex: {
+      controlPresetVersion: 2,
       telemetrySlot: 8,
       replaySlot: 7,
       autoRunTelemetry: true,
@@ -69,7 +70,7 @@ export const defaultConfig: StoredConfig = {
         },
       },
       controls: {
-        forwardAxis: "axis2",
+        forwardAxis: "axis3",
         strafeAxis: "axis4",
         turnAxis: "axis1",
         invertForward: false,
