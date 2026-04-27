@@ -3,6 +3,8 @@ import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ArmHomeMode,
   AppSettings,
+  ChainLink,
+  ChainLinkItem,
   DashboardState,
   DeleteRecordingRequest,
   DuplicateRecordingRequest,
@@ -17,6 +19,7 @@ import type {
   RenameRecordingRequest,
   RecordingTimelinePoint,
   ResetRecordingUltrasonicPositionRequest,
+  SaveChainLinkRequest,
   SetArmHomeFromRecordingRequest,
   SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
@@ -97,6 +100,15 @@ const HOME_MODE_OPTIONS: Array<{ value: ArmHomeMode; label: string }> = [
 ];
 const SENSOR_STATUS_LOG_PREFIX = "[sensor-status]";
 const VEX_POSITION_LOG_PREFIX = "[vex-position]";
+
+type ChainRunPhase = "starting" | "running" | "waiting-confirmation";
+
+interface ChainRunState {
+  chainId: string;
+  chainName: string;
+  itemIndex: number;
+  phase: ChainRunPhase;
+}
 
 interface ServoTemperature {
   id: string;
@@ -321,6 +333,32 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   }
 
   return payload as T;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function createUiId(prefix: string): string {
+  const randomId =
+    typeof window.crypto?.randomUUID === "function"
+      ? window.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${randomId}`;
+}
+
+function isReplayServiceActive(service: ServiceSnapshot | null | undefined): boolean {
+  return Boolean(service && ["starting", "running", "stopping"].includes(service.state));
+}
+
+function homeModeRunsBefore(mode: ArmHomeMode): boolean {
+  return mode === "start" || mode === "both";
+}
+
+function homeModeRunsAfter(mode: ArmHomeMode): boolean {
+  return mode === "end" || mode === "both";
 }
 
 function statusTone(state: string): string {
@@ -1380,6 +1418,14 @@ export default function App() {
   const [pinHotkey, setPinHotkey] = useState("");
   const [pinSpeed, setPinSpeed] = useState(1);
   const [pinHoldFinal, setPinHoldFinal] = useState(0.5);
+  const [chainDraftId, setChainDraftId] = useState<string | null>(null);
+  const [chainName, setChainName] = useState("Chain-link");
+  const [chainConfirmAfterEach, setChainConfirmAfterEach] = useState(true);
+  const [chainItems, setChainItems] = useState<ChainLinkItem[]>([]);
+  const [chainRecordingPath, setChainRecordingPath] = useState("");
+  const [chainDragItemId, setChainDragItemId] = useState<string | null>(null);
+  const [chainSpeedEditId, setChainSpeedEditId] = useState<string | null>(null);
+  const [chainRunState, setChainRunState] = useState<ChainRunState | null>(null);
   const [replayTarget, setReplayTarget] = useState<ReplayTarget>("pi");
   const [torqueDraft, setTorqueDraft] = useState<Record<string, number>>({});
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -1399,6 +1445,8 @@ export default function App() {
   const torqueTimers = useRef<Record<string, number>>({});
   const playbackAnchorRef = useRef<{ startedAtMs: number; baseTimeS: number } | null>(null);
   const stateRequestController = useRef<AbortController | null>(null);
+  const chainRunCancelledRef = useRef(false);
+  const chainConfirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
 
   const loadState = async () => {
     const controller = new AbortController();
@@ -1461,6 +1509,20 @@ export default function App() {
       setSelectedRecording(state.recordings[0].path);
     }
   }, [selectedRecording, state]);
+
+  useEffect(() => {
+    if (!state?.recordings.length) {
+      if (chainRecordingPath) {
+        setChainRecordingPath("");
+      }
+      return;
+    }
+
+    const stillExists = state.recordings.some((item) => item.path === chainRecordingPath);
+    if (!chainRecordingPath || !stillExists) {
+      setChainRecordingPath(selectedRecording || state.recordings[0].path);
+    }
+  }, [chainRecordingPath, selectedRecording, state?.recordings]);
 
   useEffect(() => {
     if (!state) {
@@ -1722,6 +1784,15 @@ export default function App() {
       vexReplayMode,
     ],
   );
+  const chainSelectedRecordingEntry = useMemo<RecordingEntry | undefined>(
+    () => state?.recordings.find((item) => item.path === chainRecordingPath),
+    [chainRecordingPath, state?.recordings],
+  );
+  const chainDraftIsSaved = Boolean(
+    chainDraftId && state?.chainLinks.some((chain) => chain.id === chainDraftId),
+  );
+  const chainCanSave = Boolean(chainName.trim() && chainItems.length > 0);
+  const chainIsRunning = chainRunState !== null;
   const recordingDurationS = recordingDetail?.durationS ?? selectedRecordingEntry?.durationS ?? 0;
   const trimStartValueS = parseNumber(trimStartDraft) ?? 0;
   const trimEndValueS = parseNumber(trimEndDraft) ?? recordingDurationS;
@@ -2500,7 +2571,265 @@ export default function App() {
     }
   };
 
+  const defaultChainItemForRecording = (recording: RecordingEntry): ChainLinkItem => {
+    const savedOptions = state?.recordingReplayOptions[recording.path];
+    const defaultSpeed = state?.settings.trajectories.defaultReplaySpeed ?? 1;
+    return {
+      id: createUiId("chain-item"),
+      name: recording.name,
+      trajectoryPath: recording.path,
+      target: "pi",
+      vexReplayMode: "ecu",
+      homeMode: savedOptions?.homeMode ?? "none",
+      speed: savedOptions?.speed ?? defaultSpeed,
+      autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+      includeBase: false,
+      holdFinalS: state?.settings.trajectories.defaultHoldFinalS ?? 0.5,
+    };
+  };
+
+  const handleNewChainLink = () => {
+    setChainDraftId(createUiId("chain"));
+    setChainName("Chain-link");
+    setChainConfirmAfterEach(true);
+    setChainItems([]);
+    setChainSpeedEditId(null);
+  };
+
+  const handleEditChainLink = (chain: ChainLink) => {
+    setChainDraftId(chain.id);
+    setChainName(chain.name);
+    setChainConfirmAfterEach(chain.confirmAfterEach);
+    setChainItems(structuredClone(chain.items));
+    setChainSpeedEditId(null);
+  };
+
+  const handleAddRecordingToChain = () => {
+    if (!chainSelectedRecordingEntry) {
+      flashToast("Select a recording to add.");
+      return;
+    }
+
+    const item = defaultChainItemForRecording(chainSelectedRecordingEntry);
+    setChainItems((current) => [...current, item]);
+    setChainDraftId((current) => current ?? createUiId("chain"));
+    setChainName((current) =>
+      current.trim() && current !== "Chain-link"
+        ? current
+        : `${chainSelectedRecordingEntry.name} chain`,
+    );
+  };
+
+  const updateChainItem = (itemId: string, patch: Partial<ChainLinkItem>) => {
+    setChainItems((current) =>
+      current.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
+    );
+  };
+
+  const handleChainItemSpeedChange = (itemId: string, speed: number) => {
+    if (!Number.isFinite(speed) || speed <= 0) {
+      return;
+    }
+    updateChainItem(itemId, { speed });
+  };
+
+  const handleChainItemHomeModeChange = (itemId: string, homeMode: ArmHomeMode) => {
+    updateChainItem(itemId, { homeMode });
+  };
+
+  const handleRemoveChainItem = (itemId: string) => {
+    setChainItems((current) => current.filter((item) => item.id !== itemId));
+  };
+
+  const handleDropChainItem = (targetItemId: string) => {
+    if (!chainDragItemId || chainDragItemId === targetItemId) {
+      setChainDragItemId(null);
+      return;
+    }
+
+    setChainItems((current) => {
+      const draggedIndex = current.findIndex((item) => item.id === chainDragItemId);
+      const targetIndex = current.findIndex((item) => item.id === targetItemId);
+      if (draggedIndex === -1 || targetIndex === -1) {
+        return current;
+      }
+
+      const next = [...current];
+      const [dragged] = next.splice(draggedIndex, 1);
+      next.splice(targetIndex, 0, dragged);
+      return next;
+    });
+    setChainDragItemId(null);
+  };
+
+  const handleSaveChainLink = async () => {
+    if (!chainCanSave) {
+      flashToast("Add at least one recording before saving a Chain-link.");
+      return;
+    }
+
+    const id = chainDraftId ?? createUiId("chain");
+    const payload: SaveChainLinkRequest = {
+      id,
+      name: chainName.trim() || "Chain-link",
+      confirmAfterEach: chainConfirmAfterEach,
+      items: chainItems,
+    };
+    const next = await mutate("save-chain-link", "/api/chain-links", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    if (next) {
+      setChainDraftId(id);
+      flashToast("Chain-link saved.");
+    }
+  };
+
+  const handleDeleteChainLink = async (chainId: string) => {
+    const next = await mutate("delete-chain-link", `/api/chain-links/${chainId}`, {
+      method: "DELETE",
+    });
+    if (!next) {
+      return;
+    }
+    if (chainDraftId === chainId) {
+      handleNewChainLink();
+    }
+    flashToast("Chain-link removed.");
+  };
+
+  const setStateFromChainPoll = (next: DashboardState) => {
+    setBackendError("");
+    setState(next);
+    if (!settingsDirty) {
+      setSettingsDraft(next.settings);
+    }
+  };
+
+  const waitForReplayCompletion = async (initialState: DashboardState): Promise<void> => {
+    let sawActiveReplay = isReplayServiceActive(initialState.services.replay);
+    const initialStartedAt = initialState.services.replay.startedAt;
+    const waitStartedAtMs = Date.now();
+
+    while (!chainRunCancelledRef.current) {
+      await delay(900);
+      const next = await request<DashboardState>("/api/state");
+      setStateFromChainPoll(next);
+
+      const replayService = next.services.replay;
+      if (replayService.state === "error") {
+        throw new Error(replayService.detail || "Replay failed.");
+      }
+
+      const activeReplay = isReplayServiceActive(replayService);
+      if (activeReplay) {
+        sawActiveReplay = true;
+        continue;
+      }
+
+      const stoppedAtMs = Date.parse(replayService.stoppedAt ?? "");
+      const stoppedAfterStart =
+        Number.isFinite(stoppedAtMs) &&
+        stoppedAtMs >= waitStartedAtMs - 1000 &&
+        (!initialStartedAt ||
+          !replayService.startedAt ||
+          stoppedAtMs >= Date.parse(initialStartedAt));
+      if (sawActiveReplay || stoppedAfterStart) {
+        return;
+      }
+    }
+  };
+
+  const waitForChainConfirmation = (): Promise<boolean> =>
+    new Promise((resolve) => {
+      chainConfirmationResolverRef.current = resolve;
+    });
+
+  const resolveChainConfirmation = (confirmed: boolean) => {
+    chainConfirmationResolverRef.current?.(confirmed);
+    chainConfirmationResolverRef.current = null;
+  };
+
+  const handleRunChainLink = async (chain: ChainLink) => {
+    if (!chain.items.length) {
+      flashToast("This Chain-link has no recordings.");
+      return;
+    }
+
+    chainRunCancelledRef.current = false;
+    try {
+      for (let index = 0; index < chain.items.length; index += 1) {
+        const item = chain.items[index];
+        if (chainRunCancelledRef.current) {
+          break;
+        }
+
+        setChainRunState({
+          chainId: chain.id,
+          chainName: chain.name,
+          itemIndex: index,
+          phase: "starting",
+        });
+
+        const next = await request<DashboardState>("/api/replays/start", {
+          method: "POST",
+          body: JSON.stringify(item),
+        });
+        setStateFromChainPoll(next);
+        setChainRunState({
+          chainId: chain.id,
+          chainName: chain.name,
+          itemIndex: index,
+          phase: "running",
+        });
+
+        await waitForReplayCompletion(next);
+        if (chainRunCancelledRef.current) {
+          break;
+        }
+
+        if (chain.confirmAfterEach && index < chain.items.length - 1) {
+          setChainRunState({
+            chainId: chain.id,
+            chainName: chain.name,
+            itemIndex: index,
+            phase: "waiting-confirmation",
+          });
+          const confirmed = await waitForChainConfirmation();
+          if (!confirmed) {
+            break;
+          }
+        }
+      }
+
+      if (!chainRunCancelledRef.current) {
+        flashToast("Chain-link complete.");
+      }
+    } catch (error) {
+      flashToast(error instanceof Error ? error.message : "Chain-link failed.");
+    } finally {
+      chainRunCancelledRef.current = false;
+      chainConfirmationResolverRef.current = null;
+      setChainRunState(null);
+    }
+  };
+
+  const handleStopChainLink = async () => {
+    chainRunCancelledRef.current = true;
+    resolveChainConfirmation(false);
+    setChainRunState(null);
+    const next = await mutate("stop-chain-link", "/api/replays/stop", { method: "POST" });
+    if (next) {
+      flashToast("Chain-link stopped.");
+    }
+  };
+
   const disabled = pendingAction !== null;
+  const activeChain = chainRunState
+    ? state?.chainLinks.find((chain) => chain.id === chainRunState.chainId) ?? null
+    : null;
+  const activeChainItem = chainRunState ? activeChain?.items[chainRunState.itemIndex] ?? null : null;
   const piCalibrationBusy = state
     ? ["starting", "running", "stopping"].includes(state.services.piCalibration.state)
     : false;
@@ -3470,6 +3799,276 @@ export default function App() {
               <p className="card-note">
                 Hotkeys fire when the page is focused and you are not typing in a field. Arm hotkeys to keep the Pi ready for fast pinned-move launches.
               </p>
+              <div className="chain-link-panel">
+                <div className="chain-link-editor">
+                  <div className="chain-link-head">
+                    <div>
+                      <p className="card-kicker">Chain-links</p>
+                      <h3>{chainDraftIsSaved ? "Edit Chain-link" : "Build Chain-link"}</h3>
+                    </div>
+                    <button disabled={chainIsRunning} onClick={handleNewChainLink}>
+                      New Chain-link
+                    </button>
+                  </div>
+
+                  {chainRunState ? (
+                    <div className="mode-strip compact chain-run-strip">
+                      <span
+                        className={`status-pill ${
+                          chainRunState.phase === "waiting-confirmation" ? "warn" : "good"
+                        }`}
+                      >
+                        {chainRunState.phase === "waiting-confirmation" ? "confirm next" : "chain running"}
+                      </span>
+                      <p className="card-note">
+                        {chainRunState.chainName}: step {chainRunState.itemIndex + 1}
+                        {activeChain ? ` of ${activeChain.items.length}` : ""}{" "}
+                        {activeChainItem ? `(${activeChainItem.name})` : ""}
+                      </p>
+                      <div className="button-cluster inline">
+                        {chainRunState.phase === "waiting-confirmation" ? (
+                          <button
+                            className="primary"
+                            onClick={() => resolveChainConfirmation(true)}
+                          >
+                            Continue
+                          </button>
+                        ) : null}
+                        <button className="danger" onClick={() => void handleStopChainLink()}>
+                          Stop Chain
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="form-grid compact">
+                    <label>
+                      Chain-link name
+                      <input
+                        value={chainName}
+                        onChange={(event) => setChainName(event.target.value)}
+                        placeholder="Pick and place sequence"
+                      />
+                    </label>
+                    <label>
+                      Add recording
+                      <select
+                        value={chainRecordingPath}
+                        disabled={!state?.recordings.length}
+                        onChange={(event) => setChainRecordingPath(event.target.value)}
+                      >
+                        {state?.recordings.map((recording) => (
+                          <option key={recording.path} value={recording.path}>
+                            {recording.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={chainConfirmAfterEach}
+                        onChange={(event) => setChainConfirmAfterEach(event.target.checked)}
+                      />
+                      <span>Confirm after each recording</span>
+                    </label>
+                  </div>
+
+                  <div className="button-cluster inline">
+                    <button
+                      disabled={disabled || !chainSelectedRecordingEntry}
+                      onClick={handleAddRecordingToChain}
+                    >
+                      Add Block
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={disabled || !chainCanSave}
+                      onClick={() => void handleSaveChainLink()}
+                    >
+                      Save Chain-link
+                    </button>
+                  </div>
+                  {!hasArmHomePosition && chainItems.some((item) => item.homeMode !== "none") ? (
+                    <p className="card-note">
+                      Set an arm Home before running Chain-link blocks with red go-home dots.
+                    </p>
+                  ) : null}
+
+                  <div className="chain-block-list">
+                    {chainItems.length ? (
+                      chainItems.map((item, index) => (
+                        <article
+                          key={item.id}
+                          className={`chain-block ${chainDragItemId === item.id ? "dragging" : ""}`}
+                          draggable={!chainIsRunning}
+                          onDragStart={() => setChainDragItemId(item.id)}
+                          onDragEnd={() => setChainDragItemId(null)}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={() => handleDropChainItem(item.id)}
+                          onDoubleClick={() => setChainSpeedEditId(item.id)}
+                        >
+                          <span
+                            className={`home-dot before ${
+                              homeModeRunsBefore(item.homeMode) ? "on" : ""
+                            }`}
+                            title={
+                              homeModeRunsBefore(item.homeMode)
+                                ? "Go home before this recording"
+                                : "No go-home before this recording"
+                            }
+                          />
+                          <div className="chain-block-main">
+                            <div>
+                              <span className="chain-step">{index + 1}</span>
+                              <strong>{item.name}</strong>
+                              <small>{item.trajectoryPath}</small>
+                            </div>
+                            <div className="chain-block-controls">
+                              {chainSpeedEditId === item.id ? (
+                                <input
+                                  aria-label={`Speed for ${item.name}`}
+                                  type="number"
+                                  min="0.1"
+                                  step="0.1"
+                                  value={item.speed}
+                                  autoFocus
+                                  onChange={(event) =>
+                                    handleChainItemSpeedChange(item.id, Number(event.target.value))
+                                  }
+                                  onBlur={() => setChainSpeedEditId(null)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      setChainSpeedEditId(null);
+                                    }
+                                  }}
+                                />
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="chain-speed-button"
+                                  title="Double-click the block or click here to edit speed."
+                                  onClick={() => setChainSpeedEditId(item.id)}
+                                >
+                                  {item.speed}x
+                                </button>
+                              )}
+                              <select
+                                aria-label={`Go home mode for ${item.name}`}
+                                value={item.homeMode}
+                                onChange={(event) =>
+                                  handleChainItemHomeModeChange(
+                                    item.id,
+                                    event.target.value as ArmHomeMode,
+                                  )
+                                }
+                              >
+                                {HOME_MODE_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                disabled={chainIsRunning}
+                                onClick={() => handleRemoveChainItem(item.id)}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                          <span
+                            className={`home-dot after ${
+                              homeModeRunsAfter(item.homeMode) ? "on" : ""
+                            }`}
+                            title={
+                              homeModeRunsAfter(item.homeMode)
+                                ? "Go home after this recording"
+                                : "No go-home after this recording"
+                            }
+                          />
+                        </article>
+                      ))
+                    ) : (
+                      <div className="empty-state">
+                        Add recordings to make a draggable Chain-link sequence.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="chain-link-saved">
+                  <div className="chain-link-head">
+                    <div>
+                      <p className="card-kicker">Saved</p>
+                      <h3>Chain-link Library</h3>
+                    </div>
+                    <span className="status-pill muted">
+                      {state?.chainLinks.length ?? 0} saved
+                    </span>
+                  </div>
+                  <div className="chain-library-list">
+                    {state?.chainLinks.length ? (
+                      state.chainLinks.map((chain) => (
+                        <article key={chain.id} className="chain-library-card">
+                          <div className="chain-card-head">
+                            <div>
+                              <h4>{chain.name}</h4>
+                              <p className="pin-meta">
+                                {chain.items.length} recording{chain.items.length === 1 ? "" : "s"} •{" "}
+                                {chain.confirmAfterEach ? "confirm between blocks" : "auto-continue"}
+                              </p>
+                            </div>
+                            {chainRunState?.chainId === chain.id ? (
+                              <span className="status-pill good">active</span>
+                            ) : null}
+                          </div>
+                          <div className="chain-mini-blocks">
+                            {chain.items.map((item, index) => (
+                              <span key={item.id} className="chain-mini-block">
+                                <span
+                                  className={`home-dot mini ${
+                                    homeModeRunsBefore(item.homeMode) ? "on" : ""
+                                  }`}
+                                />
+                                <span>{index + 1}. {item.name}</span>
+                                <span
+                                  className={`home-dot mini ${
+                                    homeModeRunsAfter(item.homeMode) ? "on" : ""
+                                  }`}
+                                />
+                              </span>
+                            ))}
+                          </div>
+                          <div className="button-cluster inline">
+                            <button
+                              className="primary"
+                              disabled={disabled || chainIsRunning}
+                              onClick={() => void handleRunChainLink(chain)}
+                            >
+                              Run Chain
+                            </button>
+                            <button disabled={chainIsRunning} onClick={() => handleEditChainLink(chain)}>
+                              Edit
+                            </button>
+                            <button
+                              disabled={disabled || chainIsRunning}
+                              onClick={() => void handleDeleteChainLink(chain.id)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </article>
+                      ))
+                    ) : (
+                      <div className="empty-state">
+                        Saved Chain-links will appear here after you build one.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
               <div className="pin-grid">
                 {state?.pinnedMoves.length ? (
                   state.pinnedMoves.map((move) => (

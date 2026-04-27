@@ -192,6 +192,18 @@ export interface PinnedMove {
   keyBinding: string;
 }
 
+export interface ChainLinkItem extends ReplayRequest {
+  id: string;
+  name: string;
+}
+
+export interface ChainLink {
+  id: string;
+  name: string;
+  confirmAfterEach: boolean;
+  items: ChainLinkItem[];
+}
+
 export interface RecordingEntry {
   path: string;
   name: string;
@@ -307,6 +319,7 @@ export interface RobotSensorsStatus {
 export interface DashboardState {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
+  chainLinks: ChainLink[];
   homePosition: ArmHomePosition | null;
   recordingReplayOptions: Record<string, RecordingReplayOptions>;
   training: TrainingConfig & {
@@ -354,4 +367,11 @@ export interface ReplayRequest {
   autoVexPositioning: boolean;
   includeBase: boolean;
   holdFinalS: number;
+}
+
+export interface SaveChainLinkRequest {
+  id?: string;
+  name: string;
+  confirmAfterEach?: boolean;
+  items: ChainLinkItem[];
 }

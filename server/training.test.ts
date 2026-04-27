@@ -139,6 +139,47 @@ test("config store preserves recording replay speed and auto VEX positioning", (
   });
 });
 
+test("config store normalizes chain-links with safe confirmation defaults", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
+  const configDir = path.join(tempRoot, ".lekiwi-ui");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      settings: defaultConfig.settings,
+      pinnedMoves: [],
+      chainLinks: [
+        {
+          id: "chain-1",
+          name: "Pick sequence",
+          items: [
+            {
+              id: "block-1",
+              name: "Approach",
+              trajectoryPath: "/home/pi/lekiwi-trajectories/approach.json",
+              target: "pi",
+              homeMode: "both",
+              speed: 0.7,
+              autoVexPositioning: false,
+              includeBase: false,
+              holdFinalS: 0.2,
+            },
+          ],
+        },
+      ],
+      training: defaultConfig.training,
+    }),
+  );
+
+  const store = new ConfigStore(defaultConfig, tempRoot);
+  const loaded = store.getConfig();
+
+  assert.equal(loaded.chainLinks[0]?.confirmAfterEach, true);
+  assert.equal(loaded.chainLinks[0]?.items[0]?.homeMode, "both");
+  assert.equal(loaded.chainLinks[0]?.items[0]?.speed, 0.7);
+  assert.equal(loaded.chainLinks[0]?.items[0]?.autoVexPositioning, false);
+});
+
 test("training profile validation rejects unsupported camera modes", () => {
   const profile = createDefaultTrainingProfile(process.cwd(), "Bad Cameras");
   profile.camerasMode = "{}";

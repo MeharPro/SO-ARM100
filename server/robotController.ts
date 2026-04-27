@@ -38,6 +38,7 @@ import type {
   ArmHomePosition,
   AppSettings,
   BenchmarkPolicyRequest,
+  ChainLink,
   CreatePinnedMoveRequest,
   DashboardState,
   DeployTrainingCheckpointRequest,
@@ -57,6 +58,7 @@ import type {
   RobotSensorState,
   RobotSensorStatus,
   RobotSensorsStatus,
+  SaveChainLinkRequest,
   SelectTrainingProfileRequest,
   SetArmHomeFromRecordingRequest,
   SetRecordingReplayOptionsRequest,
@@ -259,7 +261,7 @@ export class RobotController {
   };
 
   async getState(): Promise<DashboardState> {
-    const { settings, pinnedMoves, homePosition, recordingReplayOptions, training } =
+    const { settings, pinnedMoves, chainLinks, homePosition, recordingReplayOptions, training } =
       this.configStore.getConfig();
     const wifi = await getWifiStatus();
     const resolvedPiHost = await this.findReachablePiHost(settings);
@@ -323,6 +325,7 @@ export class RobotController {
     return {
       settings,
       pinnedMoves,
+      chainLinks,
       homePosition,
       recordingReplayOptions,
       training: {
@@ -1439,7 +1442,7 @@ export class RobotController {
 
   async deleteRecording(payload: DeleteRecordingRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
-      const { settings, pinnedMoves, recordingReplayOptions } = this.configStore.getConfig();
+      const { settings, pinnedMoves, chainLinks, recordingReplayOptions } = this.configStore.getConfig();
       const recordingPath = payload.path.trim();
 
       if (!recordingPath) {
@@ -1459,6 +1462,19 @@ export class RobotController {
         const nextOptions = { ...recordingReplayOptions };
         delete nextOptions[recordingPath];
         this.configStore.saveRecordingReplayOptions(nextOptions);
+      }
+      const nextChainLinks = chainLinks
+        .map((chain) => ({
+          ...chain,
+          items: chain.items.filter((item) => item.trajectoryPath !== recordingPath),
+        }))
+        .filter((chain) => chain.items.length > 0);
+      if (
+        nextChainLinks.length !== chainLinks.length ||
+        nextChainLinks.some((chain, index) => chain.items.length !== chainLinks[index]?.items.length)
+      ) {
+        this.configStore.saveChainLinks(nextChainLinks);
+        this.logActivity("Removed chain-link blocks that referenced the deleted recording.");
       }
 
       this.cachedRecordings = await this.fetchRecordings(settings, host);
@@ -1736,6 +1752,57 @@ export class RobotController {
 
     this.logActivity(`Pinned move triggered: ${pinnedMove.name}.`);
     return this.startReplay(pinnedMove);
+  }
+
+  async saveChainLink(payload: SaveChainLinkRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const id = typeof payload.id === "string" && payload.id.trim() ? payload.id.trim() : crypto.randomUUID();
+      const items = (Array.isArray(payload.items) ? payload.items : [])
+        .map((item) => {
+          const replay = normalizeReplayRequest(item, config.settings.trajectories);
+          return {
+            id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : crypto.randomUUID(),
+            name:
+              typeof item.name === "string" && item.name.trim()
+                ? item.name.trim()
+                : replay.trajectoryPath.split("/").pop() ?? "Recording",
+            ...replay,
+          };
+        })
+        .filter((item) => item.trajectoryPath);
+
+      if (!items.length) {
+        throw new Error("Add at least one recording before saving a Chain-link.");
+      }
+
+      const chainLink: ChainLink = {
+        id,
+        name: typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : "Chain-link",
+        confirmAfterEach: payload.confirmAfterEach === false ? false : true,
+        items,
+      };
+      const existingIndex = config.chainLinks.findIndex((chain) => chain.id === id);
+      const chainLinks =
+        existingIndex === -1
+          ? [...config.chainLinks, chainLink]
+          : config.chainLinks.map((chain) => (chain.id === id ? chainLink : chain));
+
+      this.logActivity(`Saving Chain-link ${chainLink.name}.`);
+      this.configStore.saveChainLinks(chainLinks);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async deleteChainLink(id: string): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      this.logActivity("Removing Chain-link.");
+      this.configStore.saveChainLinks(config.chainLinks.filter((chain) => chain.id !== id));
+      this.lastError = null;
+      return this.getState();
+    });
   }
 
   private async runExclusive<T>(operation: () => Promise<T>): Promise<T> {

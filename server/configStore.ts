@@ -5,6 +5,7 @@ import path from "node:path";
 import type {
   ArmHomePosition,
   AppSettings,
+  ChainLink,
   PinnedMove,
   RecordingReplayOptions,
   StoredConfig,
@@ -51,6 +52,15 @@ export class ConfigStore {
     this.config = {
       ...this.config,
       pinnedMoves: structuredClone(pinnedMoves),
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  saveChainLinks(chainLinks: ChainLink[]): StoredConfig {
+    this.config = {
+      ...this.config,
+      chainLinks: structuredClone(chainLinks),
     };
     this.persist();
     return this.getConfig();
@@ -169,6 +179,9 @@ export class ConfigStore {
         pinnedMoves: Array.isArray(raw.pinnedMoves)
           ? raw.pinnedMoves.map((move) => this.normalizePinnedMove(move))
           : this.defaults.pinnedMoves,
+        chainLinks: Array.isArray(raw.chainLinks)
+          ? raw.chainLinks.map((chain) => this.normalizeChainLink(chain))
+          : this.defaults.chainLinks,
         homePosition: this.normalizeHomePosition(raw.homePosition),
         recordingReplayOptions: this.normalizeRecordingReplayOptions(
           raw.recordingReplayOptions,
@@ -194,6 +207,39 @@ export class ConfigStore {
       includeBase: Boolean(raw?.includeBase),
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
       keyBinding: typeof raw?.keyBinding === "string" ? raw.keyBinding : "",
+    };
+  }
+
+  private normalizeChainLink(raw: Partial<ChainLink> | undefined): ChainLink {
+    const items = Array.isArray(raw?.items)
+      ? raw.items
+          .map((item) => this.normalizeChainLinkItem(item))
+          .filter((item) => item.trajectoryPath.trim())
+      : [];
+
+    return {
+      id: typeof raw?.id === "string" && raw.id.trim() ? raw.id : crypto.randomUUID(),
+      name: typeof raw?.name === "string" && raw.name.trim() ? raw.name.trim() : "Chain-link",
+      confirmAfterEach: raw?.confirmAfterEach === false ? false : true,
+      items,
+    };
+  }
+
+  private normalizeChainLinkItem(
+    raw: Partial<ChainLink["items"][number]> | undefined,
+  ): ChainLink["items"][number] {
+    const target = raw?.target === "leader" ? "leader" : "pi";
+    return {
+      id: typeof raw?.id === "string" && raw.id.trim() ? raw.id : crypto.randomUUID(),
+      name: typeof raw?.name === "string" && raw.name.trim() ? raw.name.trim() : "Recording",
+      trajectoryPath: typeof raw?.trajectoryPath === "string" ? raw.trajectoryPath.trim() : "",
+      target,
+      vexReplayMode: raw?.vexReplayMode === "drive" ? "drive" : "ecu",
+      homeMode: target === "pi" ? this.normalizeHomeMode(raw?.homeMode) : "none",
+      speed: this.normalizeReplaySpeed(raw?.speed),
+      autoVexPositioning: target === "pi" ? raw?.autoVexPositioning !== false : false,
+      includeBase: target === "pi" ? Boolean(raw?.includeBase) : false,
+      holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
     };
   }
 

@@ -85,6 +85,7 @@ export const defaultConfig: StoredConfig = {
     },
   },
   pinnedMoves: [],
+  chainLinks: [],
   homePosition: null,
   recordingReplayOptions: {},
   training: createDefaultTrainingConfig(process.cwd()),

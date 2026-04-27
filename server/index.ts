@@ -17,6 +17,7 @@ import type {
   RenameRecordingRequest,
   ResetRecordingUltrasonicPositionRequest,
   ReplayRequest,
+  SaveChainLinkRequest,
   SelectTrainingProfileRequest,
   SetArmHomeFromRecordingRequest,
   SetRecordingReplayOptionsRequest,
@@ -306,6 +307,21 @@ app.post(
   asyncRoute(async (req, res) => {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     res.json(await controller.triggerPinnedMove(id));
+  }),
+);
+
+app.post(
+  "/api/chain-links",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.saveChainLink(req.body as SaveChainLinkRequest));
+  }),
+);
+
+app.delete(
+  "/api/chain-links/:id",
+  asyncRoute(async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    res.json(await controller.deleteChainLink(id));
   }),
 );
 
