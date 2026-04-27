@@ -59,6 +59,19 @@ def build_targets(**overrides: float) -> dict[str, float]:
 
 
 class KeyboardTeleopTests(unittest.TestCase):
+    def test_base_keyboard_mapping_uses_x_left_and_y_forward(self) -> None:
+        action = keyboard_teleop.build_base_action({"i", "j", "u"}, linear_speed=0.25, turn_speed=30.0)
+
+        self.assertEqual(action["x.vel"], 0.25)
+        self.assertEqual(action["y.vel"], 0.25)
+        self.assertEqual(action["theta.vel"], 30.0)
+
+        reverse = keyboard_teleop.build_base_action({"k", "l", "o"}, linear_speed=0.25, turn_speed=30.0)
+
+        self.assertEqual(reverse["x.vel"], -0.25)
+        self.assertEqual(reverse["y.vel"], -0.25)
+        self.assertEqual(reverse["theta.vel"], -30.0)
+
     def test_direction_lock_blocks_outward_motion_but_allows_reverse(self) -> None:
         joint = "arm_shoulder_lift.pos"
         limiter = keyboard_teleop.JointDirectionLimiter({})

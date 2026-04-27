@@ -1,5 +1,6 @@
 :root {
   color-scheme: light;
+  --ui-scale: 0.75;
   --page: #f4f5f7;
   --surface: #ffffff;
   --surface-raised: #fbfcfd;
@@ -30,10 +31,18 @@
 }
 
 html,
-body,
-#root {
+body {
+  width: 100%;
   height: 100%;
   overflow: hidden;
+}
+
+#root {
+  width: calc(100vw / var(--ui-scale));
+  height: calc(100dvh / var(--ui-scale));
+  overflow: hidden;
+  transform: scale(var(--ui-scale));
+  transform-origin: top left;
 }
 
 body {
@@ -60,6 +69,8 @@ button {
   color: var(--ink);
   padding: 0.68rem 0.9rem;
   font-weight: 700;
+  line-height: 1.12;
+  white-space: nowrap;
   cursor: pointer;
   transition:
     transform 120ms ease,
@@ -130,7 +141,7 @@ code {
 }
 
 .app-frame {
-  height: 100dvh;
+  height: 100%;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 0;
@@ -1300,6 +1311,10 @@ label {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.pin-grid {
+  grid-auto-rows: max-content;
+}
+
 .log-panel {
   display: flex;
   flex-direction: column;
@@ -1311,7 +1326,7 @@ label {
 }
 
 .logs-shell {
-  flex: 1;
+  flex: 0 1 min(42%, 390px);
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
@@ -1338,6 +1353,7 @@ label {
 
 .logs-service-button {
   width: 100%;
+  min-height: 4.9rem;
   border: 1px solid transparent;
   border-radius: calc(var(--radius) - 2px);
   background: transparent;
@@ -1345,7 +1361,11 @@ label {
   text-align: left;
   display: grid;
   gap: 0.35rem;
+  align-items: start;
   padding: 0.8rem 0.9rem;
+  overflow: visible;
+  line-height: 1.2;
+  white-space: normal;
 }
 
 .logs-service-button:hover:not(:disabled) {
@@ -1365,6 +1385,18 @@ label {
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.7rem;
+  min-width: 0;
+}
+
+.logs-service-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logs-service-row .status-pill {
+  flex: 0 0 auto;
 }
 
 .logs-service-detail,
@@ -1373,6 +1405,12 @@ label {
   color: var(--ink-soft);
   font-size: 0.84rem;
   line-height: 1.45;
+}
+
+.logs-service-detail,
+.logs-service-meta {
+  display: block;
+  min-width: 0;
 }
 
 .logs-service-meta,
@@ -1387,6 +1425,7 @@ label {
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
+  overflow: hidden;
 }
 
 .logs-viewer-head {
@@ -1394,6 +1433,11 @@ label {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.logs-viewer-head > div,
+.log-panel-head > div {
+  min-width: 0;
 }
 
 .logs-viewer-meta {
@@ -1407,7 +1451,7 @@ label {
 .sensor-feed pre {
   margin: 0;
   flex: 1;
-  min-height: 260px;
+  min-height: 0;
   padding: 1rem;
   border: 1px solid #1f2937;
   border-radius: calc(var(--radius) - 4px);
@@ -1423,7 +1467,40 @@ label {
 
 .activity-feed pre,
 .sensor-feed pre {
-  min-height: 180px;
+  min-height: 0;
+}
+
+.log-grid {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pin-card {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+  overflow: hidden;
+}
+
+.pin-card-head {
+  min-width: 0;
+}
+
+.pin-card-head > div {
+  min-width: 0;
+}
+
+.pin-card h3 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.15;
+}
+
+.pin-card p {
+  margin-bottom: 0;
+  line-height: 1.28;
 }
 
 @media (max-width: 1180px) {
@@ -1466,6 +1543,10 @@ label {
 }
 
 @media (max-width: 900px) {
+  :root {
+    --ui-scale: 1;
+  }
+
   html,
   body,
   #root {
@@ -1547,6 +1628,7 @@ label {
 
   .button-cluster button {
     width: 100%;
+    white-space: normal;
   }
 
   .inline-console-actions {

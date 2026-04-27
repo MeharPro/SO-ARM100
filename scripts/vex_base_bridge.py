@@ -25,7 +25,7 @@ VEX_COMM_SUFFIXES = ("if00", "if01")
 DEFAULT_COMMAND_TIMEOUT_S = 0.35
 DEFAULT_TELEMETRY_SLOT = 8
 DEFAULT_REPLAY_SLOT = 7
-REQUIRED_VEX_MIXER_VERSION = 5
+REQUIRED_VEX_MIXER_VERSION = 6
 DEFAULT_PROGRAM_CACHE_DIR = "~/.lekiwi-vex/programs"
 DEFAULT_REPLAY_CACHE_DIR = "~/.lekiwi-vex/replays"
 DEFAULT_VEXCOM_PATH_GLOBS = (
@@ -410,16 +410,16 @@ def controller_motion():
     strafe_pct = apply_deadband({strafe_expr})
     turn_pct = apply_deadband({turn_expr})
     return {{
-        "x.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
-        "y.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
+        "x.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
+        "y.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
         "theta.vel": (turn_pct / 100.0) * MAX_TURN_SPEED_DPS,
     }}
 
 
 def motion_to_percent(motion):
     return (
-        clamp((motion["x.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
         clamp((motion["y.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
+        clamp((motion["x.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
         clamp((motion["theta.vel"] / MAX_TURN_SPEED_DPS) * 100.0, -100.0, 100.0),
     )
 
@@ -1262,16 +1262,16 @@ def controller_motion():
     strafe_pct = apply_deadband({strafe_expr})
     turn_pct = apply_deadband({turn_expr})
     return {{
-        "x.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
-        "y.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
+        "x.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
+        "y.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
         "theta.vel": (turn_pct / 100.0) * MAX_TURN_SPEED_DPS,
     }}
 
 
 def motion_to_percent(motion):
     return (
-        clamp((motion["x.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
         clamp((motion["y.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
+        clamp((motion["x.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
         clamp((motion["theta.vel"] / MAX_TURN_SPEED_DPS) * 100.0, -100.0, 100.0),
     )
 
@@ -1507,16 +1507,16 @@ def controller_motion():
     strafe_pct = apply_deadband({strafe_expr})
     turn_pct = apply_deadband({turn_expr})
     return {{
-        "x.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
-        "y.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
+        "x.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
+        "y.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
         "theta.vel": (turn_pct / 100.0) * MAX_TURN_SPEED_DPS,
     }}
 
 
 def motion_to_percent(motion):
     return (
-        clamp((motion["x.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
         clamp((motion["y.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
+        clamp((motion["x.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),
         clamp((motion["theta.vel"] / MAX_TURN_SPEED_DPS) * 100.0, -100.0, 100.0),
     )
 

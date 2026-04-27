@@ -15,6 +15,7 @@ import {
   normalizeTrainingConfig,
   validateTrainingProfile,
 } from "./trainingUtils.js";
+import { isTransientRemoteTransportError } from "./transportErrors.js";
 
 test("config store migrates older config files by adding training defaults", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
@@ -115,6 +116,11 @@ test("config store preserves recording replay speed and auto VEX positioning", (
           homeMode: "start",
           speed: 0.4,
           autoVexPositioning: false,
+          vexPositioningTimeoutS: 12,
+          vexPositioningXyToleranceM: 0.12,
+          vexPositioningHeadingToleranceDeg: 4,
+          vexPositioningXyTrimToleranceM: 0.75,
+          vexPositioningHeadingTrimToleranceDeg: 15,
         },
         "/home/pi/lekiwi-trajectories/legacy.json": {
           homeMode: "end",
@@ -131,11 +137,21 @@ test("config store preserves recording replay speed and auto VEX positioning", (
     homeMode: "start",
     speed: 0.4,
     autoVexPositioning: false,
+    vexPositioningTimeoutS: 12,
+    vexPositioningXyToleranceM: 0.12,
+    vexPositioningHeadingToleranceDeg: 4,
+    vexPositioningXyTrimToleranceM: 0.75,
+    vexPositioningHeadingTrimToleranceDeg: 15,
   });
   assert.deepEqual(loaded.recordingReplayOptions["/home/pi/lekiwi-trajectories/legacy.json"], {
     homeMode: "end",
     speed: defaultConfig.settings.trajectories.defaultReplaySpeed,
     autoVexPositioning: true,
+    vexPositioningTimeoutS: 8,
+    vexPositioningXyToleranceM: 0.02,
+    vexPositioningHeadingToleranceDeg: 1.5,
+    vexPositioningXyTrimToleranceM: 0.05,
+    vexPositioningHeadingTrimToleranceDeg: 8.5,
   });
 });
 
@@ -222,4 +238,14 @@ test("training commands include Pi-safe ACT defaults", () => {
   assert.match(captureCommand, /--dataset-vcodec h264/);
   assert.match(captureCommand, /--dataset-streaming-encoding false/);
   assert.match(captureCommand, /--capture-mode 'leader'/);
+});
+
+test("transient Pi SSH transport errors are classified as reset noise", () => {
+  const reset = new Error("read ECONNRESET") as Error & { code: string };
+  reset.code = "ECONNRESET";
+
+  assert.equal(isTransientRemoteTransportError(reset), true);
+  assert.equal(isTransientRemoteTransportError(new Error("Connection lost before handshake")), true);
+  assert.equal(isTransientRemoteTransportError(new Error("client-socket disconnected")), true);
+  assert.equal(isTransientRemoteTransportError(new Error("Permission denied")), false);
 });

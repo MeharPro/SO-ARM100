@@ -21,6 +21,17 @@ const ARM_HOME_JOINT_KEYS = [
   "arm_wrist_roll.pos",
   "arm_gripper.pos",
 ] as const;
+const DEFAULT_VEX_POSITIONING_TIMEOUT_S = 8;
+const MIN_VEX_POSITIONING_TIMEOUT_S = 0.5;
+const MAX_VEX_POSITIONING_TIMEOUT_S = 60;
+const DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M = 0.02;
+const DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 1.5;
+const DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M = 0.05;
+const DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG = 8.5;
+const MIN_VEX_POSITIONING_XY_TOLERANCE_M = 0.001;
+const MAX_VEX_POSITIONING_XY_TOLERANCE_M = 2;
+const MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 0.1;
+const MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 90;
 
 export class ConfigStore {
   private readonly configDir: string;
@@ -204,6 +215,19 @@ export class ConfigStore {
       homeMode: this.normalizeHomeMode(raw?.homeMode),
       speed: this.normalizeReplaySpeed(raw?.speed),
       autoVexPositioning: raw?.autoVexPositioning === false ? false : true,
+      vexPositioningTimeoutS: this.normalizeVexPositioningTimeout(raw?.vexPositioningTimeoutS),
+      vexPositioningXyToleranceM: this.normalizeVexPositioningXyTolerance(
+        raw?.vexPositioningXyToleranceM,
+      ),
+      vexPositioningHeadingToleranceDeg: this.normalizeVexPositioningHeadingTolerance(
+        raw?.vexPositioningHeadingToleranceDeg,
+      ),
+      vexPositioningXyTrimToleranceM: this.normalizeVexPositioningXyTrimTolerance(
+        raw?.vexPositioningXyTrimToleranceM,
+      ),
+      vexPositioningHeadingTrimToleranceDeg: this.normalizeVexPositioningHeadingTrimTolerance(
+        raw?.vexPositioningHeadingTrimToleranceDeg,
+      ),
       includeBase: Boolean(raw?.includeBase),
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
       keyBinding: typeof raw?.keyBinding === "string" ? raw.keyBinding : "",
@@ -238,6 +262,26 @@ export class ConfigStore {
       homeMode: target === "pi" ? this.normalizeHomeMode(raw?.homeMode) : "none",
       speed: this.normalizeReplaySpeed(raw?.speed),
       autoVexPositioning: target === "pi" ? raw?.autoVexPositioning !== false : false,
+      vexPositioningTimeoutS:
+        target === "pi"
+          ? this.normalizeVexPositioningTimeout(raw?.vexPositioningTimeoutS)
+          : DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+      vexPositioningXyToleranceM:
+        target === "pi"
+          ? this.normalizeVexPositioningXyTolerance(raw?.vexPositioningXyToleranceM)
+          : DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+      vexPositioningHeadingToleranceDeg:
+        target === "pi"
+          ? this.normalizeVexPositioningHeadingTolerance(raw?.vexPositioningHeadingToleranceDeg)
+          : DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      vexPositioningXyTrimToleranceM:
+        target === "pi"
+          ? this.normalizeVexPositioningXyTrimTolerance(raw?.vexPositioningXyTrimToleranceM)
+          : DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+      vexPositioningHeadingTrimToleranceDeg:
+        target === "pi"
+          ? this.normalizeVexPositioningHeadingTrimTolerance(raw?.vexPositioningHeadingTrimToleranceDeg)
+          : DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
       includeBase: target === "pi" ? Boolean(raw?.includeBase) : false,
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
     };
@@ -253,6 +297,64 @@ export class ConfigStore {
 
   private normalizeHomeMode(value: unknown): RecordingReplayOptions["homeMode"] {
     return value === "start" || value === "end" || value === "both" ? value : "none";
+  }
+
+  private normalizeVexPositioningTimeout(value: unknown): number {
+    return this.normalizeBoundedNumber(
+      value,
+      DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+      MIN_VEX_POSITIONING_TIMEOUT_S,
+      MAX_VEX_POSITIONING_TIMEOUT_S,
+    );
+  }
+
+  private normalizeVexPositioningXyTolerance(value: unknown): number {
+    return this.normalizeBoundedNumber(
+      value,
+      DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+      MIN_VEX_POSITIONING_XY_TOLERANCE_M,
+      MAX_VEX_POSITIONING_XY_TOLERANCE_M,
+    );
+  }
+
+  private normalizeVexPositioningHeadingTolerance(value: unknown): number {
+    return this.normalizeBoundedNumber(
+      value,
+      DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+    );
+  }
+
+  private normalizeVexPositioningXyTrimTolerance(value: unknown): number {
+    return this.normalizeBoundedNumber(
+      value,
+      DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+      MIN_VEX_POSITIONING_XY_TOLERANCE_M,
+      MAX_VEX_POSITIONING_XY_TOLERANCE_M,
+    );
+  }
+
+  private normalizeVexPositioningHeadingTrimTolerance(value: unknown): number {
+    return this.normalizeBoundedNumber(
+      value,
+      DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
+      MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+    );
+  }
+
+  private normalizeBoundedNumber(
+    value: unknown,
+    fallback: number,
+    min: number,
+    max: number,
+  ): number {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return fallback;
+    }
+    return Math.min(max, Math.max(min, numeric));
   }
 
   private normalizeHomePosition(raw: unknown): ArmHomePosition | null {
@@ -299,6 +401,19 @@ export class ConfigStore {
         homeMode: this.normalizeHomeMode(candidate.homeMode),
         speed: this.normalizeReplaySpeed(candidate.speed, defaultReplaySpeed),
         autoVexPositioning: candidate.autoVexPositioning === false ? false : true,
+        vexPositioningTimeoutS: this.normalizeVexPositioningTimeout(candidate.vexPositioningTimeoutS),
+        vexPositioningXyToleranceM: this.normalizeVexPositioningXyTolerance(
+          candidate.vexPositioningXyToleranceM,
+        ),
+        vexPositioningHeadingToleranceDeg: this.normalizeVexPositioningHeadingTolerance(
+          candidate.vexPositioningHeadingToleranceDeg,
+        ),
+        vexPositioningXyTrimToleranceM: this.normalizeVexPositioningXyTrimTolerance(
+          candidate.vexPositioningXyTrimToleranceM,
+        ),
+        vexPositioningHeadingTrimToleranceDeg: this.normalizeVexPositioningHeadingTrimTolerance(
+          candidate.vexPositioningHeadingTrimToleranceDeg,
+        ),
       };
     }
     return normalized;

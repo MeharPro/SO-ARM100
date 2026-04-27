@@ -1,0 +1,190 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - paragraph [ref=e6]: Robot Arm Console
+      - heading "Robert" [level=1] [ref=e7]
+      - paragraph [ref=e8]: Start control, record motion, replay saved moves, and watch the robot processes from one place.
+    - figure [ref=e9]:
+      - img "Cute yellow robot avatar" [ref=e10]
+    - generic [ref=e11]:
+      - generic [ref=e12]: "Pi: offline"
+      - generic [ref=e13]: "Leader: missing"
+      - generic [ref=e14]: "VEX: missing"
+      - generic [ref=e15]: "Host: idle"
+      - generic [ref=e16]: "Teleop: idle"
+    - navigation [ref=e17]:
+      - button "Overview" [ref=e18] [cursor=pointer]
+      - button "Recordings" [ref=e19] [cursor=pointer]
+      - button "Pinned Moves" [ref=e20] [cursor=pointer]
+      - button "Training" [ref=e21] [cursor=pointer]
+      - button "Settings" [ref=e22] [cursor=pointer]
+      - button "Logs" [ref=e23] [cursor=pointer]
+    - generic [ref=e24]:
+      - strong [ref=e25]: Leader check
+      - generic [ref=e26]: Checking leader status...
+      - strong [ref=e27]: VEX check
+      - generic [ref=e28]: Checking VEX Brain status...
+  - generic [ref=e29]:
+    - banner [ref=e30]:
+      - generic [ref=e31]:
+        - paragraph [ref=e32]: Dashboard
+        - heading "Overview" [level=2] [ref=e33]
+      - paragraph [ref=e34]: Start or stop control, watch live output, and confirm the robot and leader are both ready.
+    - generic [ref=e36]:
+      - generic [ref=e37]:
+        - generic [ref=e38]:
+          - paragraph [ref=e39]: Quick Actions
+          - heading "Connect and Control" [level=2] [ref=e40]
+        - paragraph [ref=e41]: The backend retries the Pi five times, auto-detects a single attached leader-arm port when the scripted path is stale, and streams the action output below.
+      - generic [ref=e42]:
+        - button "Start Control" [ref=e43] [cursor=pointer]
+        - button "Stop Control" [ref=e44] [cursor=pointer]
+        - button "Start Keyboard Backup" [ref=e45] [cursor=pointer]
+        - button "Arm Hotkeys" [ref=e46] [cursor=pointer]
+        - button "Set Arm Home" [ref=e47] [cursor=pointer]
+        - button "Go Home" [ref=e48] [cursor=pointer]
+        - button "Emergency Stop + Torque Off" [ref=e49] [cursor=pointer]
+      - generic [ref=e50]:
+        - generic [ref=e51]: keyboard backup off
+        - paragraph [ref=e52]:
+          - text: "Keyboard backup runs without the leader arm. Arm:"
+          - code [ref=e53]: Q/A
+          - text: shoulder pan,
+          - code [ref=e54]: W/S
+          - text: shoulder lift,
+          - code [ref=e55]: E/D
+          - text: elbow,
+          - code [ref=e56]: R/F
+          - text: wrist flex,
+          - code [ref=e57]: T/G
+          - text: wrist roll,
+          - code [ref=e58]: Z/X
+          - text: "gripper. Base:"
+          - code [ref=e59]: I/K
+          - text: forward/back,
+          - code [ref=e60]: J/L
+          - text: strafe,
+          - code [ref=e61]: U/O
+          - text: turn. Press
+          - code [ref=e62]: Esc
+          - text: in the keyboard teleop process or use Stop Control here.
+      - generic [ref=e63]:
+        - generic [ref=e64]: hotkeys disarmed
+        - paragraph [ref=e65]: Arm hotkeys keeps the Pi host live without teleop so pinned Pi replays can start immediately.
+      - generic [ref=e66]:
+        - generic [ref=e67]: home not set
+        - paragraph [ref=e68]: Set Arm Home and Go Home start a command-ready Pi host first when one is not already running. Go Home uses the saved pose without needing the VEX Brain.
+      - generic [ref=e69]:
+        - generic [ref=e70]:
+          - paragraph [ref=e71]: Calibration
+          - heading "Calibrate Arm and Leader" [level=3] [ref=e72]
+          - paragraph [ref=e73]:
+            - text: Use the live console prompts. Send
+            - code [ref=e74]: c
+            - text: to force a fresh full-arm follower calibration, then Enter at each step. Individual follower servos can also be started from the cards below.
+        - generic [ref=e75]:
+          - article [ref=e76]:
+            - generic [ref=e77]:
+              - strong [ref=e78]: Pi follower
+              - generic [ref=e79]: idle
+            - generic [ref=e80]:
+              - button "Start Pi Calibration" [ref=e81] [cursor=pointer]
+              - button "Send c" [ref=e82] [cursor=pointer]
+              - button "Enter" [ref=e83] [cursor=pointer]
+              - button "Stop" [ref=e84] [cursor=pointer]
+          - article [ref=e85]:
+            - generic [ref=e86]:
+              - strong [ref=e87]: Mac leader
+              - generic [ref=e88]: idle
+            - generic [ref=e89]:
+              - button "Start Mac Calibration" [ref=e90] [cursor=pointer]
+              - button "Send c" [ref=e91] [cursor=pointer]
+              - button "Enter" [ref=e92] [cursor=pointer]
+              - button "Stop" [ref=e93] [cursor=pointer]
+      - generic [ref=e94]:
+        - generic [ref=e95]:
+          - generic [ref=e96]:
+            - paragraph [ref=e97]: Power
+            - heading "Battery and Servo Temperatures" [level=3] [ref=e98]
+            - paragraph [ref=e99]: Waiting for the next power sample from the active robot process.
+          - generic [ref=e101]: n/a
+        - button "Apply Safer Torque Preset" [ref=e103] [cursor=pointer]
+        - generic [ref=e104]:
+          - generic [ref=e105]:
+            - generic [ref=e106]: Voltage
+            - strong [ref=e107]: n/a
+            - generic [ref=e108]: range n/a
+          - generic [ref=e109]:
+            - generic [ref=e110]: Draw
+            - strong [ref=e111]: n/a
+            - generic [ref=e112]: n/a
+          - generic [ref=e113]:
+            - generic [ref=e114]: Motors
+            - strong [ref=e115]: n/a/n/a
+            - generic [ref=e116]: reporting
+          - generic [ref=e117]:
+            - generic [ref=e118]: Peak Current
+            - strong [ref=e119]: n/a
+            - generic [ref=e120]: n/a
+        - generic [ref=e121]:
+          - article [ref=e122]:
+            - generic [ref=e123]: Shoulder pan
+            - generic [ref=e124]:
+              - generic [ref=e125]:
+                - generic [ref=e126]: Torque
+                - slider "Torque 1000" [ref=e127]: "1000"
+                - generic [ref=e128]: "1000"
+              - button "Calibrate" [ref=e129] [cursor=pointer]
+            - strong [ref=e130]: "--"
+          - article [ref=e131]:
+            - generic [ref=e132]: Shoulder lift
+            - generic [ref=e133]:
+              - generic [ref=e134]:
+                - generic [ref=e135]: Torque
+                - slider "Torque 1000" [ref=e136]: "1000"
+                - generic [ref=e137]: "1000"
+              - button "Calibrate" [ref=e138] [cursor=pointer]
+            - strong [ref=e139]: "--"
+          - article [ref=e140]:
+            - generic [ref=e141]: Elbow flex
+            - generic [ref=e142]:
+              - generic [ref=e143]:
+                - generic [ref=e144]: Torque
+                - slider "Torque 1000" [ref=e145]: "1000"
+                - generic [ref=e146]: "1000"
+              - button "Calibrate" [ref=e147] [cursor=pointer]
+            - strong [ref=e148]: "--"
+          - article [ref=e149]:
+            - generic [ref=e150]: Wrist flex
+            - generic [ref=e151]:
+              - generic [ref=e152]:
+                - generic [ref=e153]: Torque
+                - slider "Torque 1000" [ref=e154]: "1000"
+                - generic [ref=e155]: "1000"
+              - button "Calibrate" [ref=e156] [cursor=pointer]
+            - strong [ref=e157]: "--"
+          - article [ref=e158]:
+            - generic [ref=e159]: Wrist roll
+            - generic [ref=e160]:
+              - generic [ref=e161]:
+                - generic [ref=e162]: Torque
+                - slider "Torque 1000" [ref=e163]: "1000"
+                - generic [ref=e164]: "1000"
+              - button "Calibrate" [ref=e165] [cursor=pointer]
+            - strong [ref=e166]: "--"
+          - article [ref=e167]:
+            - generic [ref=e168]: Gripper
+            - generic [ref=e169]:
+              - generic [ref=e170]:
+                - generic [ref=e171]: Torque
+                - slider "Torque 1000" [ref=e172]: "1000"
+                - generic [ref=e173]: "1000"
+              - button "Calibrate" [ref=e174] [cursor=pointer]
+            - strong [ref=e175]: "--"
+      - generic [ref=e176]:
+        - generic [ref=e177]:
+          - heading "Live Console" [level=3] [ref=e178]
+          - generic [ref=e179]:
+            - button "Copy Live Console" [disabled] [ref=e180]
+            - generic [ref=e181]: idle
+        - generic [ref=e182]: No action output yet.

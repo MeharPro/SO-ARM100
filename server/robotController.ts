@@ -33,6 +33,10 @@ import {
   normalizeTrainingProfile,
   validateTrainingProfile,
 } from "./trainingUtils.js";
+import {
+  errorMessage,
+  isTransientRemoteTransportError,
+} from "./transportErrors.js";
 import type {
   ArmHomeMode,
   ArmHomePosition,
@@ -116,6 +120,18 @@ const VEX_STATUS_REFRESH_MS = 5000;
 const LIVE_SENSOR_STATUS_STALE_MS = 6000;
 const SENSOR_STATUS_LOG_PREFIX = "[sensor-status]";
 const HOME_COMMAND_LOG_PREFIX = "[home-command]";
+const REMOTE_HANDSHAKE_RETRY_DELAYS_MS = [500, 1200, 2500];
+const DEFAULT_VEX_POSITIONING_TIMEOUT_S = 8;
+const MIN_VEX_POSITIONING_TIMEOUT_S = 0.5;
+const MAX_VEX_POSITIONING_TIMEOUT_S = 60;
+const DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M = 0.02;
+const DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 1.5;
+const DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M = 0.05;
+const DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG = 8.5;
+const MIN_VEX_POSITIONING_XY_TOLERANCE_M = 0.001;
+const MAX_VEX_POSITIONING_XY_TOLERANCE_M = 2;
+const MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 0.1;
+const MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 90;
 const ARM_MOTORS = [
   "arm_shoulder_pan",
   "arm_shoulder_lift",
@@ -176,6 +192,26 @@ function normalizeReplayRequest(
     homeMode: target === "pi" ? normalizeHomeMode(payload.homeMode) : "none",
     speed: normalizeReplaySpeed(payload.speed, defaults),
     autoVexPositioning: target === "pi" ? payload.autoVexPositioning !== false : false,
+    vexPositioningTimeoutS:
+      target === "pi"
+        ? normalizeVexPositioningTimeout(payload.vexPositioningTimeoutS)
+        : DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+    vexPositioningXyToleranceM:
+      target === "pi"
+        ? normalizeVexPositioningXyTolerance(payload.vexPositioningXyToleranceM)
+        : DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+    vexPositioningHeadingToleranceDeg:
+      target === "pi"
+        ? normalizeVexPositioningHeadingTolerance(payload.vexPositioningHeadingToleranceDeg)
+        : DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+    vexPositioningXyTrimToleranceM:
+      target === "pi"
+        ? normalizeVexPositioningXyTrimTolerance(payload.vexPositioningXyTrimToleranceM)
+        : DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+    vexPositioningHeadingTrimToleranceDeg:
+      target === "pi"
+        ? normalizeVexPositioningHeadingTrimTolerance(payload.vexPositioningHeadingTrimToleranceDeg)
+        : DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
     includeBase: target === "leader" ? false : Boolean(payload.includeBase),
     holdFinalS:
       payload.holdFinalS >= 0 ? payload.holdFinalS : defaults.defaultHoldFinalS,
@@ -198,6 +234,19 @@ function normalizeRecordingReplayOptions(
     homeMode: normalizeHomeMode(value?.homeMode),
     speed: normalizeReplaySpeed(value?.speed, defaults),
     autoVexPositioning: value?.autoVexPositioning === false ? false : true,
+    vexPositioningTimeoutS: normalizeVexPositioningTimeout(value?.vexPositioningTimeoutS),
+    vexPositioningXyToleranceM: normalizeVexPositioningXyTolerance(
+      value?.vexPositioningXyToleranceM,
+    ),
+    vexPositioningHeadingToleranceDeg: normalizeVexPositioningHeadingTolerance(
+      value?.vexPositioningHeadingToleranceDeg,
+    ),
+    vexPositioningXyTrimToleranceM: normalizeVexPositioningXyTrimTolerance(
+      value?.vexPositioningXyTrimToleranceM,
+    ),
+    vexPositioningHeadingTrimToleranceDeg: normalizeVexPositioningHeadingTrimTolerance(
+      value?.vexPositioningHeadingTrimToleranceDeg,
+    ),
   };
 }
 
@@ -208,12 +257,70 @@ function recordingReplayOptionsAreDefault(
   return (
     value.homeMode === "none" &&
     Math.abs(value.speed - defaults.defaultReplaySpeed) < 0.000001 &&
-    value.autoVexPositioning
+    value.autoVexPositioning &&
+    Math.abs(value.vexPositioningTimeoutS - DEFAULT_VEX_POSITIONING_TIMEOUT_S) < 0.000001 &&
+    Math.abs(value.vexPositioningXyToleranceM - DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M) < 0.000001 &&
+    Math.abs(value.vexPositioningHeadingToleranceDeg - DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG) < 0.000001 &&
+    Math.abs(value.vexPositioningXyTrimToleranceM - DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M) < 0.000001 &&
+    Math.abs(value.vexPositioningHeadingTrimToleranceDeg - DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG) < 0.000001
   );
 }
 
 function normalizeHomeMode(value: unknown): ArmHomeMode {
   return value === "start" || value === "end" || value === "both" ? value : "none";
+}
+
+function normalizeVexPositioningTimeout(value: unknown): number {
+  return normalizeBoundedNumber(
+    value,
+    DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+    MIN_VEX_POSITIONING_TIMEOUT_S,
+    MAX_VEX_POSITIONING_TIMEOUT_S,
+  );
+}
+
+function normalizeVexPositioningXyTolerance(value: unknown): number {
+  return normalizeBoundedNumber(
+    value,
+    DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+    MIN_VEX_POSITIONING_XY_TOLERANCE_M,
+    MAX_VEX_POSITIONING_XY_TOLERANCE_M,
+  );
+}
+
+function normalizeVexPositioningHeadingTolerance(value: unknown): number {
+  return normalizeBoundedNumber(
+    value,
+    DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+    MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+    MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+  );
+}
+
+function normalizeVexPositioningXyTrimTolerance(value: unknown): number {
+  return normalizeBoundedNumber(
+    value,
+    DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+    MIN_VEX_POSITIONING_XY_TOLERANCE_M,
+    MAX_VEX_POSITIONING_XY_TOLERANCE_M,
+  );
+}
+
+function normalizeVexPositioningHeadingTrimTolerance(value: unknown): number {
+  return normalizeBoundedNumber(
+    value,
+    DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
+    MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+    MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+  );
+}
+
+function normalizeBoundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, numeric));
 }
 
 function isFiniteHomePosition(homePosition: ArmHomePosition | null): homePosition is ArmHomePosition {
@@ -245,8 +352,12 @@ export class RobotController {
   private lastPowerLogSync = 0;
   private lastVexBrainStatusRefresh = 0;
   private lastResolvedHost: string | null = null;
+  private remoteStateRefreshInFlight = false;
+  private exclusiveOperationInFlight = false;
+  private suppressRemoteTransportErrorsUntil = 0;
   private activityLog: string[] = [];
   private queue: Promise<void> = Promise.resolve();
+  private readonly activeRemoteClients = new Set<Client>();
   private readonly remoteHelperSyncCache = new Map<string, string>();
   private readonly remoteTorqueCache = new Map<string, string>();
   private readonly remotePowerLogCache = new Map<string, string>();
@@ -273,32 +384,22 @@ export class RobotController {
     const datasetCaptureSnapshot = this.datasetCaptureRunner.getSnapshot();
     this.lastResolvedHost = resolvedPiHost;
 
-    if (resolvedPiHost && Date.now() - this.lastRecordingRefresh > 15000) {
-      try {
-        this.cachedRecordings = await this.fetchRecordings(settings, resolvedPiHost, true);
-        this.lastRecordingRefresh = Date.now();
-      } catch (error) {
-        this.noteBackgroundRemoteError(error);
-      }
+    if (!resolvedPiHost) {
+      const offline = this.defaultVexBrainStatus("Pi is offline, so VEX Brain status is unavailable.");
+      this.cachedVexBrainStatus = offline;
+      this.lastVexBrainStatusRefresh = Date.now();
+    } else if (!this.exclusiveOperationInFlight && !this.remoteStateRefreshInFlight) {
+      this.startRemoteStateRefresh(
+        settings,
+        resolvedPiHost,
+        hostSnapshot,
+        replaySnapshot,
+        datasetCaptureSnapshot,
+        training,
+      );
     }
 
-    if (resolvedPiHost && Date.now() - this.lastPowerLogSync > POWER_LOG_SYNC_INTERVAL_MS) {
-      try {
-        await this.syncRemotePowerLogs(settings, resolvedPiHost, true);
-      } catch (error) {
-        this.noteBackgroundRemoteError(error);
-      } finally {
-        this.lastPowerLogSync = Date.now();
-      }
-    }
-
-    const vexBrain = await this.getVexBrainStatus(
-      settings,
-      resolvedPiHost,
-      hostSnapshot,
-      replaySnapshot,
-      datasetCaptureSnapshot,
-    );
+    const vexBrain = this.cachedVexBrainStatus;
     const robotSensors = this.getRobotSensorsStatus(
       piReachable,
       vexBrain,
@@ -307,18 +408,8 @@ export class RobotController {
       datasetCaptureSnapshot,
     );
 
-    let trainingConfig = training;
-    if (Date.now() - this.lastTrainingMetadataRefresh > TRAINING_METADATA_REFRESH_MS) {
-      try {
-        trainingConfig = await this.refreshTrainingArtifacts(trainingConfig, settings, resolvedPiHost);
-        this.lastTrainingMetadataRefresh = Date.now();
-      } catch (error) {
-        this.noteBackgroundRemoteError(error);
-      }
-    }
-
     const selectedProfile =
-      trainingConfig.profiles.find((profile) => profile.id === trainingConfig.selectedProfileId) ?? null;
+      training.profiles.find((profile) => profile.id === training.selectedProfileId) ?? null;
     this.maybeCleanupCoupledTeleopFailure(hostSnapshot, teleopSnapshot);
     const warmHostReplaySnapshot = this.deriveWarmHostReplaySnapshot(hostSnapshot);
 
@@ -329,7 +420,7 @@ export class RobotController {
       homePosition,
       recordingReplayOptions,
       training: {
-        ...trainingConfig,
+        ...training,
         selectedProfile,
       },
       wifi,
@@ -362,6 +453,60 @@ export class RobotController {
         policyEval: this.policyEvalRunner.getSnapshot(),
       },
     };
+  }
+
+  private startRemoteStateRefresh(
+    settings: AppSettings,
+    resolvedPiHost: string,
+    hostSnapshot: ServiceSnapshot,
+    replaySnapshot: ServiceSnapshot,
+    datasetCaptureSnapshot: ServiceSnapshot,
+    trainingConfig: TrainingConfig,
+  ): void {
+    this.remoteStateRefreshInFlight = true;
+
+    void (async () => {
+      try {
+        if (Date.now() - this.lastRecordingRefresh > 15000) {
+          try {
+            this.lastRecordingRefresh = Date.now();
+            this.cachedRecordings = await this.fetchRecordings(settings, resolvedPiHost, true);
+          } catch (error) {
+            this.noteBackgroundRemoteError(error);
+          }
+        }
+
+        if (Date.now() - this.lastPowerLogSync > POWER_LOG_SYNC_INTERVAL_MS) {
+          try {
+            this.lastPowerLogSync = Date.now();
+            await this.syncRemotePowerLogs(settings, resolvedPiHost, true);
+          } catch (error) {
+            this.noteBackgroundRemoteError(error);
+          }
+        }
+
+        await this.getVexBrainStatus(
+          settings,
+          resolvedPiHost,
+          hostSnapshot,
+          replaySnapshot,
+          datasetCaptureSnapshot,
+        );
+
+        if (Date.now() - this.lastTrainingMetadataRefresh > TRAINING_METADATA_REFRESH_MS) {
+          try {
+            this.lastTrainingMetadataRefresh = Date.now();
+            await this.refreshTrainingArtifacts(trainingConfig, settings, resolvedPiHost);
+          } catch (error) {
+            this.noteBackgroundRemoteError(error);
+          }
+        }
+      } catch (error) {
+        this.noteBackgroundRemoteError(error);
+      } finally {
+        this.remoteStateRefreshInFlight = false;
+      }
+    })();
   }
 
   async saveSettings(settings: AppSettings): Promise<DashboardState> {
@@ -979,6 +1124,35 @@ export class RobotController {
     });
   }
 
+  async resetPiConnections(): Promise<DashboardState> {
+    this.logActivity("Reset Pi connections requested.");
+    this.suppressRemoteTransportErrorsUntil = Date.now() + 10000;
+    const closedRemoteClients = this.closeActiveRemoteClients("Resetting auxiliary Pi SSH/SFTP sessions.");
+
+    this.hostRunner.resetConnection("Resetting the Pi host SSH connection.");
+    this.replayRunner.resetConnection("Resetting the replay SSH connection.");
+    this.piCalibrationRunner.resetConnection("Resetting the Pi calibration SSH connection.");
+    this.datasetCaptureRunner.resetConnection("Resetting the dataset capture SSH connection.");
+    this.policyEvalRunner.resetConnection("Resetting the policy eval SSH connection.");
+
+    await Promise.allSettled([
+      this.teleopRunner.stop("Resetting Pi connections."),
+    ]);
+
+    const now = Date.now();
+    this.lastRecordingRefresh = now;
+    this.lastPowerLogSync = now;
+    this.lastTrainingMetadataRefresh = now;
+    this.lastVexBrainStatusRefresh = now;
+    this.lastResolvedHost = null;
+    this.remoteStateRefreshInFlight = false;
+    this.lastError = null;
+    this.logActivity(
+      `Pi connection reset complete. Closed ${closedRemoteClients} auxiliary SSH/SFTP ${closedRemoteClients === 1 ? "session" : "sessions"}.`,
+    );
+    return this.getState();
+  }
+
   async emergencyStop(): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
@@ -1563,6 +1737,11 @@ export class RobotController {
         homeMode: "none",
         speed: 1,
         autoVexPositioning: false,
+        vexPositioningTimeoutS: DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+        vexPositioningXyToleranceM: DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+        vexPositioningHeadingToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+        vexPositioningXyTrimToleranceM: DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+        vexPositioningHeadingTrimToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
         includeBase: true,
         holdFinalS: 0,
       };
@@ -1814,36 +1993,68 @@ export class RobotController {
 
     await previous;
 
+    this.exclusiveOperationInFlight = true;
     try {
       return await operation();
     } catch (error) {
       this.noteError(error);
       throw error;
     } finally {
+      this.exclusiveOperationInFlight = false;
       release();
     }
   }
 
+  private async withRemoteHandshakeRetries<T>(
+    label: string,
+    task: (markHandshakeComplete: () => void) => Promise<T>,
+  ): Promise<T> {
+    const maxAttempts = REMOTE_HANDSHAKE_RETRY_DELAYS_MS.length + 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let handshakeComplete = false;
+      try {
+        return await task(() => {
+          handshakeComplete = true;
+        });
+      } catch (error) {
+        if (
+          handshakeComplete ||
+          !isTransientRemoteTransportError(error) ||
+          attempt === maxAttempts
+        ) {
+          throw error;
+        }
+
+        const delayMs = REMOTE_HANDSHAKE_RETRY_DELAYS_MS[attempt - 1] ?? 0;
+        this.logActivity(
+          `${label} SSH handshake dropped (${errorMessage(error)}); retrying ${attempt + 1}/${maxAttempts}.`,
+        );
+        await sleep(delayMs);
+      }
+    }
+
+    throw new Error(`${label} failed before the SSH handshake could complete.`);
+  }
+
   private noteError(error: unknown): void {
-    this.lastError = error instanceof Error ? error.message : String(error);
+    if (isTransientRemoteTransportError(error)) {
+      const action =
+        Date.now() < this.suppressRemoteTransportErrorsUntil
+          ? "Suppressed reset transport error"
+          : "Ignored transient Pi SSH transport error";
+      this.logActivity(`${action}: ${errorMessage(error)}`);
+      return;
+    }
+    this.lastError = errorMessage(error);
     this.logActivity(`Error: ${this.lastError}`);
   }
 
   private noteBackgroundRemoteError(error: unknown): void {
-    if (this.isTransientRemoteTransportError(error)) {
+    if (isTransientRemoteTransportError(error)) {
       return;
     }
     this.noteError(error);
-  }
-
-  private isTransientRemoteTransportError(error: unknown): boolean {
-    const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-    return (
-      message.includes("econnreset") ||
-      message.includes("connection reset") ||
-      message.includes("socket hang up") ||
-      message.includes("client-socket disconnected")
-    );
   }
 
   private async preparePi(settings: AppSettings, actionLabel: string): Promise<string> {
@@ -1874,7 +2085,14 @@ export class RobotController {
   }
 
   private async findReachablePiHost(settings: AppSettings): Promise<string | null> {
-    const candidates = [settings.pi.host, settings.pi.fallbackHost].filter(Boolean);
+    const configuredHosts = [settings.pi.host, settings.pi.fallbackHost].filter(Boolean);
+    const candidates = [
+      this.lastResolvedHost && configuredHosts.includes(this.lastResolvedHost)
+        ? this.lastResolvedHost
+        : null,
+      ...configuredHosts,
+    ].filter((host, index, hosts): host is string => Boolean(host) && hosts.indexOf(host) === index);
+
     for (const candidate of candidates) {
       if (await isTcpReachable(candidate, 22)) {
         return candidate;
@@ -3255,6 +3473,13 @@ PY
     const autoVexPositioningFlag = replay.autoVexPositioning
       ? ""
       : " \\\n  --auto-vex-positioning false";
+    const vexPositioningTimeoutFlag =
+      ` \\\n  --vex-positioning-timeout-s ${replay.vexPositioningTimeoutS}`;
+    const vexPositioningTolerancesFlags =
+      ` \\\n  --vex-positioning-xy-tolerance-m ${replay.vexPositioningXyToleranceM}` +
+      ` \\\n  --vex-positioning-heading-tolerance-deg ${replay.vexPositioningHeadingToleranceDeg}` +
+      ` \\\n  --vex-positioning-xy-trim-tolerance-m ${replay.vexPositioningXyTrimToleranceM}` +
+      ` \\\n  --vex-positioning-heading-trim-tolerance-deg ${replay.vexPositioningHeadingTrimToleranceDeg}`;
     const recaptureUltrasonicFlag = options.recaptureUltrasonicStream
       ? " \\\n  --recapture-ultrasonic-stream"
       : "";
@@ -3280,7 +3505,7 @@ PY
       `  --input ${shellQuote(replay.trajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
       `  --vex-replay-mode ${shellQuote(replay.vexReplayMode)} \\`,
-      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${autoVexPositioningFlag}${recaptureUltrasonicFlag}${homeFlags}${saferServoModeFlag}`,
+      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${autoVexPositioningFlag}${vexPositioningTimeoutFlag}${vexPositioningTolerancesFlags}${recaptureUltrasonicFlag}${homeFlags}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -3600,6 +3825,11 @@ PY
       holdFinalS: replay.holdFinalS,
       includeBase: replay.includeBase,
       autoVexPositioning: replay.autoVexPositioning,
+      vexPositioningTimeoutS: replay.vexPositioningTimeoutS,
+      vexPositioningXyToleranceM: replay.vexPositioningXyToleranceM,
+      vexPositioningHeadingToleranceDeg: replay.vexPositioningHeadingToleranceDeg,
+      vexPositioningXyTrimToleranceM: replay.vexPositioningXyTrimToleranceM,
+      vexPositioningHeadingTrimToleranceDeg: replay.vexPositioningHeadingTrimToleranceDeg,
       vexReplayMode: replay.vexReplayMode,
       homeMode: replay.homeMode,
       homePosition,
@@ -3638,6 +3868,11 @@ PY
           holdFinalS: number;
           includeBase: boolean;
           autoVexPositioning: boolean;
+          vexPositioningTimeoutS: number;
+          vexPositioningXyToleranceM: number;
+          vexPositioningHeadingToleranceDeg: number;
+          vexPositioningXyTrimToleranceM: number;
+          vexPositioningHeadingTrimToleranceDeg: number;
           vexReplayMode: "drive" | "ecu";
           homeMode: ArmHomeMode;
           homePosition: ArmHomePosition | null;
@@ -3657,6 +3892,12 @@ PY
         hold_final_s: command.holdFinalS,
         include_base: command.includeBase,
         auto_vex_positioning: command.autoVexPositioning,
+        vex_positioning_timeout_s: command.vexPositioningTimeoutS,
+        vex_positioning_xy_tolerance_m: command.vexPositioningXyToleranceM,
+        vex_positioning_heading_tolerance_deg: command.vexPositioningHeadingToleranceDeg,
+        vex_positioning_xy_trim_tolerance_m: command.vexPositioningXyTrimToleranceM,
+        vex_positioning_heading_trim_tolerance_deg:
+          command.vexPositioningHeadingTrimToleranceDeg,
         vex_replay_mode: command.vexReplayMode,
         home_mode: command.homeMode,
         home_position: isFiniteHomePosition(command.homePosition)
@@ -4071,66 +4312,70 @@ PY
   ): Promise<{ stdout: string; stderr: string }> {
     const connection = this.toConnectConfig(settings, host);
 
-    return new Promise((resolve, reject) => {
-      const client = new Client();
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
+    return this.withRemoteHandshakeRetries(
+      "Remote command",
+      (markHandshakeComplete) => new Promise((resolve, reject) => {
+        const client = new Client();
+        this.trackRemoteClient(client);
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
 
-      const fail = (error: Error) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        reject(error);
-      };
-      const succeed = (value: { stdout: string; stderr: string }) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        resolve(value);
-      };
-      const handleError = (error: Error) => {
-        fail(error);
-      };
-      const cleanupErrorHandler = () => {
-        client.off("error", handleError);
-      };
-
-      client.once("ready", () => {
-        client.exec(`/bin/bash -lc ${shellQuote(script)}`, (error, channel) => {
-          if (error) {
-            client.end();
-            fail(error);
+        const fail = (error: Error) => {
+          if (settled) {
             return;
           }
+          settled = true;
+          client.destroy();
+          reject(error);
+        };
+        const succeed = (value: { stdout: string; stderr: string }) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          resolve(value);
+        };
+        const handleError = (error: Error) => {
+          fail(error);
+        };
+        const cleanupErrorHandler = () => {
+          client.off("error", handleError);
+        };
 
-          channel.on("data", (chunk: Buffer) => {
-            stdout += chunk.toString("utf8");
-          });
-
-          channel.stderr.on("data", (chunk: Buffer) => {
-            stderr += chunk.toString("utf8");
-          });
-
-          channel.once("close", (code: number | undefined | null) => {
-            cleanupErrorHandler();
-            client.end();
-            if (code && code !== 0) {
-              fail(new Error(stderr.trim() || stdout.trim() || `Remote command failed with code ${code}.`));
+        client.once("ready", () => {
+          markHandshakeComplete();
+          client.exec(`/bin/bash -lc ${shellQuote(script)}`, (error, channel) => {
+            if (error) {
+              fail(error);
               return;
             }
-            succeed({ stdout: stdout.trim(), stderr: stderr.trim() });
+
+            channel.on("data", (chunk: Buffer) => {
+              stdout += chunk.toString("utf8");
+            });
+
+            channel.stderr.on("data", (chunk: Buffer) => {
+              stderr += chunk.toString("utf8");
+            });
+
+            channel.once("close", (code: number | undefined | null) => {
+              if (code && code !== 0) {
+                fail(new Error(stderr.trim() || stdout.trim() || `Remote command failed with code ${code}.`));
+                return;
+              }
+              client.end();
+              succeed({ stdout: stdout.trim(), stderr: stderr.trim() });
+            });
           });
         });
-      });
 
-      client.on("error", handleError);
-      client.once("close", cleanupErrorHandler);
-      client.once("end", cleanupErrorHandler);
-      client.connect(connection);
-    });
+        client.on("error", handleError);
+        client.once("close", cleanupErrorHandler);
+        client.once("end", cleanupErrorHandler);
+        client.connect(connection);
+      }),
+    );
   }
 
   private async withSftp<T>(
@@ -4139,59 +4384,60 @@ PY
     callback: (sftp: SFTPWrapper) => Promise<T>,
   ): Promise<T> {
     const connection = this.toConnectConfig(settings, host);
-    const client = new Client();
 
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
+    return this.withRemoteHandshakeRetries(
+      "SFTP session",
+      (markHandshakeComplete) => new Promise<T>((resolve, reject) => {
+        const client = new Client();
+        this.trackRemoteClient(client);
+        let settled = false;
 
-      const fail = (error: Error) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        reject(error);
-      };
-      const succeed = (value: T) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        resolve(value);
-      };
-      const handleError = (error: Error) => {
-        fail(error);
-      };
-      const cleanupErrorHandler = () => {
-        client.off("error", handleError);
-      };
-
-      client.once("ready", () => {
-        client.sftp(async (error, sftp) => {
-          if (error || !sftp) {
-            cleanupErrorHandler();
-            client.end();
-            fail(error ?? new Error("SFTP could not be opened."));
+        const fail = (error: Error) => {
+          if (settled) {
             return;
           }
-
-          try {
-            const result = await callback(sftp);
-            cleanupErrorHandler();
-            client.end();
-            succeed(result);
-          } catch (callbackError) {
-            cleanupErrorHandler();
-            client.end();
-            fail(callbackError instanceof Error ? callbackError : new Error(String(callbackError)));
+          settled = true;
+          client.destroy();
+          reject(error);
+        };
+        const succeed = (value: T) => {
+          if (settled) {
+            return;
           }
-        });
-      });
+          settled = true;
+          resolve(value);
+        };
+        const handleError = (error: Error) => {
+          fail(error);
+        };
+        const cleanupErrorHandler = () => {
+          client.off("error", handleError);
+        };
 
-      client.on("error", handleError);
-      client.once("close", cleanupErrorHandler);
-      client.once("end", cleanupErrorHandler);
-      client.connect(connection);
-    });
+        client.once("ready", () => {
+          markHandshakeComplete();
+          client.sftp(async (error, sftp) => {
+            if (error || !sftp) {
+              fail(error ?? new Error("SFTP could not be opened."));
+              return;
+            }
+
+            try {
+              const result = await callback(sftp);
+              client.end();
+              succeed(result);
+            } catch (callbackError) {
+              fail(callbackError instanceof Error ? callbackError : new Error(String(callbackError)));
+            }
+          });
+        });
+
+        client.on("error", handleError);
+        client.once("close", cleanupErrorHandler);
+        client.once("end", cleanupErrorHandler);
+        client.connect(connection);
+      }),
+    );
   }
 
   private async fastPut(
@@ -4791,86 +5037,87 @@ PY
     await fs.promises.mkdir(localDir, { recursive: true });
 
     const connection = this.toConnectConfig(settings, host);
-    await new Promise<void>((resolve, reject) => {
-      const client = new Client();
-      let settled = false;
+    await this.withRemoteHandshakeRetries(
+      "Remote dataset download",
+      (markHandshakeComplete) => new Promise<void>((resolve, reject) => {
+        const client = new Client();
+        this.trackRemoteClient(client);
+        let settled = false;
 
-      const fail = (error: Error) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        reject(error);
-      };
-      const succeed = () => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        resolve();
-      };
-      const handleError = (error: Error) => {
-        fail(error);
-      };
-      const cleanupErrorHandler = () => {
-        client.off("error", handleError);
-      };
-
-      client.once("ready", () => {
-        const remoteCommand = [
-          `if [ ! -d ${shellQuote(remoteDir)} ]; then`,
-          `  echo "Missing directory: ${remoteDir}" >&2`,
-          "  exit 1",
-          "fi",
-          `tar -C ${shellQuote(remoteDir)} -czf - .`,
-        ].join("\n");
-
-        client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
-          if (error) {
-            cleanupErrorHandler();
-            client.end();
-            fail(error);
+        const fail = (error: Error) => {
+          if (settled) {
             return;
           }
+          settled = true;
+          client.destroy();
+          reject(error);
+        };
+        const succeed = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          resolve();
+        };
+        const handleError = (error: Error) => {
+          fail(error);
+        };
+        const cleanupErrorHandler = () => {
+          client.off("error", handleError);
+        };
 
-          const untar = spawn("/usr/bin/tar", ["-xzf", "-", "-C", localDir], {
-            stdio: ["pipe", "ignore", "pipe"],
-          });
+        client.once("ready", () => {
+          markHandshakeComplete();
+          const remoteCommand = [
+            `if [ ! -d ${shellQuote(remoteDir)} ]; then`,
+            `  echo "Missing directory: ${remoteDir}" >&2`,
+            "  exit 1",
+            "fi",
+            `tar -C ${shellQuote(remoteDir)} -czf - .`,
+          ].join("\n");
 
-          channel.stderr.on("data", (chunk: Buffer) => {
-            log("stderr", chunk.toString("utf8").trim());
-          });
-          untar.stderr.on("data", (chunk: Buffer) => {
-            log("stderr", chunk.toString("utf8").trim());
-          });
-
-          channel.pipe(untar.stdin);
-
-          untar.once("close", (code) => {
-            cleanupErrorHandler();
-            client.end();
-            if (code && code !== 0) {
-              fail(new Error(`Local tar extraction failed with code ${code}.`));
+          client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
+            if (error) {
+              fail(error);
               return;
             }
-            succeed();
-          });
 
-          channel.once("close", (code: number | undefined | null) => {
-            if (code && code !== 0) {
-              cleanupErrorHandler();
+            const untar = spawn("/usr/bin/tar", ["-xzf", "-", "-C", localDir], {
+              stdio: ["pipe", "ignore", "pipe"],
+            });
+
+            channel.stderr.on("data", (chunk: Buffer) => {
+              log("stderr", chunk.toString("utf8").trim());
+            });
+            untar.stderr.on("data", (chunk: Buffer) => {
+              log("stderr", chunk.toString("utf8").trim());
+            });
+
+            channel.pipe(untar.stdin);
+
+            untar.once("close", (code) => {
+              if (code && code !== 0) {
+                fail(new Error(`Local tar extraction failed with code ${code}.`));
+                return;
+              }
               client.end();
-              fail(new Error(`Remote dataset archive failed with code ${code}.`));
-            }
+              succeed();
+            });
+
+            channel.once("close", (code: number | undefined | null) => {
+              if (code && code !== 0) {
+                fail(new Error(`Remote dataset archive failed with code ${code}.`));
+              }
+            });
           });
         });
-      });
 
-      client.on("error", handleError);
-      client.once("close", cleanupErrorHandler);
-      client.once("end", cleanupErrorHandler);
-      client.connect(connection);
-    });
+        client.on("error", handleError);
+        client.once("close", cleanupErrorHandler);
+        client.once("end", cleanupErrorHandler);
+        client.connect(connection);
+      }),
+    );
   }
 
   private async syncLocalDirectoryToRemote(
@@ -4885,84 +5132,85 @@ PY
     }
 
     const connection = this.toConnectConfig(settings, host);
-    await new Promise<void>((resolve, reject) => {
-      const client = new Client();
-      let settled = false;
+    await this.withRemoteHandshakeRetries(
+      "Remote dataset upload",
+      (markHandshakeComplete) => new Promise<void>((resolve, reject) => {
+        const client = new Client();
+        this.trackRemoteClient(client);
+        let settled = false;
 
-      const fail = (error: Error) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        reject(error);
-      };
-      const succeed = () => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        resolve();
-      };
-      const handleError = (error: Error) => {
-        fail(error);
-      };
-      const cleanupErrorHandler = () => {
-        client.off("error", handleError);
-      };
-
-      client.once("ready", () => {
-        const remoteCommand = [
-          `rm -rf ${shellQuote(remoteDir)}`,
-          `mkdir -p ${shellQuote(remoteDir)}`,
-          `tar -xzf - -C ${shellQuote(remoteDir)}`,
-        ].join("\n");
-
-        client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
-          if (error) {
-            cleanupErrorHandler();
-            client.end();
-            fail(error);
+        const fail = (error: Error) => {
+          if (settled) {
             return;
           }
+          settled = true;
+          client.destroy();
+          reject(error);
+        };
+        const succeed = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          resolve();
+        };
+        const handleError = (error: Error) => {
+          fail(error);
+        };
+        const cleanupErrorHandler = () => {
+          client.off("error", handleError);
+        };
 
-          const tarProcess = spawn("/usr/bin/tar", ["-czf", "-", "-C", localDir, "."], {
-            stdio: ["ignore", "pipe", "pipe"],
-          });
+        client.once("ready", () => {
+          markHandshakeComplete();
+          const remoteCommand = [
+            `rm -rf ${shellQuote(remoteDir)}`,
+            `mkdir -p ${shellQuote(remoteDir)}`,
+            `tar -xzf - -C ${shellQuote(remoteDir)}`,
+          ].join("\n");
 
-          tarProcess.stderr.on("data", (chunk: Buffer) => {
-            log("stderr", chunk.toString("utf8").trim());
-          });
-          channel.stderr.on("data", (chunk: Buffer) => {
-            log("stderr", chunk.toString("utf8").trim());
-          });
-
-          tarProcess.stdout.pipe(channel);
-
-          tarProcess.once("close", (code) => {
-            if (code && code !== 0) {
-              cleanupErrorHandler();
-              client.end();
-              fail(new Error(`Local tar archive failed with code ${code}.`));
-            }
-          });
-
-          channel.once("close", (code: number | undefined | null) => {
-            cleanupErrorHandler();
-            client.end();
-            if (code && code !== 0) {
-              fail(new Error(`Remote extract failed with code ${code}.`));
+          client.exec(`/bin/bash -lc ${shellQuote(remoteCommand)}`, (error, channel) => {
+            if (error) {
+              fail(error);
               return;
             }
-            succeed();
+
+            const tarProcess = spawn("/usr/bin/tar", ["-czf", "-", "-C", localDir, "."], {
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+
+            tarProcess.stderr.on("data", (chunk: Buffer) => {
+              log("stderr", chunk.toString("utf8").trim());
+            });
+            channel.stderr.on("data", (chunk: Buffer) => {
+              log("stderr", chunk.toString("utf8").trim());
+            });
+
+            tarProcess.stdout.pipe(channel);
+
+            tarProcess.once("close", (code) => {
+              if (code && code !== 0) {
+                fail(new Error(`Local tar archive failed with code ${code}.`));
+              }
+            });
+
+            channel.once("close", (code: number | undefined | null) => {
+              if (code && code !== 0) {
+                fail(new Error(`Remote extract failed with code ${code}.`));
+                return;
+              }
+              client.end();
+              succeed();
+            });
           });
         });
-      });
 
-      client.on("error", handleError);
-      client.once("close", cleanupErrorHandler);
-      client.once("end", cleanupErrorHandler);
-      client.connect(connection);
-    });
+        client.on("error", handleError);
+        client.once("close", cleanupErrorHandler);
+        client.once("end", cleanupErrorHandler);
+        client.connect(connection);
+      }),
+    );
   }
 
   private async writeRemoteDeployManifest(
@@ -4989,6 +5237,34 @@ JSON
 `.trim();
 
     await this.execRemoteScript(script, host, settings);
+  }
+
+  private trackRemoteClient(client: Client): void {
+    this.activeRemoteClients.add(client);
+    const untrack = () => {
+      this.activeRemoteClients.delete(client);
+    };
+    client.once("close", untrack);
+    client.once("end", untrack);
+    client.once("error", untrack);
+  }
+
+  private closeActiveRemoteClients(reason: string): number {
+    const clients = [...this.activeRemoteClients];
+    if (!clients.length) {
+      return 0;
+    }
+
+    this.logActivity(reason);
+    for (const client of clients) {
+      try {
+        client.destroy();
+      } catch {
+        // The SSH client may already be closing.
+      }
+      this.activeRemoteClients.delete(client);
+    }
+    return clients.length;
   }
 
   private logActivity(message: string): void {

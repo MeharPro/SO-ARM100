@@ -3,9 +3,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2";
 
 import { shellQuote, sleep } from "./system.js";
+import {
+  errorMessage,
+  isTransientRemoteTransportError,
+} from "./transportErrors.js";
 import type { ServiceSnapshot } from "./types.js";
 
 const MAX_LOG_LINES = 180;
+const REMOTE_PROCESS_START_RETRY_DELAYS_MS = [500, 1200, 2500];
 
 function sanitizeLogText(value: string): string {
   return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
@@ -274,6 +279,41 @@ export class RemoteProcessRunner {
     pushLog(this.snapshot, "system", `Connecting to ${connection.host}.`);
     logCommand(this.snapshot, script);
 
+    const maxAttempts = REMOTE_PROCESS_START_RETRY_DELAYS_MS.length + 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let handshakeComplete = false;
+      try {
+        await this.startAttempt(script, connection, () => {
+          handshakeComplete = true;
+        });
+        return;
+      } catch (error) {
+        if (
+          handshakeComplete ||
+          !isTransientRemoteTransportError(error) ||
+          attempt === maxAttempts
+        ) {
+          throw error;
+        }
+
+        const delayMs = REMOTE_PROCESS_START_RETRY_DELAYS_MS[attempt - 1] ?? 0;
+        this.snapshot.state = "starting";
+        this.snapshot.detail = `SSH handshake dropped; retrying ${attempt + 1}/${maxAttempts}.`;
+        pushLog(
+          this.snapshot,
+          "system",
+          `SSH handshake dropped (${errorMessage(error)}); retrying ${attempt + 1}/${maxAttempts}.`,
+        );
+        await sleep(delayMs);
+      }
+    }
+  }
+
+  private async startAttempt(
+    script: string,
+    connection: ConnectConfig,
+    markHandshakeComplete: () => void,
+  ): Promise<void> {
     const client = new Client();
     this.client = client;
 
@@ -289,6 +329,7 @@ export class RemoteProcessRunner {
         this.snapshot.detail = error.message;
         pushLog(this.snapshot, "stderr", error.message);
         this.client = null;
+        client.destroy();
         reject(error);
       };
       const handleError = (error: Error) => {
@@ -299,6 +340,7 @@ export class RemoteProcessRunner {
       };
 
       client.once("ready", () => {
+        markHandshakeComplete();
         client.exec(`/bin/bash -lc ${shellQuote(script)}`, (error, channel) => {
           if (error) {
             fail(error);
@@ -328,7 +370,6 @@ export class RemoteProcessRunner {
               }
 
               this.channel = null;
-              cleanupErrorHandler();
               client.end();
               this.client = null;
               this.exitPromise = null;
@@ -383,6 +424,37 @@ export class RemoteProcessRunner {
       this.client?.end();
       await this.exitPromise;
     }
+  }
+
+  resetConnection(reason = "Resetting the Pi connection."): void {
+    if (!this.client && !this.channel) {
+      return;
+    }
+
+    this.snapshot.state = "stopping";
+    this.snapshot.detail = reason;
+    pushLog(this.snapshot, "system", reason);
+    this.flushBufferedLogs();
+
+    try {
+      this.channel?.close();
+    } catch {
+      // The remote channel may already be closed.
+    }
+
+    try {
+      this.client?.destroy();
+    } catch {
+      // The SSH client may already be closed.
+    }
+
+    this.channel = null;
+    this.client = null;
+    this.exitPromise = null;
+    this.snapshot.pid = null;
+    this.snapshot.stoppedAt = new Date().toISOString();
+    this.snapshot.state = "idle";
+    this.snapshot.detail = "Pi connection reset.";
   }
 
   private consumeBuffer(buffer: string, stream: "stdout" | "stderr"): string {

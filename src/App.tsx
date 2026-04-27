@@ -100,6 +100,17 @@ const HOME_MODE_OPTIONS: Array<{ value: ArmHomeMode; label: string }> = [
 ];
 const SENSOR_STATUS_LOG_PREFIX = "[sensor-status]";
 const VEX_POSITION_LOG_PREFIX = "[vex-position]";
+const DEFAULT_VEX_POSITIONING_TIMEOUT_S = 8;
+const MIN_VEX_POSITIONING_TIMEOUT_S = 0.5;
+const MAX_VEX_POSITIONING_TIMEOUT_S = 60;
+const DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M = 0.02;
+const DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 1.5;
+const DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M = 0.05;
+const DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG = 8.5;
+const MIN_VEX_POSITIONING_XY_TOLERANCE_M = 0.001;
+const MAX_VEX_POSITIONING_XY_TOLERANCE_M = 2;
+const MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 0.1;
+const MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 90;
 
 type ChainRunPhase = "starting" | "running" | "waiting-confirmation";
 
@@ -327,9 +338,26 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     ...init,
   });
 
-  const payload = await response.json().catch(() => null);
+  const body = await response.text().catch(() => "");
+  const payload = body
+    ? (() => {
+        try {
+          return JSON.parse(body) as unknown;
+        } catch {
+          return null;
+        }
+      })()
+    : null;
   if (!response.ok) {
-    throw new Error(payload?.error ?? "Request failed.");
+    const apiError =
+      payload && typeof payload === "object" && "error" in payload
+        ? (payload as { error?: unknown }).error
+        : null;
+    throw new Error(
+      typeof apiError === "string" && apiError.trim()
+        ? apiError
+        : body.trim() || response.statusText || `Request failed with status ${response.status}.`,
+    );
   }
 
   return payload as T;
@@ -620,6 +648,30 @@ function parseNumber(value: string | undefined): number | null {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clampVexPositioningTimeout(value: number): number {
+  return clampNumber(value, MIN_VEX_POSITIONING_TIMEOUT_S, MAX_VEX_POSITIONING_TIMEOUT_S);
+}
+
+function clampVexPositioningXyTolerance(value: number): number {
+  return clampNumber(
+    value,
+    MIN_VEX_POSITIONING_XY_TOLERANCE_M,
+    MAX_VEX_POSITIONING_XY_TOLERANCE_M,
+  );
+}
+
+function clampVexPositioningHeadingTolerance(value: number): number {
+  return clampNumber(
+    value,
+    MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+    MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+  );
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function labelServo(id: string | null): string {
@@ -1437,6 +1489,18 @@ export default function App() {
   const [recordingDetailError, setRecordingDetailError] = useState("");
   const [recordingDetailReloadToken, setRecordingDetailReloadToken] = useState(0);
   const [replayIncludeBasePreference, setReplayIncludeBasePreference] = useState<boolean | null>(null);
+  const [vexPositioningTimeoutDraft, setVexPositioningTimeoutDraft] = useState(
+    formatSecondsInput(DEFAULT_VEX_POSITIONING_TIMEOUT_S),
+  );
+  const [vexPositioningXyToleranceDraft, setVexPositioningXyToleranceDraft] = useState(
+    formatSecondsInput(DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M),
+  );
+  const [vexPositioningHeadingToleranceDraft, setVexPositioningHeadingToleranceDraft] =
+    useState(formatSecondsInput(DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG));
+  const [vexPositioningXyTrimToleranceDraft, setVexPositioningXyTrimToleranceDraft] =
+    useState(formatSecondsInput(DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M));
+  const [vexPositioningHeadingTrimToleranceDraft, setVexPositioningHeadingTrimToleranceDraft] =
+    useState(formatSecondsInput(DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG));
   const [vexReplayMode, setVexReplayMode] = useState<VexReplayMode>("ecu");
   const [playbackTimeS, setPlaybackTimeS] = useState(0);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
@@ -1445,6 +1509,7 @@ export default function App() {
   const torqueTimers = useRef<Record<string, number>>({});
   const playbackAnchorRef = useRef<{ startedAtMs: number; baseTimeS: number } | null>(null);
   const stateRequestController = useRef<AbortController | null>(null);
+  const mutationSequenceRef = useRef(0);
   const chainRunCancelledRef = useRef(false);
   const chainConfirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
 
@@ -1578,6 +1643,19 @@ export default function App() {
       homeMode: savedOptions?.homeMode ?? "none",
       speed: savedOptions?.speed ?? state?.settings.trajectories.defaultReplaySpeed ?? 1,
       autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+      vexPositioningTimeoutS:
+        savedOptions?.vexPositioningTimeoutS ?? DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+      vexPositioningXyToleranceM:
+        savedOptions?.vexPositioningXyToleranceM ?? DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+      vexPositioningHeadingToleranceDeg:
+        savedOptions?.vexPositioningHeadingToleranceDeg ??
+        DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      vexPositioningXyTrimToleranceM:
+        savedOptions?.vexPositioningXyTrimToleranceM ??
+        DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+      vexPositioningHeadingTrimToleranceDeg:
+        savedOptions?.vexPositioningHeadingTrimToleranceDeg ??
+        DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
     };
   }, [
     selectedRecording,
@@ -1592,6 +1670,53 @@ export default function App() {
   );
   const effectiveReplayIncludeBase =
     replayTarget === "pi" ? (replayIncludeBasePreference ?? false) : false;
+  const effectiveVexPositioningTimeoutS = useMemo(() => {
+    const draftTimeoutS = parseNumber(vexPositioningTimeoutDraft);
+    if (draftTimeoutS === null || draftTimeoutS <= 0) {
+      return selectedRecordingReplayOptions.vexPositioningTimeoutS;
+    }
+    return clampVexPositioningTimeout(draftTimeoutS);
+  }, [selectedRecordingReplayOptions.vexPositioningTimeoutS, vexPositioningTimeoutDraft]);
+  const effectiveVexPositioningXyToleranceM = useMemo(() => {
+    const draftTolerance = parseNumber(vexPositioningXyToleranceDraft);
+    if (draftTolerance === null || draftTolerance <= 0) {
+      return selectedRecordingReplayOptions.vexPositioningXyToleranceM;
+    }
+    return clampVexPositioningXyTolerance(draftTolerance);
+  }, [
+    selectedRecordingReplayOptions.vexPositioningXyToleranceM,
+    vexPositioningXyToleranceDraft,
+  ]);
+  const effectiveVexPositioningHeadingToleranceDeg = useMemo(() => {
+    const draftTolerance = parseNumber(vexPositioningHeadingToleranceDraft);
+    if (draftTolerance === null || draftTolerance <= 0) {
+      return selectedRecordingReplayOptions.vexPositioningHeadingToleranceDeg;
+    }
+    return clampVexPositioningHeadingTolerance(draftTolerance);
+  }, [
+    selectedRecordingReplayOptions.vexPositioningHeadingToleranceDeg,
+    vexPositioningHeadingToleranceDraft,
+  ]);
+  const effectiveVexPositioningXyTrimToleranceM = useMemo(() => {
+    const draftTolerance = parseNumber(vexPositioningXyTrimToleranceDraft);
+    if (draftTolerance === null || draftTolerance <= 0) {
+      return selectedRecordingReplayOptions.vexPositioningXyTrimToleranceM;
+    }
+    return clampVexPositioningXyTolerance(draftTolerance);
+  }, [
+    selectedRecordingReplayOptions.vexPositioningXyTrimToleranceM,
+    vexPositioningXyTrimToleranceDraft,
+  ]);
+  const effectiveVexPositioningHeadingTrimToleranceDeg = useMemo(() => {
+    const draftTolerance = parseNumber(vexPositioningHeadingTrimToleranceDraft);
+    if (draftTolerance === null || draftTolerance <= 0) {
+      return selectedRecordingReplayOptions.vexPositioningHeadingTrimToleranceDeg;
+    }
+    return clampVexPositioningHeadingTolerance(draftTolerance);
+  }, [
+    selectedRecordingReplayOptions.vexPositioningHeadingTrimToleranceDeg,
+    vexPositioningHeadingTrimToleranceDraft,
+  ]);
 
   useEffect(() => {
     setRecordingNameDraft(selectedRecordingEntry?.name ?? "");
@@ -1604,6 +1729,31 @@ export default function App() {
   useEffect(() => {
     setPinSpeed(selectedRecordingReplayOptions.speed);
   }, [selectedRecordingEntry?.path, selectedRecordingReplayOptions.speed]);
+
+  useEffect(() => {
+    setVexPositioningTimeoutDraft(
+      formatSecondsInput(selectedRecordingReplayOptions.vexPositioningTimeoutS),
+    );
+    setVexPositioningXyToleranceDraft(
+      formatSecondsInput(selectedRecordingReplayOptions.vexPositioningXyToleranceM),
+    );
+    setVexPositioningHeadingToleranceDraft(
+      formatSecondsInput(selectedRecordingReplayOptions.vexPositioningHeadingToleranceDeg),
+    );
+    setVexPositioningXyTrimToleranceDraft(
+      formatSecondsInput(selectedRecordingReplayOptions.vexPositioningXyTrimToleranceM),
+    );
+    setVexPositioningHeadingTrimToleranceDraft(
+      formatSecondsInput(selectedRecordingReplayOptions.vexPositioningHeadingTrimToleranceDeg),
+    );
+  }, [
+    selectedRecordingEntry?.path,
+    selectedRecordingReplayOptions.vexPositioningTimeoutS,
+    selectedRecordingReplayOptions.vexPositioningXyToleranceM,
+    selectedRecordingReplayOptions.vexPositioningHeadingToleranceDeg,
+    selectedRecordingReplayOptions.vexPositioningXyTrimToleranceM,
+    selectedRecordingReplayOptions.vexPositioningHeadingTrimToleranceDeg,
+  ]);
 
   useEffect(() => {
     setTrimStartDraft("0");
@@ -1733,10 +1883,13 @@ export default function App() {
   const recordingHasCapturedMotion = Boolean(recordingStartedLog);
   const serviceInMotionSensitiveState = (service: ServiceSnapshot): boolean =>
     ["starting", "running", "stopping"].includes(service.state);
+  const hostCanAcceptVexGyroZero = (service: ServiceSnapshot): boolean =>
+    service.state === "running" &&
+    (service.mode === "control" || service.mode === "keyboard-control");
   const hostBlocksVexGyroZero = Boolean(
     state &&
       serviceInMotionSensitiveState(state.services.host) &&
-      state.services.host.mode !== "keyboard-control",
+      !hostCanAcceptVexGyroZero(state.services.host),
   );
   const vexGyroZeroBusy = Boolean(
     state &&
@@ -1769,6 +1922,26 @@ export default function App() {
       homeMode: replayTarget === "pi" ? selectedRecordingHomeMode : "none",
       autoVexPositioning:
         replayTarget === "pi" ? selectedRecordingReplayOptions.autoVexPositioning : false,
+      vexPositioningTimeoutS:
+        replayTarget === "pi"
+          ? effectiveVexPositioningTimeoutS
+          : DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+      vexPositioningXyToleranceM:
+        replayTarget === "pi"
+          ? effectiveVexPositioningXyToleranceM
+          : DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+      vexPositioningHeadingToleranceDeg:
+        replayTarget === "pi"
+          ? effectiveVexPositioningHeadingToleranceDeg
+          : DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      vexPositioningXyTrimToleranceM:
+        replayTarget === "pi"
+          ? effectiveVexPositioningXyTrimToleranceM
+          : DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+      vexPositioningHeadingTrimToleranceDeg:
+        replayTarget === "pi"
+          ? effectiveVexPositioningHeadingTrimToleranceDeg
+          : DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
       includeBase: effectiveReplayIncludeBase,
       speed: pinSpeed,
       holdFinalS: pinHoldFinal,
@@ -1781,6 +1954,11 @@ export default function App() {
       selectedRecording,
       selectedRecordingHomeMode,
       selectedRecordingReplayOptions.autoVexPositioning,
+      effectiveVexPositioningTimeoutS,
+      effectiveVexPositioningXyToleranceM,
+      effectiveVexPositioningHeadingToleranceDeg,
+      effectiveVexPositioningXyTrimToleranceM,
+      effectiveVexPositioningHeadingTrimToleranceDeg,
       vexReplayMode,
     ],
   );
@@ -2028,20 +2206,28 @@ export default function App() {
     url: string,
     init?: RequestInit,
   ): Promise<DashboardState | null> => {
+    const mutationId = mutationSequenceRef.current + 1;
+    mutationSequenceRef.current = mutationId;
     try {
       setPendingAction(label);
       const next = await request<DashboardState>(url, init);
-      setBackendError("");
-      setState(next);
-      if (!settingsDirty) {
-        setSettingsDraft(next.settings);
+      if (mutationSequenceRef.current === mutationId) {
+        setBackendError("");
+        setState(next);
+        if (!settingsDirty) {
+          setSettingsDraft(next.settings);
+        }
       }
       return next;
     } catch (error) {
-      flashToast(error instanceof Error ? error.message : "Request failed.");
+      if (mutationSequenceRef.current === mutationId) {
+        flashToast(error instanceof Error ? error.message : "Request failed.");
+      }
       return null;
     } finally {
-      setPendingAction(null);
+      if (mutationSequenceRef.current === mutationId) {
+        setPendingAction(null);
+      }
     }
   };
 
@@ -2549,6 +2735,74 @@ export default function App() {
     );
   };
 
+  const handleVexPositioningTimeoutChange = (value: string) => {
+    setVexPositioningTimeoutDraft(value);
+    const timeoutS = parseNumber(value);
+    if (timeoutS === null || timeoutS <= 0) {
+      return;
+    }
+
+    const clampedTimeoutS = clampVexPositioningTimeout(timeoutS);
+    if (Math.abs(clampedTimeoutS - timeoutS) > 0.000001) {
+      setVexPositioningTimeoutDraft(formatSecondsInput(clampedTimeoutS));
+    }
+    void saveSelectedRecordingReplayOptions({
+      ...selectedRecordingReplayOptions,
+      vexPositioningTimeoutS: clampedTimeoutS,
+    });
+  };
+
+  const normalizeVexPositioningTimeoutDraft = () => {
+    const timeoutS = parseNumber(vexPositioningTimeoutDraft);
+    if (timeoutS === null || timeoutS <= 0) {
+      setVexPositioningTimeoutDraft(
+        formatSecondsInput(selectedRecordingReplayOptions.vexPositioningTimeoutS),
+      );
+      return;
+    }
+    setVexPositioningTimeoutDraft(formatSecondsInput(clampVexPositioningTimeout(timeoutS)));
+  };
+
+  const handleVexPositioningToleranceChange = (
+    value: string,
+    optionsKey:
+      | "vexPositioningXyToleranceM"
+      | "vexPositioningHeadingToleranceDeg"
+      | "vexPositioningXyTrimToleranceM"
+      | "vexPositioningHeadingTrimToleranceDeg",
+    setDraft: (next: string) => void,
+    clampValue: (next: number) => number,
+  ) => {
+    setDraft(value);
+    const tolerance = parseNumber(value);
+    if (tolerance === null || tolerance <= 0) {
+      return;
+    }
+
+    const clampedTolerance = clampValue(tolerance);
+    if (Math.abs(clampedTolerance - tolerance) > 0.000001) {
+      setDraft(formatSecondsInput(clampedTolerance));
+    }
+    void saveSelectedRecordingReplayOptions({
+      ...selectedRecordingReplayOptions,
+      [optionsKey]: clampedTolerance,
+    });
+  };
+
+  const normalizeVexPositioningToleranceDraft = (
+    draft: string,
+    currentValue: number,
+    setDraft: (next: string) => void,
+    clampValue: (next: number) => number,
+  ) => {
+    const tolerance = parseNumber(draft);
+    if (tolerance === null || tolerance <= 0) {
+      setDraft(formatSecondsInput(currentValue));
+      return;
+    }
+    setDraft(formatSecondsInput(clampValue(tolerance)));
+  };
+
   const handleCreatePin = async () => {
     if (!selectedRecording) {
       flashToast("Select a recording first.");
@@ -2583,6 +2837,19 @@ export default function App() {
       homeMode: savedOptions?.homeMode ?? "none",
       speed: savedOptions?.speed ?? defaultSpeed,
       autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+      vexPositioningTimeoutS:
+        savedOptions?.vexPositioningTimeoutS ?? DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+      vexPositioningXyToleranceM:
+        savedOptions?.vexPositioningXyToleranceM ?? DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+      vexPositioningHeadingToleranceDeg:
+        savedOptions?.vexPositioningHeadingToleranceDeg ??
+        DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      vexPositioningXyTrimToleranceM:
+        savedOptions?.vexPositioningXyTrimToleranceM ??
+        DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+      vexPositioningHeadingTrimToleranceDeg:
+        savedOptions?.vexPositioningHeadingTrimToleranceDeg ??
+        DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
       includeBase: false,
       holdFinalS: state?.settings.trajectories.defaultHoldFinalS ?? 0.5,
     };
@@ -2957,6 +3224,16 @@ export default function App() {
                   onClick={() => void mutate("stop-control", "/api/robot/stop-control", { method: "POST" })}
                 >
                   Stop Control
+                </button>
+                <button
+                  disabled={pendingAction === "reset-pi-connections"}
+                  onClick={() =>
+                    void mutate("reset-pi-connections", "/api/robot/reset-pi-connections", {
+                      method: "POST",
+                    })
+                  }
+                >
+                  Reset Pi Connections
                 </button>
                 <button
                   disabled={disabled || keyboardBackupActive}
@@ -3360,7 +3637,7 @@ export default function App() {
                     {recordInputMode === "free-teach" ? "Start Hand-Guide Recording" : "Start Recording"}
                   </button>
                   <button
-                    disabled={disabled}
+                    disabled={pendingAction === "stop-recording"}
                     onClick={() => void mutate("stop-recording", "/api/recordings/stop", { method: "POST" })}
                   >
                     Stop Recording
@@ -3646,6 +3923,132 @@ export default function App() {
                       </span>
                     </label>
                     <label>
+                      VEX timeout (s)
+                      <input
+                        type="number"
+                        min={MIN_VEX_POSITIONING_TIMEOUT_S}
+                        max={MAX_VEX_POSITIONING_TIMEOUT_S}
+                        step="0.5"
+                        inputMode="decimal"
+                        value={vexPositioningTimeoutDraft}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                        onBlur={normalizeVexPositioningTimeoutDraft}
+                        onChange={(event) => handleVexPositioningTimeoutChange(event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      X/Y tolerance (m)
+                      <input
+                        type="number"
+                        min={MIN_VEX_POSITIONING_XY_TOLERANCE_M}
+                        max={MAX_VEX_POSITIONING_XY_TOLERANCE_M}
+                        step="0.01"
+                        inputMode="decimal"
+                        value={vexPositioningXyToleranceDraft}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                        onBlur={() =>
+                          normalizeVexPositioningToleranceDraft(
+                            vexPositioningXyToleranceDraft,
+                            selectedRecordingReplayOptions.vexPositioningXyToleranceM,
+                            setVexPositioningXyToleranceDraft,
+                            clampVexPositioningXyTolerance,
+                          )
+                        }
+                        onChange={(event) =>
+                          handleVexPositioningToleranceChange(
+                            event.target.value,
+                            "vexPositioningXyToleranceM",
+                            setVexPositioningXyToleranceDraft,
+                            clampVexPositioningXyTolerance,
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      Heading tolerance (deg)
+                      <input
+                        type="number"
+                        min={MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+                        max={MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+                        step="0.1"
+                        inputMode="decimal"
+                        value={vexPositioningHeadingToleranceDraft}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                        onBlur={() =>
+                          normalizeVexPositioningToleranceDraft(
+                            vexPositioningHeadingToleranceDraft,
+                            selectedRecordingReplayOptions.vexPositioningHeadingToleranceDeg,
+                            setVexPositioningHeadingToleranceDraft,
+                            clampVexPositioningHeadingTolerance,
+                          )
+                        }
+                        onChange={(event) =>
+                          handleVexPositioningToleranceChange(
+                            event.target.value,
+                            "vexPositioningHeadingToleranceDeg",
+                            setVexPositioningHeadingToleranceDraft,
+                            clampVexPositioningHeadingTolerance,
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      X/Y trim tolerance (m)
+                      <input
+                        type="number"
+                        min={MIN_VEX_POSITIONING_XY_TOLERANCE_M}
+                        max={MAX_VEX_POSITIONING_XY_TOLERANCE_M}
+                        step="0.01"
+                        inputMode="decimal"
+                        value={vexPositioningXyTrimToleranceDraft}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                        onBlur={() =>
+                          normalizeVexPositioningToleranceDraft(
+                            vexPositioningXyTrimToleranceDraft,
+                            selectedRecordingReplayOptions.vexPositioningXyTrimToleranceM,
+                            setVexPositioningXyTrimToleranceDraft,
+                            clampVexPositioningXyTolerance,
+                          )
+                        }
+                        onChange={(event) =>
+                          handleVexPositioningToleranceChange(
+                            event.target.value,
+                            "vexPositioningXyTrimToleranceM",
+                            setVexPositioningXyTrimToleranceDraft,
+                            clampVexPositioningXyTolerance,
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      Heading trim tolerance (deg)
+                      <input
+                        type="number"
+                        min={MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+                        max={MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+                        step="0.1"
+                        inputMode="decimal"
+                        value={vexPositioningHeadingTrimToleranceDraft}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                        onBlur={() =>
+                          normalizeVexPositioningToleranceDraft(
+                            vexPositioningHeadingTrimToleranceDraft,
+                            selectedRecordingReplayOptions.vexPositioningHeadingTrimToleranceDeg,
+                            setVexPositioningHeadingTrimToleranceDraft,
+                            clampVexPositioningHeadingTolerance,
+                          )
+                        }
+                        onChange={(event) =>
+                          handleVexPositioningToleranceChange(
+                            event.target.value,
+                            "vexPositioningHeadingTrimToleranceDeg",
+                            setVexPositioningHeadingTrimToleranceDraft,
+                            clampVexPositioningHeadingTolerance,
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
                       VEX replay mode
                       <select
                         value={vexReplayMode}
@@ -3671,7 +4074,7 @@ export default function App() {
                     ) : null}
                     {replayTarget === "pi" && !selectedRecordingReplayOptions.autoVexPositioning ? (
                       <p className="card-note">
-                        Auto VEX positioning is off for this recording.
+                        Auto VEX positioning is off for this recording. Its saved timeout is {formatSecondsInput(selectedRecordingReplayOptions.vexPositioningTimeoutS)}s and saved X/Y trim tolerance is {formatSecondsInput(selectedRecordingReplayOptions.vexPositioningXyTrimToleranceM)}m.
                       </p>
                     ) : null}
                     {replayTarget === "pi" && !hasArmHomePosition ? (
@@ -4087,6 +4490,9 @@ export default function App() {
                           : "Arm only"}
                         {move.target === "pi" && !move.autoVexPositioning
                           ? " • VEX positioning off"
+                          : ""}
+                        {move.target === "pi" && move.autoVexPositioning
+                          ? ` • VEX timeout ${formatSecondsInput(move.vexPositioningTimeoutS)}s • X/Y tol ${formatSecondsInput(move.vexPositioningXyToleranceM)}m • X/Y trim ${formatSecondsInput(move.vexPositioningXyTrimToleranceM)}m`
                           : ""}
                       </p>
                       <div className="button-cluster inline">

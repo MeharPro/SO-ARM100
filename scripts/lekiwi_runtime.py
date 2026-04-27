@@ -408,6 +408,7 @@ class UltrasonicArrayReader:
         self.warning_interval_s = max(float(warning_interval_s), 0.0)
         self.cached_values = dict.fromkeys(ULTRASONIC_STATE_KEYS, 0.0)
         self.last_measurement_at: dict[str, float | None] = dict.fromkeys(ULTRASONIC_STATE_KEYS, None)
+        self.last_poll_ok: dict[str, bool] = dict.fromkeys(ULTRASONIC_STATE_KEYS, False)
         self.sensor_messages = {
             sensor["key"]: "Waiting for the first valid echo."
             for sensor in ULTRASONIC_SENSOR_CONFIGS
@@ -469,9 +470,12 @@ class UltrasonicArrayReader:
             if measured is not None:
                 self.cached_values[sensor["key"]] = measured
                 self.last_measurement_at[sensor["key"]] = time.time()
+                self.last_poll_ok[sensor["key"]] = True
                 self.sensor_messages[sensor["key"]] = (
                     f"Distance streaming on GPIO {sensor['trigger_gpio']}/{sensor['echo_gpio']}."
                 )
+            else:
+                self.last_poll_ok[sensor["key"]] = False
             time.sleep(ULTRASONIC_INTER_SENSOR_DELAY_S)
 
         self.next_poll_at = time.time() + ULTRASONIC_POLL_INTERVAL_S
@@ -485,6 +489,9 @@ class UltrasonicArrayReader:
             last_measurement_at = self.last_measurement_at.get(key)
             age_s = now - last_measurement_at if last_measurement_at is not None else None
             value = self.cached_values.get(key, 0.0)
+            fresh = bool(self.last_poll_ok.get(key)) and (
+                age_s is None or age_s <= ULTRASONIC_STATUS_STALE_AFTER_S
+            )
 
             state = "missing"
             connected = False
@@ -493,6 +500,14 @@ class UltrasonicArrayReader:
                 if last_measurement_at is None:
                     state = "waiting"
                     message = self.sensor_messages.get(key, "Waiting for the first valid echo.")
+                elif not self.last_poll_ok.get(key):
+                    state = "stale"
+                    connected = True
+                    if age_s is not None:
+                        message = (
+                            f"{self.sensor_messages.get(key, 'Last echo timed out.')} "
+                            f"Last valid echo {age_s:.1f}s ago."
+                        )
                 elif age_s is not None and age_s > ULTRASONIC_STATUS_STALE_AFTER_S:
                     state = "stale"
                     connected = True
@@ -509,6 +524,7 @@ class UltrasonicArrayReader:
                 "unit": "m",
                 "updated_at": iso_timestamp_from_epoch(last_measurement_at),
                 "message": message,
+                "fresh": fresh,
             }
 
         return snapshot

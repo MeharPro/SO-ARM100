@@ -154,6 +154,13 @@ class WrongYSignVexBridge(FakeVexBridge):
         self.state["y"] += motion["y.vel"] * dt_s
 
 
+class WrongHeadingSignVexBridge(FakeVexBridge):
+    def _apply_motion(self, motion: dict[str, float], dt_s: float) -> None:
+        self.state["heading"] -= motion["theta.vel"] * dt_s
+        self.state["x"] -= motion["x.vel"] * dt_s
+        self.state["y"] -= motion["y.vel"] * dt_s
+
+
 class HeadingCrossTargetVexBridge(FakeVexBridge):
     def __init__(self, state: dict[str, float]) -> None:
         super().__init__(state)
@@ -182,6 +189,20 @@ class WideHeadingCrossTargetVexBridge(FakeVexBridge):
         super()._apply_motion(motion, dt_s)
 
 
+class NearTargetHeadingLagVexBridge(FakeVexBridge):
+    def __init__(self, state: dict[str, float]) -> None:
+        super().__init__(state)
+        self.heading_pulses = 0
+
+    def _apply_motion(self, motion: dict[str, float], dt_s: float) -> None:
+        if abs(motion["theta.vel"]) > 1e-6:
+            self.heading_pulses += 1
+            if self.heading_pulses == 1:
+                self.state["heading"] = 3.2
+                return
+        super()._apply_motion(motion, dt_s)
+
+
 class LinearCrossTargetVexBridge(FakeVexBridge):
     def __init__(self, state: dict[str, float]) -> None:
         super().__init__(state)
@@ -192,6 +213,23 @@ class LinearCrossTargetVexBridge(FakeVexBridge):
             self.x_pulses += 1
             if self.x_pulses == 1:
                 self.state["x"] = 0.8114
+                return
+        super()._apply_motion(motion, dt_s)
+
+
+class RecoverableLinearCrossTargetVexBridge(FakeVexBridge):
+    def __init__(self, state: dict[str, float]) -> None:
+        super().__init__(state)
+        self.x_pulses = 0
+
+    def _apply_motion(self, motion: dict[str, float], dt_s: float) -> None:
+        if abs(motion["x.vel"]) > 1e-6:
+            self.x_pulses += 1
+            if self.x_pulses == 1:
+                self.state["x"] = 0.94
+                return
+            if self.x_pulses == 2:
+                self.state["x"] = 1.0
                 return
         super()._apply_motion(motion, dt_s)
 
@@ -241,6 +279,52 @@ class SensorReplayTests(unittest.TestCase):
             if not axis_order or axis_order[-1] != axis:
                 axis_order.append(axis)
         return axis_order
+
+    def test_feedback_ignores_stale_or_held_ultrasonic_values(self) -> None:
+        sample = build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)
+        replay_state = SensorAwareReplayState(
+            [sample],
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+
+        feedback = replay_state.feedback_context(
+            sample["state"],  # type: ignore[arg-type]
+            live_sensor_status={
+                ULTRASONIC_X_KEY: {"state": "online", "value": 1.4, "fresh": False},
+                ULTRASONIC_Y_KEY: {"state": "stale", "value": 2.4},
+            },
+            live_gyro_status={"state": "online", "value": 0.0, "pose_epoch": 1},
+        )
+
+        self.assertNotIn("x", feedback["available_axes"])
+        self.assertNotIn("y", feedback["available_axes"])
+        self.assertIsNone(feedback["decision_x_error_m"])
+        self.assertIsNone(feedback["decision_y_error_m"])
+
+    def test_feedback_ignores_invalid_recorded_ultrasonic_zero_targets(self) -> None:
+        sample = build_sample(x_m=0.0, y_m=0.0, heading_deg=0.0, pose_epoch=1)
+        replay_state = SensorAwareReplayState(
+            [sample],
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+
+        feedback = replay_state.feedback_context(
+            sample["state"],  # type: ignore[arg-type]
+            live_sensor_status={
+                ULTRASONIC_X_KEY: {"state": "online", "value": 0.17},
+                ULTRASONIC_Y_KEY: {"state": "online", "value": 1.75},
+            },
+            live_gyro_status={"state": "online", "value": 0.0, "pose_epoch": 1},
+        )
+
+        self.assertNotIn("x", feedback["available_axes"])
+        self.assertNotIn("y", feedback["available_axes"])
+        self.assertIsNone(feedback["recorded_x_m"])
+        self.assertIsNone(feedback["recorded_y_m"])
 
     def _assert_motion_commands_are_axis_isolated(self, commands: list[tuple[str, dict[str, float]]]) -> None:
         for command_type, motion in commands:
@@ -431,6 +515,32 @@ class SensorReplayTests(unittest.TestCase):
         self.assertEqual(aligned.axis, "x")
         self.assertLess(live_state["x"], 0.9)
 
+    def test_preposition_uses_custom_linear_trim_tolerance(self) -> None:
+        samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+        live_state = {"x": 1.08, "y": 2.0, "heading": 0.0, "pose_epoch": 1}
+        observation_reader = FakeObservationReader(live_state)
+        vex_bridge = RecoverableLinearCrossTargetVexBridge(live_state)
+
+        with mock.patch.object(sensor_replay.time, "sleep", return_value=None):
+            aligned = preposition_vex_base_to_recorded_state(
+                vex_bridge,
+                observation_reader,
+                replay_state,
+                samples[0]["state"],  # type: ignore[arg-type]
+                timeout_s=SENSOR_PREPOSITION_TIMEOUT_S,
+                settle_s=0.0,
+                xy_trim_tolerance_m=0.08,
+            )
+
+        self.assertTrue(aligned)
+        self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
+
     def test_preposition_reports_command_write_failure_instead_of_no_progress(self) -> None:
         samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
         replay_state = SensorAwareReplayState(
@@ -485,6 +595,71 @@ class SensorReplayTests(unittest.TestCase):
         self.assertAlmostEqual(live_state["heading"], 0.0, delta=1.5)
         self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
         self.assertAlmostEqual(live_state["y"], 2.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
+
+    def test_preposition_flips_heading_direction_when_first_pulse_moves_wrong_way(self) -> None:
+        samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=30.0, pose_epoch=1)]
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+        live_state = {"x": 1.0, "y": 2.0, "heading": 50.0, "pose_epoch": 1}
+        observation_reader = FakeObservationReader(live_state)
+        vex_bridge = WrongHeadingSignVexBridge(live_state)
+
+        with mock.patch.object(sensor_replay.time, "sleep", return_value=None):
+            aligned = preposition_vex_base_to_recorded_state(
+                vex_bridge,
+                observation_reader,
+                replay_state,
+                samples[0]["state"],  # type: ignore[arg-type]
+                timeout_s=SENSOR_PREPOSITION_TIMEOUT_S,
+                settle_s=0.0,
+            )
+
+        self.assertTrue(aligned)
+        heading_commands = [
+            motion["theta.vel"]
+            for command_type, motion in vex_bridge.commands
+            if command_type != "hold" and abs(motion["theta.vel"]) > 1e-6
+        ]
+        self.assertGreaterEqual(len(heading_commands), 2)
+        self.assertLess(heading_commands[0], 0.0)
+        self.assertGreater(heading_commands[1], 0.0)
+        self.assertAlmostEqual(live_state["heading"], 30.0, delta=1.5)
+
+    def test_preposition_does_not_flip_direction_during_close_heading_trim(self) -> None:
+        samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+        live_state = {"x": 1.0, "y": 2.0, "heading": 2.53, "pose_epoch": 1}
+        observation_reader = FakeObservationReader(live_state)
+        vex_bridge = NearTargetHeadingLagVexBridge(live_state)
+
+        with mock.patch.object(sensor_replay.time, "sleep", return_value=None):
+            aligned = preposition_vex_base_to_recorded_state(
+                vex_bridge,
+                observation_reader,
+                replay_state,
+                samples[0]["state"],  # type: ignore[arg-type]
+                timeout_s=SENSOR_PREPOSITION_TIMEOUT_S,
+                settle_s=0.0,
+            )
+
+        self.assertTrue(aligned)
+        heading_commands = [
+            motion["theta.vel"]
+            for command_type, motion in vex_bridge.commands
+            if command_type != "hold" and abs(motion["theta.vel"]) > 1e-6
+        ]
+        self.assertGreaterEqual(len(heading_commands), 2)
+        self.assertTrue(all(command < 0.0 for command in heading_commands))
+        self.assertAlmostEqual(live_state["heading"], 0.0, delta=1.5)
 
     def test_preposition_trims_recoverable_wide_heading_cross_target(self) -> None:
         samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
@@ -774,7 +949,7 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("inertial_1.reset_heading()", source)
         self.assertIn("pose_epoch += 1", source)
         self.assertIn('"vex_pose_epoch":%d', source)
-        self.assertIn("VEX_MIXER_VERSION = 5", source)
+        self.assertIn("VEX_MIXER_VERSION = 6", source)
         self.assertIn('"vex_mixer_version":%d', source)
         self.assertIn("remote_takeover = True", source)
         self.assertIn('remote_mode = "hold"', source)
@@ -810,6 +985,14 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("forward_pct = apply_deadband(controller_1.axis3.position())", source)
         self.assertIn("strafe_pct = apply_deadband(controller_1.axis4.position())", source)
         self.assertIn("turn_pct = apply_deadband(controller_1.axis1.position())", source)
+        self.assertIn('"x.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS', source)
+        self.assertIn('"y.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS', source)
+        self.assertIn(
+            'return (\n'
+            '        clamp((motion["y.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),\n'
+            '        clamp((motion["x.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),',
+            source,
+        )
         self.assertNotIn("forward_pct = apply_deadband(controller_1.axis2.position())", source)
 
     def test_generated_vex_program_uses_default_x_drive_mixer(self) -> None:
@@ -832,6 +1015,37 @@ class SensorReplayTests(unittest.TestCase):
         self.assertEqual(sensor_replay.WHEEL_CORRECTION_SIGNS["vex_rear_left.pos"], (-1.0, 1.0))
         self.assertEqual(sensor_replay.WHEEL_CORRECTION_SIGNS["vex_front_right.pos"], (-1.0, -1.0))
         self.assertEqual(sensor_replay.WHEEL_CORRECTION_SIGNS["vex_rear_right.pos"], (1.0, -1.0))
+
+    def test_drive_wheel_percentages_treat_x_as_strafe_and_y_as_forward(self) -> None:
+        forward_pct = sensor_replay._drive_wheel_percentages(
+            {"x.vel": 0.0, "y.vel": 0.035, "theta.vel": 0.0},
+            max_linear_speed_mps=0.35,
+            max_turn_speed_dps=90.0,
+        )
+        strafe_pct = sensor_replay._drive_wheel_percentages(
+            {"x.vel": 0.035, "y.vel": 0.0, "theta.vel": 0.0},
+            max_linear_speed_mps=0.35,
+            max_turn_speed_dps=90.0,
+        )
+
+        self.assertEqual(
+            forward_pct,
+            {
+                "front_right": 10.0,
+                "front_left": 10.0,
+                "rear_right": 10.0,
+                "rear_left": 10.0,
+            },
+        )
+        self.assertEqual(
+            strafe_pct,
+            {
+                "front_right": -10.0,
+                "front_left": 10.0,
+                "rear_right": 10.0,
+                "rear_left": -10.0,
+            },
+        )
 
     def test_turn_only_command_uses_left_right_rotation_pattern(self) -> None:
         wheel_pct = sensor_replay._drive_wheel_percentages(

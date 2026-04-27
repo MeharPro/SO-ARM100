@@ -42,7 +42,7 @@ PREPOSITION_RESEND_INTERVAL_S = 0.12
 PREPOSITION_COMMAND_DT_MS = 1000
 PREPOSITION_COMMAND_TTL_MS = 100
 PREPOSITION_HEADING_COMMAND_TTL_MS = 60
-SENSOR_PREPOSITION_TIMEOUT_S = 6.5
+SENSOR_PREPOSITION_TIMEOUT_S = 8.0
 SENSOR_PREPOSITION_SETTLE_S = 0.35
 SENSOR_PREPOSITION_RESEND_INTERVAL_S = 0.10
 SENSOR_PREPOSITION_HEADING_SETTLE_S = 0.18
@@ -85,6 +85,7 @@ ULTRASONIC_FILTER_MAX_STEP_M = 0.03
 ULTRASONIC_FILTER_CHANGE_CONFIRMATIONS = 2
 RECORDED_HEADING_ZERO_TOLERANCE_DEG = 2.0
 
+# First value is the strafe/X contribution; forward/Y contributes equally to every wheel.
 WHEEL_CORRECTION_SIGNS = {
     "vex_front_right.pos": (-1.0, -1.0),
     "vex_front_left.pos": (1.0, 1.0),
@@ -144,6 +145,8 @@ def _status_value(status: dict[str, Any] | None) -> float | None:
 
 
 def _valid_ultrasonic_value(status: dict[str, Any] | None) -> float | None:
+    if isinstance(status, dict) and status.get("fresh") is False:
+        return None
     value = _status_value(status)
     if value is None:
         return None
@@ -152,10 +155,24 @@ def _valid_ultrasonic_value(status: dict[str, Any] | None) -> float | None:
     return None
 
 
-def _axis_cross_accept_tolerance(axis: str) -> float:
+def _valid_recorded_ultrasonic_value(state: dict[str, Any], key: str) -> float | None:
+    value = _state_numeric(state, key)
+    if value is None:
+        return None
+    if ULTRASONIC_MIN_VALID_M <= value <= ULTRASONIC_MAX_VALID_M:
+        return value
+    return None
+
+
+def _axis_cross_accept_tolerance(
+    axis: str,
+    *,
+    xy_tolerance_m: float = XY_TRACK_TOLERANCE_M,
+    heading_tolerance_deg: float = THETA_TRACK_TOLERANCE_DEG,
+) -> float:
     if axis == "heading":
-        return THETA_TRACK_TOLERANCE_DEG * PREPOSITION_CROSS_ACCEPT_MULTIPLIER
-    return XY_TRACK_TOLERANCE_M * PREPOSITION_CROSS_ACCEPT_MULTIPLIER
+        return float(heading_tolerance_deg) * PREPOSITION_CROSS_ACCEPT_MULTIPLIER
+    return float(xy_tolerance_m) * PREPOSITION_CROSS_ACCEPT_MULTIPLIER
 
 
 def _axis_progress_epsilon(axis: str) -> float:
@@ -216,8 +233,8 @@ def _drive_wheel_percentages(
 ) -> dict[str, float]:
     max_linear = max(float(max_linear_speed_mps), 0.001)
     max_turn = max(float(max_turn_speed_dps), 0.001)
-    forward_pct = clamp((float(motion.get("x.vel", 0.0) or 0.0) / max_linear) * 100.0, -100.0, 100.0)
-    strafe_pct = clamp((float(motion.get("y.vel", 0.0) or 0.0) / max_linear) * 100.0, -100.0, 100.0)
+    forward_pct = clamp((float(motion.get("y.vel", 0.0) or 0.0) / max_linear) * 100.0, -100.0, 100.0)
+    strafe_pct = clamp((float(motion.get("x.vel", 0.0) or 0.0) / max_linear) * 100.0, -100.0, 100.0)
     turn_pct = clamp((float(motion.get("theta.vel", 0.0) or 0.0) / max_turn) * 100.0, -100.0, 100.0)
     return {
         "front_right": round(forward_pct - turn_pct - strafe_pct, 2),
@@ -259,14 +276,19 @@ def _linear_decision_error(feedback: dict[str, Any], axis: str) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def _linear_effective_error(feedback: dict[str, Any], axis: str) -> float | None:
+def _linear_effective_error(
+    feedback: dict[str, Any],
+    axis: str,
+    *,
+    xy_tolerance_m: float = XY_TRACK_TOLERANCE_M,
+) -> float | None:
     decision_error = _linear_decision_error(feedback, axis)
     raw_error = _linear_raw_error(feedback, axis)
     if decision_error is None:
         return raw_error
     if raw_error is None:
         return decision_error
-    if abs(raw_error) <= XY_TRACK_TOLERANCE_M:
+    if abs(raw_error) <= float(xy_tolerance_m):
         return raw_error
     if decision_error * raw_error < 0:
         return raw_error
@@ -413,9 +435,9 @@ class WheelCorrectionModel:
         theta_vel = float(correction_motion.get("theta.vel", 0.0) or 0.0)
         offsets: dict[str, float] = {}
         for key in VEX_MOTOR_STATE_KEYS:
-            sign_y, sign_theta = WHEEL_CORRECTION_SIGNS[key]
+            sign_x, sign_theta = WHEEL_CORRECTION_SIGNS[key]
             wheel_deg_s = (
-                self.linear_deg_per_m * (x_vel + (sign_y * y_vel))
+                self.linear_deg_per_m * (y_vel + (sign_x * x_vel))
                 + self.turn_deg_per_deg * (sign_theta * theta_vel)
             )
             offsets[key] = wheel_deg_s * dt
@@ -500,8 +522,8 @@ def fit_wheel_correction_model(samples: list[dict[str, Any]]) -> WheelCorrection
 
         motion = _extract_motion(state, 1.0)
         for key in VEX_MOTOR_STATE_KEYS:
-            sign_y, sign_theta = WHEEL_CORRECTION_SIGNS[key]
-            a = motion["x.vel"] + (sign_y * motion["y.vel"])
+            sign_x, sign_theta = WHEEL_CORRECTION_SIGNS[key]
+            a = motion["y.vel"] + (sign_x * motion["x.vel"])
             b = sign_theta * motion["theta.vel"]
             y = (targets[key] - previous_targets[key]) / dt_s
             sum_aa += a * a
@@ -577,9 +599,13 @@ class SensorAwareReplayState:
         *,
         live_sensor_status: dict[str, dict[str, Any]],
         live_gyro_status: dict[str, Any],
+        xy_tolerance_m: float = XY_TRACK_TOLERANCE_M,
+        heading_tolerance_deg: float = THETA_TRACK_TOLERANCE_DEG,
     ) -> dict[str, Any]:
-        recorded_x_m = _state_numeric(state, ULTRASONIC_X_KEY)
-        recorded_y_m = _state_numeric(state, ULTRASONIC_Y_KEY)
+        xy_tolerance = max(float(xy_tolerance_m), 0.0)
+        heading_tolerance = max(float(heading_tolerance_deg), 0.0)
+        recorded_x_m = _valid_recorded_ultrasonic_value(state, ULTRASONIC_X_KEY)
+        recorded_y_m = _valid_recorded_ultrasonic_value(state, ULTRASONIC_Y_KEY)
         recorded_heading_deg = _state_numeric(state, GYRO_ROTATION_KEY)
         recorded_pose_epoch = _state_numeric(state, VEX_POSE_EPOCH_KEY)
 
@@ -625,28 +651,28 @@ class SensorAwareReplayState:
             aligned_target_deg = align_degrees_near_reference(recorded_heading_deg, live_heading_deg)
             raw_heading_error_deg = aligned_target_deg - live_heading_deg
 
-        x_error_m = _apply_tolerance(decision_x_error_m, XY_TRACK_TOLERANCE_M)
-        y_error_m = _apply_tolerance(decision_y_error_m, XY_TRACK_TOLERANCE_M)
-        heading_error_deg = _apply_tolerance(raw_heading_error_deg, THETA_TRACK_TOLERANCE_DEG)
+        x_error_m = _apply_tolerance(decision_x_error_m, xy_tolerance)
+        y_error_m = _apply_tolerance(decision_y_error_m, xy_tolerance)
+        heading_error_deg = _apply_tolerance(raw_heading_error_deg, heading_tolerance)
 
         available_axes: list[str] = []
         aligned_axes: list[str] = []
         feedback_only = False
         if decision_x_error_m is not None:
             available_axes.append("x")
-            if abs(decision_x_error_m) <= XY_TRACK_TOLERANCE_M:
+            if abs(decision_x_error_m) <= xy_tolerance:
                 aligned_axes.append("x")
             if abs(decision_x_error_m) >= XY_RECENTER_THRESHOLD_M:
                 feedback_only = True
         if decision_y_error_m is not None:
             available_axes.append("y")
-            if abs(decision_y_error_m) <= XY_TRACK_TOLERANCE_M:
+            if abs(decision_y_error_m) <= xy_tolerance:
                 aligned_axes.append("y")
             if abs(decision_y_error_m) >= XY_RECENTER_THRESHOLD_M:
                 feedback_only = True
         if raw_heading_error_deg is not None:
             available_axes.append("heading")
-            if abs(raw_heading_error_deg) <= THETA_TRACK_TOLERANCE_DEG:
+            if abs(raw_heading_error_deg) <= heading_tolerance:
                 aligned_axes.append("heading")
             if abs(raw_heading_error_deg) >= THETA_RECENTER_THRESHOLD_DEG:
                 feedback_only = True
@@ -684,11 +710,15 @@ class SensorAwareReplayState:
         *,
         live_sensor_status: dict[str, dict[str, Any]],
         live_gyro_status: dict[str, Any],
+        xy_tolerance_m: float = XY_TRACK_TOLERANCE_M,
+        heading_tolerance_deg: float = THETA_TRACK_TOLERANCE_DEG,
     ) -> dict[str, Any]:
         return self._build_feedback_context(
             state,
             live_sensor_status=live_sensor_status,
             live_gyro_status=live_gyro_status,
+            xy_tolerance_m=xy_tolerance_m,
+            heading_tolerance_deg=heading_tolerance_deg,
         )
 
     def has_feedback(
@@ -961,9 +991,42 @@ def preposition_vex_base_to_recorded_state(
     *,
     timeout_s: float = SENSOR_PREPOSITION_TIMEOUT_S,
     settle_s: float = SENSOR_PREPOSITION_SETTLE_S,
+    xy_tolerance_m: float = XY_TRACK_TOLERANCE_M,
+    heading_tolerance_deg: float = THETA_TRACK_TOLERANCE_DEG,
+    xy_trim_tolerance_m: float = PREPOSITION_LINEAR_CROSS_TRIM_M,
+    heading_trim_tolerance_deg: float = PREPOSITION_HEADING_CROSS_TRIM_DEG,
+    sensor_status_emitter: Any | None = None,
+    sensor_status_source: str = "preposition",
     should_stop: Any | None = None,
 ) -> PrepositionResult:
+    xy_tolerance = max(float(xy_tolerance_m), 0.0)
+    heading_tolerance = max(float(heading_tolerance_deg), 0.0)
+    xy_trim_tolerance = max(float(xy_trim_tolerance_m), xy_tolerance)
+    heading_trim_tolerance = max(float(heading_trim_tolerance_deg), heading_tolerance)
+
+    def axis_cross_accept_tolerance(axis: str) -> float:
+        return _axis_cross_accept_tolerance(
+            axis,
+            xy_tolerance_m=xy_tolerance,
+            heading_tolerance_deg=heading_tolerance,
+        )
+
+    def emit_sensor_status(observation: dict[str, Any]) -> None:
+        if sensor_status_emitter is None:
+            return
+        try:
+            sensor_status_emitter.emit(
+                observation_reader,
+                observation,
+                source=sensor_status_source,
+                vex_base_bridge=vex_base_bridge,
+                force=True,
+            )
+        except Exception:
+            pass
+
     observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
+    emit_sensor_status(observation)
     distance_status = observation_reader.get_sensor_status_snapshot()
     gyro_status = vex_base_bridge.gyro_status_snapshot()
     replay_state.prepare()
@@ -971,6 +1034,8 @@ def preposition_vex_base_to_recorded_state(
         start_state,
         live_sensor_status=distance_status,
         live_gyro_status=gyro_status,
+        xy_tolerance_m=xy_tolerance,
+        heading_tolerance_deg=heading_tolerance,
     )
     heading_block_reason = _heading_reference_block_reason(feedback)
     if heading_block_reason is not None:
@@ -1027,6 +1092,51 @@ def preposition_vex_base_to_recorded_state(
     close_cross_counts: dict[str, int] = {}
     error_increase_counts: dict[str, int] = {}
     axis_motion_counts: dict[str, int] = {}
+    axis_direction_multipliers: dict[str, float] = {}
+    direction_flipped_axes: set[str] = set()
+
+    def maybe_flip_heading_direction(
+        *,
+        reason: str,
+        active_axis: str,
+        active_raw_error: float | None,
+        abs_error: float,
+    ) -> bool:
+        if active_axis != "heading":
+            return False
+        if active_axis in direction_flipped_axes:
+            return False
+        if axis_motion_counts.get(active_axis, 0) <= 0:
+            return False
+        if close_cross_counts.get(active_axis, 0) > 0:
+            return False
+        if abs_error <= heading_trim_tolerance:
+            return False
+
+        direction_flipped_axes.add(active_axis)
+        axis_direction_multipliers[active_axis] = -axis_direction_multipliers.get(active_axis, 1.0)
+        error_increase_counts[active_axis] = 0
+        close_cross_counts[active_axis] = 0
+        vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
+        print(
+            f"{SENSOR_REPLAY_LOG_PREFIX} "
+            + json.dumps(
+                {
+                    "phase": "preposition",
+                    "event": "axis-direction-flip",
+                    "reason": reason,
+                    "axis": active_axis,
+                    "current_error": round(float(active_raw_error or 0.0), 4),
+                    "current_abs_error": round(abs_error, 4),
+                    "direction_multiplier": axis_direction_multipliers[active_axis],
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        time.sleep(SENSOR_PREPOSITION_HEADING_SETTLE_S)
+        return True
+
     while deadline is None or time.time() <= deadline:
         if callable(should_stop) and should_stop():
             vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
@@ -1044,13 +1154,16 @@ def preposition_vex_base_to_recorded_state(
             )
             return _preposition_result(False, reason="user-stop", detail="Replay was stopped by the user.")
 
-        vex_base_bridge.merge_observation(observation_reader.get_observation())
+        observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
+        emit_sensor_status(observation)
         distance_status = observation_reader.get_sensor_status_snapshot()
         gyro_status = vex_base_bridge.gyro_status_snapshot()
         feedback = replay_state.feedback_context(
             start_state,
             live_sensor_status=distance_status,
             live_gyro_status=gyro_status,
+            xy_tolerance_m=xy_tolerance,
+            heading_tolerance_deg=heading_tolerance,
         )
         heading_block_reason = _heading_reference_block_reason(feedback)
         if heading_block_reason is not None:
@@ -1085,18 +1198,18 @@ def preposition_vex_base_to_recorded_state(
                 continue
             if axis == "heading":
                 raw_error = feedback["raw_heading_error_deg"]
-                tolerance = THETA_TRACK_TOLERANCE_DEG
+                tolerance = heading_tolerance
             elif axis == "x":
-                raw_error = _linear_effective_error(feedback, axis)
-                tolerance = XY_TRACK_TOLERANCE_M
+                raw_error = _linear_effective_error(feedback, axis, xy_tolerance_m=xy_tolerance)
+                tolerance = xy_tolerance
             else:
-                raw_error = _linear_effective_error(feedback, axis)
-                tolerance = XY_TRACK_TOLERANCE_M
+                raw_error = _linear_effective_error(feedback, axis, xy_tolerance_m=xy_tolerance)
+                tolerance = xy_tolerance
             if raw_error is None:
                 continue
             raw_error_float = float(raw_error)
             if axis in accepted_axes:
-                if axis != "heading" or abs(raw_error_float) <= _axis_cross_accept_tolerance(axis):
+                if axis != "heading" or abs(raw_error_float) <= axis_cross_accept_tolerance(axis):
                     continue
                 accepted_axes.discard(axis)
             if abs(raw_error_float) > tolerance:
@@ -1173,7 +1286,7 @@ def preposition_vex_base_to_recorded_state(
                 if active_axis != "heading":
                     close_cross_counts[active_axis] = close_cross_counts.get(active_axis, 0) + 1
                     vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
-                    if abs(active_raw_error) <= PREPOSITION_LINEAR_CROSS_ACCEPT_M:
+                    if abs(active_raw_error) <= xy_tolerance:
                         accepted_axes.add(active_axis)
                         best_axis_error = abs_error
                         previous_axis_error = active_raw_error
@@ -1190,7 +1303,7 @@ def preposition_vex_base_to_recorded_state(
                                     "axis": active_axis,
                                     "previous_error": round(crossed_from_error, 4),
                                     "current_error": round(active_raw_error, 4),
-                                    "acceptance_tolerance": PREPOSITION_LINEAR_CROSS_ACCEPT_M,
+                                    "acceptance_tolerance": xy_tolerance,
                                     "cross_count": close_cross_counts[active_axis],
                                 },
                                 separators=(",", ":"),
@@ -1200,11 +1313,11 @@ def preposition_vex_base_to_recorded_state(
                         time.sleep(SENSOR_PREPOSITION_LINEAR_SETTLE_S)
                         continue
 
-                    if abs(active_raw_error) <= PREPOSITION_LINEAR_CROSS_TRIM_M:
+                    if abs(active_raw_error) <= xy_trim_tolerance:
                         previous_axis_error = active_raw_error
                         best_axis_error = max(
                             min(best_axis_error or abs_error, abs_error),
-                            PREPOSITION_LINEAR_CROSS_TRIM_M,
+                            xy_trim_tolerance,
                         )
                         commands_without_progress = 0
                         error_increase_counts[active_axis] = 0
@@ -1218,8 +1331,8 @@ def preposition_vex_base_to_recorded_state(
                                     "axis": active_axis,
                                     "previous_error": round(crossed_from_error, 4),
                                     "current_error": round(active_raw_error, 4),
-                                    "acceptance_tolerance": PREPOSITION_LINEAR_CROSS_ACCEPT_M,
-                                    "trim_tolerance": PREPOSITION_LINEAR_CROSS_TRIM_M,
+                                    "acceptance_tolerance": xy_tolerance,
+                                    "trim_tolerance": xy_trim_tolerance,
                                     "cross_count": close_cross_counts[active_axis],
                                 },
                                 separators=(",", ":"),
@@ -1243,7 +1356,7 @@ def preposition_vex_base_to_recorded_state(
                                     "axis": active_axis,
                                     "previous_error": round(crossed_from_error, 4),
                                     "current_error": round(active_raw_error, 4),
-                                    "trim_tolerance": PREPOSITION_LINEAR_CROSS_TRIM_M,
+                                    "trim_tolerance": xy_trim_tolerance,
                                     "cross_count": close_cross_counts[active_axis],
                                 },
                                 separators=(",", ":"),
@@ -1264,7 +1377,7 @@ def preposition_vex_base_to_recorded_state(
                                 "axis": active_axis,
                                 "previous_error": round(crossed_from_error, 4),
                                 "current_error": round(active_raw_error, 4),
-                                "trim_tolerance": PREPOSITION_LINEAR_CROSS_TRIM_M,
+                                "trim_tolerance": xy_trim_tolerance,
                                 "cross_count": close_cross_counts[active_axis],
                             },
                             separators=(",", ":"),
@@ -1278,7 +1391,7 @@ def preposition_vex_base_to_recorded_state(
                         detail=f"{active_axis} crossed the target by {abs(active_raw_error):.4f}, beyond the trim tolerance.",
                         feedback=feedback,
                     )
-                if abs(active_raw_error) <= _axis_cross_accept_tolerance(active_axis):
+                if abs(active_raw_error) <= axis_cross_accept_tolerance(active_axis):
                     close_cross_counts[active_axis] = close_cross_counts.get(active_axis, 0) + 1
                     best_axis_error = abs_error
                     previous_axis_error = active_raw_error
@@ -1296,7 +1409,7 @@ def preposition_vex_base_to_recorded_state(
                                     "axis": active_axis,
                                     "previous_error": round(crossed_from_error, 4),
                                     "current_error": round(active_raw_error, 4),
-                                    "acceptance_tolerance": round(_axis_cross_accept_tolerance(active_axis), 4),
+                                    "acceptance_tolerance": round(axis_cross_accept_tolerance(active_axis), 4),
                                     "cross_count": close_cross_counts[active_axis],
                                 },
                                 separators=(",", ":"),
@@ -1321,7 +1434,7 @@ def preposition_vex_base_to_recorded_state(
                                 "axis": active_axis,
                                 "previous_error": round(crossed_from_error, 4),
                                 "current_error": round(active_raw_error, 4),
-                                "acceptance_tolerance": round(_axis_cross_accept_tolerance(active_axis), 4),
+                                "acceptance_tolerance": round(axis_cross_accept_tolerance(active_axis), 4),
                                 "cross_count": close_cross_counts[active_axis],
                             },
                             separators=(",", ":"),
@@ -1334,7 +1447,7 @@ def preposition_vex_base_to_recorded_state(
                         else SENSOR_PREPOSITION_LINEAR_SETTLE_S
                     )
                     continue
-                if abs(active_raw_error) <= PREPOSITION_HEADING_CROSS_TRIM_DEG:
+                if abs(active_raw_error) <= heading_trim_tolerance:
                     close_cross_counts[active_axis] = close_cross_counts.get(active_axis, 0) + 1
                     best_axis_error = min(best_axis_error or abs_error, abs_error)
                     previous_axis_error = active_raw_error
@@ -1352,8 +1465,8 @@ def preposition_vex_base_to_recorded_state(
                                     "axis": active_axis,
                                     "previous_error": round(crossed_from_error, 4),
                                     "current_error": round(active_raw_error, 4),
-                                    "acceptance_tolerance": round(_axis_cross_accept_tolerance(active_axis), 4),
-                                    "trim_tolerance": PREPOSITION_HEADING_CROSS_TRIM_DEG,
+                                    "acceptance_tolerance": round(axis_cross_accept_tolerance(active_axis), 4),
+                                    "trim_tolerance": heading_trim_tolerance,
                                     "cross_count": close_cross_counts[active_axis],
                                 },
                                 separators=(",", ":"),
@@ -1403,6 +1516,16 @@ def preposition_vex_base_to_recorded_state(
                 error_increase_counts[active_axis] = 0
             elif best_axis_error is not None and abs_error > best_axis_error + increase_limit:
                 error_increase_counts[active_axis] = error_increase_counts.get(active_axis, 0) + 1
+                if maybe_flip_heading_direction(
+                    reason="error-increased",
+                    active_axis=active_axis,
+                    active_raw_error=active_raw_error,
+                    abs_error=abs_error,
+                ):
+                    best_axis_error = abs_error
+                    previous_axis_error = active_raw_error
+                    commands_without_progress = 0
+                    continue
                 if error_increase_counts[active_axis] < PREPOSITION_ERROR_INCREASE_CONFIRMATIONS:
                     previous_axis_error = active_raw_error
                     commands_without_progress = 0
@@ -1455,6 +1578,16 @@ def preposition_vex_base_to_recorded_state(
                     feedback=feedback,
                 )
             else:
+                if maybe_flip_heading_direction(
+                    reason="no-progress",
+                    active_axis=active_axis,
+                    active_raw_error=active_raw_error,
+                    abs_error=abs_error,
+                ):
+                    best_axis_error = abs_error
+                    previous_axis_error = active_raw_error
+                    commands_without_progress = 0
+                    continue
                 previous_axis_error = active_raw_error
                 commands_without_progress += 1
                 if commands_without_progress >= PREPOSITION_MAX_AXIS_COMMANDS_WITHOUT_PROGRESS:
@@ -1537,6 +1670,7 @@ def preposition_vex_base_to_recorded_state(
                 float(active_raw_error or 0.0),
                 max_turn_speed_dps=replay_state.max_turn_speed_dps,
             )
+            command.motion["theta.vel"] *= axis_direction_multipliers.get(active_axis, 1.0)
         command.motion = _limit_motion_by_wheel_percent(
             command.motion,
             max_linear_speed_mps=replay_state.max_linear_speed_mps,

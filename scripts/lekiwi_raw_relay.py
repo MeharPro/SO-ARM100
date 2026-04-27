@@ -48,6 +48,14 @@ def align_degrees_near_reference(value: float, reference: float) -> float:
     return float(reference) + (((float(value) - float(reference)) + 180.0) % 360.0) - 180.0
 
 
+def to_grid_base_action(stock_action: dict[str, float]) -> dict[str, float]:
+    return {
+        "x.vel": float(stock_action.get("y.vel", 0.0) or 0.0),
+        "y.vel": float(stock_action.get("x.vel", 0.0) or 0.0),
+        "theta.vel": float(stock_action.get("theta.vel", 0.0) or 0.0),
+    }
+
+
 def main() -> None:
     args = parse_args()
     if not args.remote_host:
@@ -76,7 +84,7 @@ def main() -> None:
 
     print(f"Using leader port: {leader_port}")
     print(f"Relaying leader arm to tcp://{args.remote_host}:{args.port_zmq_cmd}")
-    print("Base controls: W/S forward/back, A/D strafe, Z/X rotate, R/F speed up/down")
+    print("Base controls: W/S forward/back (Y), A/D left-right (X), Z/X rotate, R/F speed up/down")
 
     loop_idx = 0
     last_wrist_roll: float | None = None
@@ -92,7 +100,7 @@ def main() -> None:
                 last_wrist_roll = wrist_value
                 leader_action[wrist_key] = wrist_value
             keyboard_keys = keyboard.get_action()
-            base_action = base_mapper._from_keyboard_to_base_action(keyboard_keys)
+            base_action = to_grid_base_action(base_mapper._from_keyboard_to_base_action(keyboard_keys))
 
             if loop_idx % args.print_every == 0:
                 print(summarize_action(leader_action))

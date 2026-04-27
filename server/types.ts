@@ -93,6 +93,11 @@ export interface RecordingReplayOptions {
   homeMode: ArmHomeMode;
   speed: number;
   autoVexPositioning: boolean;
+  vexPositioningTimeoutS: number;
+  vexPositioningXyToleranceM: number;
+  vexPositioningHeadingToleranceDeg: number;
+  vexPositioningXyTrimToleranceM: number;
+  vexPositioningHeadingTrimToleranceDeg: number;
 }
 
 export interface PolicyBenchmarkResult {
@@ -174,6 +179,11 @@ export interface PinnedMove {
   homeMode: ArmHomeMode;
   speed: number;
   autoVexPositioning: boolean;
+  vexPositioningTimeoutS: number;
+  vexPositioningXyToleranceM: number;
+  vexPositioningHeadingToleranceDeg: number;
+  vexPositioningXyTrimToleranceM: number;
+  vexPositioningHeadingTrimToleranceDeg: number;
   includeBase: boolean;
   holdFinalS: number;
   keyBinding: string;
@@ -351,6 +361,11 @@ export interface ReplayRequest {
   homeMode: ArmHomeMode;
   speed: number;
   autoVexPositioning: boolean;
+  vexPositioningTimeoutS: number;
+  vexPositioningXyToleranceM: number;
+  vexPositioningHeadingToleranceDeg: number;
+  vexPositioningXyTrimToleranceM: number;
+  vexPositioningHeadingTrimToleranceDeg: number;
   includeBase: boolean;
   holdFinalS: number;
 }

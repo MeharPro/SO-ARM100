@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { RobotController } from "./robotController.js";
+import {
+  errorMessage,
+  isTransientRemoteTransportError,
+} from "./transportErrors.js";
 import type {
   AppSettings,
   BenchmarkPolicyRequest,
@@ -87,6 +91,13 @@ app.post(
   "/api/robot/stop-control",
   asyncRoute(async (_req, res) => {
     res.json(await controller.stopControl());
+  }),
+);
+
+app.post(
+  "/api/robot/reset-pi-connections",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.resetPiConnections());
   }),
 );
 
@@ -424,7 +435,9 @@ app.use(
     res: express.Response,
     _next: express.NextFunction,
   ) => {
-    const message = error instanceof Error ? error.message : "Unknown server error.";
+    const message = isTransientRemoteTransportError(error)
+      ? "The Pi SSH connection was reset while the backend was talking to it. Reset Pi Connections, confirm the Pi is still reachable, then retry."
+      : errorMessage(error);
     res.status(500).json({ error: message });
   },
 );

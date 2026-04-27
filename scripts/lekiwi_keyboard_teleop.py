@@ -80,8 +80,8 @@ ARM_BINDINGS = (
 )
 
 BASE_BINDINGS = (
-    ("x.vel", ("i",), ("k",)),
-    ("y.vel", ("j",), ("l",)),
+    ("x.vel", ("j",), ("l",)),
+    ("y.vel", ("i",), ("k",)),
     ("theta.vel", ("u",), ("o",)),
 )
 CONTROL_KEYS = {
@@ -416,8 +416,8 @@ def build_base_action(
     turn_speed: float,
 ) -> dict[str, float]:
     return {
-        "x.vel": axis_from_keys(pressed, ("i",), ("k",)) * linear_speed,
-        "y.vel": axis_from_keys(pressed, ("j",), ("l",)) * linear_speed,
+        "x.vel": axis_from_keys(pressed, ("j",), ("l",)) * linear_speed,
+        "y.vel": axis_from_keys(pressed, ("i",), ("k",)) * linear_speed,
         "theta.vel": axis_from_keys(pressed, ("u",), ("o",)) * turn_speed,
     }
 
@@ -474,7 +474,7 @@ def print_controls() -> None:
         "R/F wrist flex (also Y/H), T/G wrist roll, Z/X gripper (also C/V and B/N).",
         flush=True,
     )
-    print("Base: I/K forward-back, J/L strafe, U/O turn. Press Esc to stop keyboard control.", flush=True)
+    print("Base: I/K forward-back (Y), J/L left-right (X), U/O turn. Press Esc to stop keyboard control.", flush=True)
 
 
 def main() -> None:

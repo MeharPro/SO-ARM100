@@ -35,8 +35,12 @@ from lekiwi_runtime import (
     stop_robot_base,
 )
 from lekiwi_sensor_replay import (
+    PREPOSITION_HEADING_CROSS_TRIM_DEG,
+    PREPOSITION_LINEAR_CROSS_TRIM_M,
     SENSOR_PREPOSITION_TIMEOUT_S,
+    THETA_TRACK_TOLERANCE_DEG,
     SensorAwareReplayState,
+    XY_TRACK_TOLERANCE_M,
     preposition_vex_base_to_recorded_state,
     recorded_state_has_sensor_reference,
 )
@@ -215,6 +219,73 @@ class UiCommandWatcher:
             print(f"[replay] error auto_vex_positioning is invalid in {self.path}: {exc}", flush=True)
             return None
 
+        try:
+            vex_positioning_timeout_s = float(
+                payload.get("vex_positioning_timeout_s", SENSOR_PREPOSITION_TIMEOUT_S)
+            )
+        except (TypeError, ValueError):
+            print(f"[replay] error vex_positioning_timeout_s is invalid in {self.path}", flush=True)
+            return None
+        if vex_positioning_timeout_s <= 0:
+            print(f"[replay] error vex_positioning_timeout_s must be greater than 0 in {self.path}", flush=True)
+            return None
+
+        try:
+            vex_positioning_xy_tolerance_m = float(
+                payload.get("vex_positioning_xy_tolerance_m", XY_TRACK_TOLERANCE_M)
+            )
+        except (TypeError, ValueError):
+            print(f"[replay] error vex_positioning_xy_tolerance_m is invalid in {self.path}", flush=True)
+            return None
+        if vex_positioning_xy_tolerance_m <= 0:
+            print(
+                f"[replay] error vex_positioning_xy_tolerance_m must be greater than 0 in {self.path}",
+                flush=True,
+            )
+            return None
+
+        try:
+            vex_positioning_heading_tolerance_deg = float(
+                payload.get("vex_positioning_heading_tolerance_deg", THETA_TRACK_TOLERANCE_DEG)
+            )
+        except (TypeError, ValueError):
+            print(f"[replay] error vex_positioning_heading_tolerance_deg is invalid in {self.path}", flush=True)
+            return None
+        if vex_positioning_heading_tolerance_deg <= 0:
+            print(
+                f"[replay] error vex_positioning_heading_tolerance_deg must be greater than 0 in {self.path}",
+                flush=True,
+            )
+            return None
+
+        try:
+            vex_positioning_xy_trim_tolerance_m = float(
+                payload.get("vex_positioning_xy_trim_tolerance_m", PREPOSITION_LINEAR_CROSS_TRIM_M)
+            )
+        except (TypeError, ValueError):
+            print(f"[replay] error vex_positioning_xy_trim_tolerance_m is invalid in {self.path}", flush=True)
+            return None
+        if vex_positioning_xy_trim_tolerance_m <= 0:
+            print(
+                f"[replay] error vex_positioning_xy_trim_tolerance_m must be greater than 0 in {self.path}",
+                flush=True,
+            )
+            return None
+
+        try:
+            vex_positioning_heading_trim_tolerance_deg = float(
+                payload.get("vex_positioning_heading_trim_tolerance_deg", PREPOSITION_HEADING_CROSS_TRIM_DEG)
+            )
+        except (TypeError, ValueError):
+            print(f"[replay] error vex_positioning_heading_trim_tolerance_deg is invalid in {self.path}", flush=True)
+            return None
+        if vex_positioning_heading_trim_tolerance_deg <= 0:
+            print(
+                f"[replay] error vex_positioning_heading_trim_tolerance_deg must be greater than 0 in {self.path}",
+                flush=True,
+            )
+            return None
+
         vex_replay_mode = payload.get("vex_replay_mode", "ecu")
         if vex_replay_mode not in {"drive", "ecu"}:
             print(
@@ -245,6 +316,11 @@ class UiCommandWatcher:
             "hold_final_s": max(0.0, hold_final_s),
             "include_base": include_base,
             "auto_vex_positioning": auto_vex_positioning,
+            "vex_positioning_timeout_s": vex_positioning_timeout_s,
+            "vex_positioning_xy_tolerance_m": vex_positioning_xy_tolerance_m,
+            "vex_positioning_heading_tolerance_deg": vex_positioning_heading_tolerance_deg,
+            "vex_positioning_xy_trim_tolerance_m": vex_positioning_xy_trim_tolerance_m,
+            "vex_positioning_heading_trim_tolerance_deg": vex_positioning_heading_trim_tolerance_deg,
             "vex_replay_mode": vex_replay_mode,
             "home_mode": home_mode,
             "home_position": home_position,
@@ -722,6 +798,19 @@ def execute_replay(
     hold_final_s = float(command["hold_final_s"])
     include_base = bool(command["include_base"])
     auto_vex_positioning = bool(command.get("auto_vex_positioning", True))
+    vex_positioning_timeout_s = float(command.get("vex_positioning_timeout_s", SENSOR_PREPOSITION_TIMEOUT_S))
+    vex_positioning_xy_tolerance_m = float(
+        command.get("vex_positioning_xy_tolerance_m", XY_TRACK_TOLERANCE_M)
+    )
+    vex_positioning_heading_tolerance_deg = float(
+        command.get("vex_positioning_heading_tolerance_deg", THETA_TRACK_TOLERANCE_DEG)
+    )
+    vex_positioning_xy_trim_tolerance_m = float(
+        command.get("vex_positioning_xy_trim_tolerance_m", PREPOSITION_LINEAR_CROSS_TRIM_M)
+    )
+    vex_positioning_heading_trim_tolerance_deg = float(
+        command.get("vex_positioning_heading_trim_tolerance_deg", PREPOSITION_HEADING_CROSS_TRIM_DEG)
+    )
     vex_replay_mode = command.get("vex_replay_mode", "ecu")
     home_mode = command.get("home_mode", "none")
     home_position = command.get("home_position")
@@ -749,6 +838,7 @@ def execute_replay(
                 "skipped",
                 reason="serial-bridge-unavailable",
                 message="VEX start positioning skipped because the serial bridge is unavailable.",
+                timeout_s=vex_positioning_timeout_s,
             )
             prepare_vex_base = False
             auto_preposition_base = False
@@ -774,6 +864,7 @@ def execute_replay(
                     "skipped",
                     reason="command-stream-unavailable",
                     message="VEX start positioning skipped because the Brain did not accept live USB commands.",
+                    timeout_s=vex_positioning_timeout_s,
                 )
                 prepare_vex_base = False
                 auto_preposition_base = False
@@ -788,6 +879,7 @@ def execute_replay(
             "skipped",
             reason="disabled",
             message="VEX start positioning is disabled for this replay.",
+            timeout_s=vex_positioning_timeout_s,
         )
 
     last_action: dict[str, float] | None = None
@@ -851,6 +943,13 @@ def execute_replay(
                 observation_reader,
                 replay_state,
                 start_state,
+                timeout_s=vex_positioning_timeout_s,
+                xy_tolerance_m=vex_positioning_xy_tolerance_m,
+                heading_tolerance_deg=vex_positioning_heading_tolerance_deg,
+                xy_trim_tolerance_m=vex_positioning_xy_trim_tolerance_m,
+                heading_trim_tolerance_deg=vex_positioning_heading_trim_tolerance_deg,
+                sensor_status_emitter=sensor_status_emitter,
+                sensor_status_source="host-replay-preposition",
                 should_stop=should_stop_preposition,
             )
             vex_base_control_used = True
@@ -875,6 +974,7 @@ def execute_replay(
                     "skipped",
                     reason=failure_reason,
                     message=failure_message,
+                    timeout_s=vex_positioning_timeout_s,
                     arm_replay="aborted",
                 )
                 return None
@@ -882,6 +982,7 @@ def execute_replay(
                 print_vex_position_status(
                     "aligned",
                     message="VEX start positioning completed before arm replay.",
+                    timeout_s=vex_positioning_timeout_s,
                 )
         replay_state.prepare()
     drain_command_socket(cmd_socket)

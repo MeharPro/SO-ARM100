@@ -1,0 +1,127 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - paragraph [ref=e6]: Robot Arm Console
+      - heading "Robert" [level=1] [ref=e7]
+      - paragraph [ref=e8]: Start control, record motion, replay saved moves, and watch the robot processes from one place.
+    - figure [ref=e9]:
+      - img "Cute yellow robot avatar" [ref=e10]
+    - generic [ref=e11]:
+      - generic [ref=e12]: "Pi: offline"
+      - generic [ref=e13]: "Leader: missing"
+      - generic [ref=e14]: "VEX: missing"
+      - generic [ref=e15]: "Host: idle"
+      - generic [ref=e16]: "Teleop: idle"
+    - navigation [ref=e17]:
+      - button "Overview" [ref=e18] [cursor=pointer]
+      - button "Recordings" [ref=e19] [cursor=pointer]
+      - button "Pinned Moves" [active] [ref=e20] [cursor=pointer]
+      - button "Training" [ref=e21] [cursor=pointer]
+      - button "Settings" [ref=e22] [cursor=pointer]
+      - button "Logs" [ref=e23] [cursor=pointer]
+    - generic [ref=e24]:
+      - strong [ref=e25]: Leader check
+      - generic [ref=e26]: Leader arm is not connected on /dev/tty.usbmodem5AE60840411. No matching USB serial ports are visible on the Mac.
+      - strong [ref=e27]: VEX check
+      - generic [ref=e28]: Pi is offline, so VEX Brain status is unavailable.
+  - generic [ref=e29]:
+    - banner [ref=e30]:
+      - generic [ref=e31]:
+        - paragraph [ref=e32]: Dashboard
+        - heading "Pinned Moves" [level=2] [ref=e526]
+      - paragraph [ref=e34]: Launch saved movements instantly from the dashboard or with keyboard shortcuts.
+    - generic [ref=e35]:
+      - strong [ref=e36]: "Last backend error:"
+      - text: "Could not start keyboard backup control: the Pi is not reachable on rawr.local or 10.42.0.1 after 5 attempts. You are probably not on rawr-hotspot. Current Wi-Fi: none."
+    - generic [ref=e527]:
+      - generic [ref=e528]:
+        - generic [ref=e529]:
+          - paragraph [ref=e530]: Pinned Moves
+          - heading "Keyboard Launch Pad" [level=2] [ref=e531]
+        - generic [ref=e532]:
+          - generic [ref=e533]: Pi hotkeys not armed
+          - generic [ref=e534]:
+            - button "Arm Hotkeys" [ref=e535] [cursor=pointer]
+            - button "Disarm" [disabled] [ref=e536]
+      - paragraph [ref=e537]: Hotkeys fire when the page is focused and you are not typing in a field. Arm hotkeys to keep the Pi ready for fast pinned-move launches.
+      - generic [ref=e538]:
+        - generic [ref=e539]:
+          - generic [ref=e540]:
+            - generic [ref=e541]:
+              - paragraph [ref=e542]: Chain-links
+              - heading "Build Chain-link" [level=3] [ref=e543]
+            - button "New Chain-link" [ref=e544] [cursor=pointer]
+          - generic [ref=e545]:
+            - generic [ref=e546]:
+              - text: Chain-link name
+              - textbox "Chain-link name" [ref=e547]:
+                - /placeholder: Pick and place sequence
+                - text: Chain-link
+            - generic [ref=e548]:
+              - text: Add recording
+              - combobox "Add recording" [disabled] [ref=e549]
+            - generic [ref=e550]:
+              - checkbox "Confirm after each recording" [checked] [ref=e551]
+              - generic [ref=e552]: Confirm after each recording
+          - generic [ref=e553]:
+            - button "Add Block" [disabled] [ref=e554]
+            - button "Save Chain-link" [disabled] [ref=e555]
+          - generic [ref=e557]: Add recordings to make a draggable Chain-link sequence.
+        - generic [ref=e558]:
+          - generic [ref=e559]:
+            - generic [ref=e560]:
+              - paragraph [ref=e561]: Saved
+              - heading "Chain-link Library" [level=3] [ref=e562]
+            - generic [ref=e563]: 0 saved
+          - generic [ref=e565]: Saved Chain-links will appear here after you build one.
+      - generic [ref=e566]:
+        - article [ref=e567]:
+          - generic [ref=e568]:
+            - generic [ref=e569]:
+              - heading "GREEN-OLD-ECU-REMOVE" [level=3] [ref=e570]
+              - paragraph [ref=e571]: /home/pi/lekiwi-trajectories/trajectory-20260426-232413.json
+            - generic [ref=e572]: no hotkey
+          - paragraph [ref=e573]: Pi follower • Speed 1 • Hold 0s • No home • Arm only
+          - generic [ref=e574]:
+            - button "Run" [ref=e575] [cursor=pointer]
+            - button "Remove" [ref=e576] [cursor=pointer]
+        - article [ref=e577]:
+          - generic [ref=e578]:
+            - generic [ref=e579]:
+              - heading "YELLOW-OLD-ECU REMOVE" [level=3] [ref=e580]
+              - paragraph [ref=e581]: /home/pi/lekiwi-trajectories/trajectory-20260426-231110.json
+            - generic [ref=e582]: no hotkey
+          - paragraph [ref=e583]: Pi follower • Speed 1 • Hold 0s • No home • Arm only
+          - generic [ref=e584]:
+            - button "Run" [ref=e585] [cursor=pointer]
+            - button "Remove" [ref=e586] [cursor=pointer]
+        - article [ref=e587]:
+          - generic [ref=e588]:
+            - generic [ref=e589]:
+              - heading "PLACE-DOWEL-BACK-1" [level=3] [ref=e590]
+              - paragraph [ref=e591]: /home/pi/lekiwi-trajectories/trajectory-20260427-021807.json
+            - generic [ref=e592]: no hotkey
+          - paragraph [ref=e593]: Pi follower • Speed 1 • Hold 0s • No home • Arm only
+          - generic [ref=e594]:
+            - button "Run" [ref=e595] [cursor=pointer]
+            - button "Remove" [ref=e596] [cursor=pointer]
+        - article [ref=e597]:
+          - generic [ref=e598]:
+            - generic [ref=e599]:
+              - heading "PICK-MID-DOWEL-2" [level=3] [ref=e600]
+              - paragraph [ref=e601]: /home/pi/lekiwi-trajectories/trajectory-20260427-031733.json
+            - generic [ref=e602]: no hotkey
+          - paragraph [ref=e603]: Pi follower • Speed 1 • Hold 0s • No home • Arm only
+          - generic [ref=e604]:
+            - button "Run" [ref=e605] [cursor=pointer]
+            - button "Remove" [ref=e606] [cursor=pointer]
+        - article [ref=e607]:
+          - generic [ref=e608]:
+            - generic [ref=e609]:
+              - heading "PICK-BACK-DOWEL-1" [level=3] [ref=e610]
+              - paragraph [ref=e611]: /home/pi/lekiwi-trajectories/trajectory-20260427-031551.json
+            - generic [ref=e612]: no hotkey
+          - paragraph [ref=e613]: Pi follower • Speed 1 • Hold 0s • No home • Arm only
+          - generic [ref=e614]:
+            - button "Run" [ref=e615] [cursor=pointer]
+            - button "Remove" [ref=e616] [cursor=pointer]

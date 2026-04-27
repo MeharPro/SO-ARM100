@@ -32,8 +32,12 @@ from lekiwi_runtime import (
     ULTRASONIC_STATE_KEYS,
 )
 from lekiwi_sensor_replay import (
+    PREPOSITION_HEADING_CROSS_TRIM_DEG,
+    PREPOSITION_LINEAR_CROSS_TRIM_M,
     SENSOR_PREPOSITION_TIMEOUT_S,
+    THETA_TRACK_TOLERANCE_DEG,
     SensorAwareReplayState,
+    XY_TRACK_TOLERANCE_M,
     preposition_vex_base_to_recorded_state,
     recorded_state_has_sensor_reference,
 )
@@ -139,6 +143,36 @@ def parse_args() -> argparse.Namespace:
         type=parse_bool,
         default=True,
         help="Automatically align the VEX base to the recording start using gyro/ultrasonic references.",
+    )
+    parser.add_argument(
+        "--vex-positioning-timeout-s",
+        type=float,
+        default=SENSOR_PREPOSITION_TIMEOUT_S,
+        help="Maximum seconds to spend aligning the VEX base before arm replay.",
+    )
+    parser.add_argument(
+        "--vex-positioning-xy-tolerance-m",
+        type=float,
+        default=XY_TRACK_TOLERANCE_M,
+        help="X/Y error in meters considered aligned during VEX start positioning.",
+    )
+    parser.add_argument(
+        "--vex-positioning-heading-tolerance-deg",
+        type=float,
+        default=THETA_TRACK_TOLERANCE_DEG,
+        help="Heading error in degrees considered aligned during VEX start positioning.",
+    )
+    parser.add_argument(
+        "--vex-positioning-xy-trim-tolerance-m",
+        type=float,
+        default=PREPOSITION_LINEAR_CROSS_TRIM_M,
+        help="Maximum X/Y overshoot in meters allowed after crossing the start-position target.",
+    )
+    parser.add_argument(
+        "--vex-positioning-heading-trim-tolerance-deg",
+        type=float,
+        default=PREPOSITION_HEADING_CROSS_TRIM_DEG,
+        help="Maximum heading overshoot in degrees allowed after crossing the start-position target.",
     )
     parser.add_argument(
         "--vex-replay-mode",
@@ -514,6 +548,16 @@ def main() -> None:
     args = parse_args()
     if args.speed <= 0:
         raise SystemExit("--speed must be greater than 0.")
+    if args.vex_positioning_timeout_s <= 0:
+        raise SystemExit("--vex-positioning-timeout-s must be greater than 0.")
+    if args.vex_positioning_xy_tolerance_m <= 0:
+        raise SystemExit("--vex-positioning-xy-tolerance-m must be greater than 0.")
+    if args.vex_positioning_heading_tolerance_deg <= 0:
+        raise SystemExit("--vex-positioning-heading-tolerance-deg must be greater than 0.")
+    if args.vex_positioning_xy_trim_tolerance_m <= 0:
+        raise SystemExit("--vex-positioning-xy-trim-tolerance-m must be greater than 0.")
+    if args.vex_positioning_heading_trim_tolerance_deg <= 0:
+        raise SystemExit("--vex-positioning-heading-trim-tolerance-deg must be greater than 0.")
     home_position = load_home_position(args)
 
     trajectory_path, trajectory_payload, samples = load_trajectory(args.input)
@@ -595,6 +639,7 @@ def main() -> None:
                     "skipped",
                     reason="command-stream-unavailable",
                     message="VEX start positioning skipped because the Brain did not accept live USB commands.",
+                    timeout_s=args.vex_positioning_timeout_s,
                 )
                 auto_preposition_base = False
             prepare_vex_base = False
@@ -611,6 +656,7 @@ def main() -> None:
             "skipped",
             reason="disabled",
             message="VEX start positioning is disabled for this replay.",
+            timeout_s=args.vex_positioning_timeout_s,
         )
     if args.recapture_ultrasonic_stream:
         print("X/Y ultrasonic stream recapture: enabled; recording will be overwritten after full replay.")
@@ -660,6 +706,13 @@ def main() -> None:
                 observation_reader,
                 replay_state,
                 start_state,
+                timeout_s=args.vex_positioning_timeout_s,
+                xy_tolerance_m=args.vex_positioning_xy_tolerance_m,
+                heading_tolerance_deg=args.vex_positioning_heading_tolerance_deg,
+                xy_trim_tolerance_m=args.vex_positioning_xy_trim_tolerance_m,
+                heading_trim_tolerance_deg=args.vex_positioning_heading_trim_tolerance_deg,
+                sensor_status_emitter=sensor_status_emitter,
+                sensor_status_source="replay-preposition",
             )
             vex_base_control_used = True
             if not prepositioned:
@@ -680,6 +733,7 @@ def main() -> None:
                     "skipped",
                     reason=failure_reason,
                     message=failure_message,
+                    timeout_s=args.vex_positioning_timeout_s,
                     arm_replay="aborted",
                 )
                 raise SystemExit(1)
@@ -687,6 +741,7 @@ def main() -> None:
                 print_vex_position_status(
                     "aligned",
                     message="VEX start positioning completed before arm replay.",
+                    timeout_s=args.vex_positioning_timeout_s,
                 )
         replay_state.prepare()
 
