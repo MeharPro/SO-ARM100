@@ -16,6 +16,7 @@ import type {
   RenameRecordingRequest,
   RecordingTimelinePoint,
   ResetRecordingUltrasonicPositionRequest,
+  SetArmHomeFromRecordingRequest,
   SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
@@ -2044,6 +2045,24 @@ export default function App() {
     }
   };
 
+  const handleSetArmHomeFromRecordingStart = async () => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const payload: SetArmHomeFromRecordingRequest = {
+      path: selectedRecordingEntry.path,
+    };
+    const next = await mutate("set-recording-start-home", "/api/recordings/home/set-from-start", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast("Recording start saved as arm home.");
+    }
+  };
+
   const updateTrainingField = <K extends keyof TrainingProfile>(
     field: K,
     value: TrainingProfile[K],
@@ -3070,6 +3089,20 @@ export default function App() {
                         Mark Gyro Zero
                       </button>
                       <button
+                        disabled={disabled || !selectedRecordingEntry}
+                        title="Save the first recorded follower pose as the arm home position."
+                        onClick={() => void handleSetArmHomeFromRecordingStart()}
+                      >
+                        Save Start as Home
+                      </button>
+                      <button
+                        disabled={disabled || !homeCommandReady || !hasArmHomePosition}
+                        title="Move the follower arm to the saved home position without moving the gripper."
+                        onClick={() => void handleGoArmHome()}
+                      >
+                        Go Home Position
+                      </button>
+                      <button
                         disabled={disabled || !selectedRecordingEntry || !recordingUltrasonicResetReady}
                         title={
                           recordingUltrasonicResetReady
@@ -3233,7 +3266,7 @@ export default function App() {
                     ) : null}
                     {replayTarget === "pi" && !hasArmHomePosition ? (
                       <p className="card-note">
-                        Set Arm Home from Overview before enabling automatic home movement for recordings.
+                        Save the selected recording start as Home, or set Home from Overview, before enabling automatic home movement for recordings.
                       </p>
                     ) : null}
                     {replayTarget === "pi" && hasArmHomePosition && selectedRecordingHomeMode !== "none" ? (

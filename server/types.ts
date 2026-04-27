@@ -220,6 +220,10 @@ export interface RecordingDetailRequest {
   path: string;
 }
 
+export interface SetArmHomeFromRecordingRequest {
+  path: string;
+}
+
 export interface DeleteRecordingRequest {
   path: string;
 }

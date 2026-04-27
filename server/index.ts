@@ -18,6 +18,7 @@ import type {
   ResetRecordingUltrasonicPositionRequest,
   ReplayRequest,
   SelectTrainingProfileRequest,
+  SetArmHomeFromRecordingRequest,
   SetRecordingReplayOptionsRequest,
   StartPolicyEvalRequest,
   StartRecordingRequest,
@@ -106,6 +107,13 @@ app.post(
   "/api/arm/home/go",
   asyncRoute(async (_req, res) => {
     res.json(await controller.goToArmHomePosition());
+  }),
+);
+
+app.post(
+  "/api/recordings/home/set-from-start",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.setArmHomePositionFromRecording(req.body as SetArmHomeFromRecordingRequest));
   }),
 );
 

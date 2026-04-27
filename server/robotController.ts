@@ -57,6 +57,7 @@ import type {
   RobotSensorStatus,
   RobotSensorsStatus,
   SelectTrainingProfileRequest,
+  SetArmHomeFromRecordingRequest,
   SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
@@ -1011,6 +1012,30 @@ export class RobotController {
 
       this.configStore.saveHomePosition(result.homePosition);
       this.logActivity("Saved current arm pose as the home position.");
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async setArmHomePositionFromRecording(
+    payload: SetArmHomeFromRecordingRequest,
+  ): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+      if (!recordingPath) {
+        throw new Error("Choose a recording before saving its start as home.");
+      }
+
+      this.logActivity(`Saving recording start pose as arm home: ${recordingPath}.`);
+      const host = await this.preparePi(settings, "save recording start as arm home");
+      const homePosition = await this.readRecordingStartHomePosition(settings, host, recordingPath);
+      if (!isFiniteHomePosition(homePosition)) {
+        throw new Error("The recording start does not contain a valid arm home pose.");
+      }
+
+      this.configStore.saveHomePosition(homePosition);
+      this.logActivity("Saved selected recording start pose as the arm home position.");
       this.lastError = null;
       return this.getState();
     });
@@ -3841,6 +3866,64 @@ PY
 
     const { stdout } = await this.execRemoteScript(script, host, settings);
     return JSON.parse(stdout) as RecordingDetail;
+  }
+
+  private async readRecordingStartHomePosition(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+  ): Promise<ArmHomePosition> {
+    const script = `
+export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
+export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+python - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+ARM_HOME_KEYS = ${JSON.stringify(ARM_HOME_JOINT_KEYS)}
+
+root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
+path = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser().resolve()
+
+if root not in path.parents:
+    raise SystemExit("Recording path is outside the trajectory directory.")
+if not path.is_file():
+    raise SystemExit(f"Recording does not exist: {path}")
+
+payload = json.loads(path.read_text())
+if not isinstance(payload, dict):
+    raise SystemExit("Recording payload is invalid.")
+
+samples = payload.get("samples")
+if not isinstance(samples, list) or not samples:
+    raise SystemExit("Recording does not contain any state samples.")
+
+first_sample = samples[0]
+if not isinstance(first_sample, dict):
+    raise SystemExit("Recording first sample is invalid.")
+
+state = first_sample.get("state")
+if not isinstance(state, dict):
+    raise SystemExit("Recording first sample does not contain state.")
+
+joints = {}
+for key in ARM_HOME_KEYS:
+    value = state.get(key)
+    if not isinstance(value, (int, float)):
+        raise SystemExit(f"Recording start is missing numeric {key}.")
+    joints[key] = float(value)
+
+print(json.dumps({
+    "capturedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "joints": joints,
+}))
+PY
+`.trim();
+
+    const { stdout } = await this.execRemoteScript(script, host, settings);
+    return JSON.parse(stdout) as ArmHomePosition;
   }
 
   private async downloadRemoteRecordingToLocal(
