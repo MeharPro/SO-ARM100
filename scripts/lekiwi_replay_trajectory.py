@@ -71,6 +71,8 @@ GRIPPER_STATE_KEY = "arm_gripper.pos"
 ARM_HOME_MOTION_KEYS = tuple(key for key in ARM_STATE_KEYS if key != GRIPPER_STATE_KEY)
 BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
 VEX_POSITION_LOG_PREFIX = "[vex-position]"
+HOME_POSITION_TOLERANCE_DEG = 3.0
+HOME_SETTLE_TIMEOUT_S = 5.0
 ULTRASONIC_X_DISTANCE_KEY = ULTRASONIC_STATE_KEYS[0]
 ULTRASONIC_Y_DISTANCE_KEY = ULTRASONIC_STATE_KEYS[1]
 ULTRASONIC_X_POSITION_KEY = "ultrasonic_sensor_1.position_m"
@@ -332,6 +334,36 @@ def extract_home_position(observation: dict[str, object]) -> dict[str, float]:
     return validate_home_position({key: observation.get(key) for key in ARM_STATE_KEYS})
 
 
+def home_motion_errors(
+    observation: dict[str, object],
+    home_position: dict[str, float],
+) -> dict[str, float]:
+    errors: dict[str, float] = {}
+    for key in ARM_HOME_MOTION_KEYS:
+        value = observation.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            errors[key] = abs(float(value) - home_position[key])
+        else:
+            errors[key] = float("inf")
+    return errors
+
+
+def max_home_motion_error(errors: dict[str, float]) -> float:
+    finite_errors = [error for error in errors.values() if math.isfinite(error)]
+    return max(finite_errors, default=float("inf"))
+
+
+def format_home_motion_errors(errors: dict[str, float]) -> str:
+    if not errors:
+        return "no joint observations"
+    return ", ".join(
+        f"{key}={error:.2f}"
+        if math.isfinite(error)
+        else f"{key}=unavailable"
+        for key, error in errors.items()
+    )
+
+
 def move_arm_to_home(
     home_position: dict[str, float],
     robot: LeKiwi,
@@ -362,6 +394,7 @@ def move_arm_to_home(
     max_steps = max(1, min(600, max_steps))
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
     last_action: dict[str, float] | None = None
+    final_errors: dict[str, float] = {}
 
     for step_index in range(1, max_steps + 1):
         progress = step_index / max_steps
@@ -397,6 +430,53 @@ def move_arm_to_home(
             return None
         precise_sleep(sleep_step_s)
 
+    settle_deadline = time.perf_counter() + HOME_SETTLE_TIMEOUT_S
+    while True:
+        final_errors = home_motion_errors(observation, home_position)
+        if max_home_motion_error(final_errors) <= HOME_POSITION_TOLERANCE_DEG:
+            break
+
+        if time.perf_counter() >= settle_deadline:
+            print(
+                "Go-home target was commanded but not reached within "
+                f"{HOME_SETTLE_TIMEOUT_S:.1f}s; errors: {format_home_motion_errors(final_errors)}",
+                flush=True,
+            )
+            return None
+
+        target_action = {key: home_position[key] for key in ARM_HOME_MOTION_KEYS}
+        target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
+        torque_watcher.poll(robot)
+        action = safety_filter.normalize(target_action)
+        sent_action = apply_robot_action(
+            robot,
+            action,
+            allow_legacy_base=allow_legacy_base,
+        )
+        safety_filter.update(sent_action)
+        servo_protection.record_command(sent_action)
+        last_action = sent_action
+        vex_base_bridge.send_hold()
+        if hasattr(power_logger, "maybe_sample"):
+            power_logger.maybe_sample()
+        observation = observation_reader.get_observation()
+        observation = vex_base_bridge.merge_observation(observation)
+        observation = servo_protection.enrich_observation(observation)
+        sensor_status_emitter.emit(
+            observation_reader,
+            observation,
+            source="replay-home",
+            vex_base_bridge=vex_base_bridge,
+        )
+        if servo_protection.observe(observation, getattr(power_logger, "last_sample", None)):
+            print("Go-home stopped because the arm safety latch tripped.", flush=True)
+            return None
+        precise_sleep(sleep_step_s)
+
+    print(
+        f"Go-home reached saved arm pose without commanding the gripper (max joint error {max_home_motion_error(final_errors):.2f}deg).",
+        flush=True,
+    )
     return last_action
 
 
