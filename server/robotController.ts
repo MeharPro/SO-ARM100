@@ -905,33 +905,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Keyboard hotkey host requested.");
-      const host = await this.preparePi(settings, "arm keyboard hotkeys");
-
-      assertHelperExists(HOST_SCRIPT);
-      assertHelperExists(POWER_SCRIPT);
-      assertHelperExists(RUNTIME_SCRIPT);
-      await this.ensureRemoteHelpers(settings, host);
-      if (settings.vex.autoRunTelemetry) {
-        await this.syncVexTelemetryProgramOnPi(settings, host, "arm keyboard hotkeys", false);
-      }
-      await this.writeRemoteTorqueLimits(settings, host);
-
-      await this.stopRobotExclusiveProcesses("Preparing keyboard-ready hotkey host.");
-      await this.clearRemoteHostCommand(settings, host);
-
-      await this.hostRunner.start(
-        this.buildHostScript(settings, true),
-        this.toConnectConfig(settings, host),
-        "keyboard-control",
-        { host, hotkeysArmed: true },
-      );
-
-      try {
-        await this.waitForHostReady(host, "Keyboard hotkey host");
-      } catch (error) {
-        await this.hostRunner.stop("Keyboard hotkey host failed to launch.");
-        throw error;
-      }
+      await this.ensureCommandReadyHost(settings, "arm keyboard hotkeys");
 
       this.lastError = null;
       return this.getState();
@@ -1028,7 +1002,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Set arm home position requested.");
-      const host = this.requireWarmHostForHomeCommand();
+      const host = await this.ensureCommandReadyHost(settings, "set arm home");
       const requestId = `capture-home-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       await this.writeRemoteHostCommand(settings, host, {
         command: "capture-home",
@@ -1081,7 +1055,7 @@ export class RobotController {
       }
 
       this.logActivity("Go home requested.");
-      const host = this.requireWarmHostForHomeCommand();
+      const host = await this.ensureCommandReadyHost(settings, "go home");
       await this.teleopRunner.stop(
         "Stopping live command stream before Go Home so the saved home pose holds.",
       );
@@ -3370,20 +3344,55 @@ PY
     );
   }
 
-  private requireWarmHostForHomeCommand(): string {
+  private async ensureCommandReadyHost(
+    settings: AppSettings,
+    actionLabel: string,
+  ): Promise<string> {
+    const existingHost = this.tryGetWarmHostForHomeCommand();
+    if (existingHost) {
+      return existingHost;
+    }
+
+    const host = await this.preparePi(settings, actionLabel);
+    assertHelperExists(HOST_SCRIPT);
+    assertHelperExists(POWER_SCRIPT);
+    assertHelperExists(RUNTIME_SCRIPT);
+    await this.ensureRemoteHelpers(settings, host);
+    if (settings.vex.autoRunTelemetry) {
+      await this.syncVexTelemetryProgramOnPi(settings, host, actionLabel, false);
+    }
+    await this.writeRemoteTorqueLimits(settings, host);
+
+    await this.stopRobotExclusiveProcesses(`Preparing command-ready Pi host for ${actionLabel}.`);
+    await this.clearRemoteHostCommand(settings, host);
+
+    await this.hostRunner.start(
+      this.buildHostScript(settings, true),
+      this.toConnectConfig(settings, host),
+      "keyboard-control",
+      { host, hotkeysArmed: true, commandReady: true },
+    );
+
+    try {
+      await this.waitForHostReady(host, "Command-ready Pi host");
+    } catch (error) {
+      await this.hostRunner.stop("Command-ready Pi host failed to launch.");
+      throw error;
+    }
+
+    return host;
+  }
+
+  private tryGetWarmHostForHomeCommand(): string | null {
     const hostSnapshot = this.hostRunner.getSnapshot();
     if (
       hostSnapshot.state !== "running" ||
       !this.hostSupportsInlineReplay(hostSnapshot.mode)
     ) {
-      throw new Error("Start Control, Start Keyboard Backup, or Arm Hotkeys before setting or using arm home.");
+      return null;
     }
 
-    const host = this.getActiveHostAddress();
-    if (!host) {
-      throw new Error("The running Pi host is active, but its address is unavailable.");
-    }
-    return host;
+    return this.getActiveHostAddress();
   }
 
   private async zeroVexGyroViaWarmHost(settings: AppSettings, host: string): Promise<void> {

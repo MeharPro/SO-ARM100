@@ -1823,7 +1823,6 @@ export default function App() {
     (state.services.host.mode === "control" || state.services.host.mode === "keyboard-control");
   const warmReplayFromControl =
     state?.services.host.state === "running" && state.services.host.mode === "control";
-  const homeCommandReady = Boolean(warmReplayReady);
   const hasArmHomePosition = Boolean(state?.homePosition);
   const recordingUltrasonicResetReady = Boolean(selectedRecordingEntry);
 
@@ -2647,13 +2646,13 @@ export default function App() {
                   Arm Hotkeys
                 </button>
                 <button
-                  disabled={disabled || !homeCommandReady}
+                  disabled={disabled}
                   onClick={() => void handleSetArmHome()}
                 >
                   Set Arm Home
                 </button>
                 <button
-                  disabled={disabled || !homeCommandReady || !hasArmHomePosition}
+                  disabled={disabled}
                   onClick={() => void handleGoArmHome()}
                 >
                   Go Home
@@ -2687,7 +2686,7 @@ export default function App() {
                   {hasArmHomePosition ? "home saved" : "home not set"}
                 </span>
                 <p className="card-note">
-                  Set Arm Home captures the current follower pose from the running Pi host. Go Home uses that saved pose without needing the VEX Brain.
+                  Set Arm Home and Go Home start a command-ready Pi host first when one is not already running. Go Home uses the saved pose without needing the VEX Brain.
                 </p>
               </div>
 
@@ -3059,7 +3058,7 @@ export default function App() {
                     Save Start as Home
                   </button>
                   <button
-                    disabled={disabled || !homeCommandReady || !hasArmHomePosition}
+                    disabled={disabled}
                     title="Move the follower arm to the saved home position without moving the gripper."
                     onClick={() => void handleGoArmHome()}
                   >
