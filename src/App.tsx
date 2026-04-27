@@ -3051,6 +3051,20 @@ export default function App() {
                   >
                     Refresh List
                   </button>
+                  <button
+                    disabled={disabled || !selectedRecordingEntry}
+                    title="Save the first recorded follower pose as the arm home position."
+                    onClick={() => void handleSetArmHomeFromRecordingStart()}
+                  >
+                    Save Start as Home
+                  </button>
+                  <button
+                    disabled={disabled || !homeCommandReady || !hasArmHomePosition}
+                    title="Move the follower arm to the saved home position without moving the gripper."
+                    onClick={() => void handleGoArmHome()}
+                  >
+                    Go Home Position
+                  </button>
                 </div>
               </div>
 
@@ -3151,20 +3165,6 @@ export default function App() {
                         onClick={() => void handleMarkRecordingGyroZero()}
                       >
                         Mark Gyro Zero
-                      </button>
-                      <button
-                        disabled={disabled || !selectedRecordingEntry}
-                        title="Save the first recorded follower pose as the arm home position."
-                        onClick={() => void handleSetArmHomeFromRecordingStart()}
-                      >
-                        Save Start as Home
-                      </button>
-                      <button
-                        disabled={disabled || !homeCommandReady || !hasArmHomePosition}
-                        title="Move the follower arm to the saved home position without moving the gripper."
-                        onClick={() => void handleGoArmHome()}
-                      >
-                        Go Home Position
                       </button>
                       <button
                         disabled={disabled || !selectedRecordingEntry || !recordingUltrasonicResetReady}

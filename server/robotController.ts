@@ -1082,6 +1082,9 @@ export class RobotController {
 
       this.logActivity("Go home requested.");
       const host = this.requireWarmHostForHomeCommand();
+      await this.teleopRunner.stop(
+        "Stopping live command stream before Go Home so the saved home pose holds.",
+      );
       const requestId = `go-home-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       await this.writeRemoteHostCommand(settings, host, {
         command: "go-home",

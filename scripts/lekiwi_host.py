@@ -1246,6 +1246,7 @@ def main() -> None:
                     )
                     if home_action is not None:
                         replay_safety_filter.update(home_action)
+                    drain_command_socket(cmd_socket)
                     pending_ui_command = None
                 else:
                     try:
