@@ -10,6 +10,7 @@ import type {
   PinnedMove,
   RecordingDetail,
   RecordingDetailRequest,
+  RecordingReplayOptions,
   ReplayTarget,
   RecordingInputMode,
   RecordingEntry,
@@ -1509,8 +1510,19 @@ export default function App() {
     () => state?.recordings.find((item) => item.path === selectedRecording),
     [selectedRecording, state?.recordings],
   );
-  const selectedRecordingHomeMode: ArmHomeMode =
-    state?.recordingReplayOptions[selectedRecording]?.homeMode ?? "none";
+  const selectedRecordingReplayOptions: RecordingReplayOptions = useMemo(() => {
+    const savedOptions = state?.recordingReplayOptions[selectedRecording];
+    return {
+      homeMode: savedOptions?.homeMode ?? "none",
+      speed: savedOptions?.speed ?? state?.settings.trajectories.defaultReplaySpeed ?? 1,
+      autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+    };
+  }, [
+    selectedRecording,
+    state?.recordingReplayOptions,
+    state?.settings.trajectories.defaultReplaySpeed,
+  ]);
+  const selectedRecordingHomeMode = selectedRecordingReplayOptions.homeMode;
   const selectedTrainingProfile = state?.training.selectedProfile ?? null;
   const selectedRecordingHasBaseReference = useMemo(
     () => recordingHasReplayableBaseReference(recordingDetail),
@@ -1526,6 +1538,10 @@ export default function App() {
   useEffect(() => {
     setReplayIncludeBasePreference(null);
   }, [selectedRecordingEntry?.path]);
+
+  useEffect(() => {
+    setPinSpeed(selectedRecordingReplayOptions.speed);
+  }, [selectedRecordingEntry?.path, selectedRecordingReplayOptions.speed]);
 
   useEffect(() => {
     setTrimStartDraft("0");
@@ -1689,6 +1705,8 @@ export default function App() {
       target: replayTarget,
       vexReplayMode,
       homeMode: replayTarget === "pi" ? selectedRecordingHomeMode : "none",
+      autoVexPositioning:
+        replayTarget === "pi" ? selectedRecordingReplayOptions.autoVexPositioning : false,
       includeBase: effectiveReplayIncludeBase,
       speed: pinSpeed,
       holdFinalS: pinHoldFinal,
@@ -1700,6 +1718,7 @@ export default function App() {
       replayTarget,
       selectedRecording,
       selectedRecordingHomeMode,
+      selectedRecordingReplayOptions.autoVexPositioning,
       vexReplayMode,
     ],
   );
@@ -2395,24 +2414,69 @@ export default function App() {
     }
   };
 
-  const handleRecordingHomeModeChange = async (homeMode: ArmHomeMode) => {
+  const saveSelectedRecordingReplayOptions = async (
+    options: RecordingReplayOptions,
+    successMessage?: string,
+  ): Promise<DashboardState | null> => {
     if (!selectedRecordingEntry) {
       flashToast("Select a recording first.");
-      return;
+      return null;
     }
 
     const payload: SetRecordingReplayOptionsRequest = {
       path: selectedRecordingEntry.path,
-      options: { homeMode },
+      options,
     };
-    const next = await mutate("recording-home-mode", "/api/recordings/replay-options", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
 
-    if (next) {
-      flashToast("Replay home option saved.");
+    try {
+      const next = await request<DashboardState>("/api/recordings/replay-options", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setBackendError("");
+      setState(next);
+      if (!settingsDirty) {
+        setSettingsDraft(next.settings);
+      }
+      if (successMessage) {
+        flashToast(successMessage);
+      }
+      return next;
+    } catch (error) {
+      flashToast(error instanceof Error ? error.message : "Request failed.");
+      return null;
     }
+  };
+
+  const handleRecordingHomeModeChange = async (homeMode: ArmHomeMode) => {
+    await saveSelectedRecordingReplayOptions(
+      {
+        ...selectedRecordingReplayOptions,
+        homeMode,
+      },
+      "Replay home option saved.",
+    );
+  };
+
+  const handleRecordingSpeedChange = (speed: number) => {
+    setPinSpeed(speed);
+    if (!Number.isFinite(speed) || speed <= 0) {
+      return;
+    }
+    void saveSelectedRecordingReplayOptions({
+      ...selectedRecordingReplayOptions,
+      speed,
+    });
+  };
+
+  const handleRecordingAutoVexPositioningChange = async (autoVexPositioning: boolean) => {
+    await saveSelectedRecordingReplayOptions(
+      {
+        ...selectedRecordingReplayOptions,
+        autoVexPositioning,
+      },
+      "Auto VEX positioning option saved.",
+    );
   };
 
   const handleCreatePin = async () => {
@@ -3201,7 +3265,8 @@ export default function App() {
                         min="0.1"
                         step="0.1"
                         value={pinSpeed}
-                        onChange={(event) => setPinSpeed(Number(event.target.value))}
+                        disabled={!selectedRecordingEntry}
+                        onChange={(event) => handleRecordingSpeedChange(Number(event.target.value))}
                       />
                     </label>
                     <label>
@@ -3233,6 +3298,17 @@ export default function App() {
                     <label className="checkbox-row">
                       <input
                         type="checkbox"
+                        checked={selectedRecordingReplayOptions.autoVexPositioning}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                        onChange={(event) =>
+                          void handleRecordingAutoVexPositioningChange(event.target.checked)
+                        }
+                      />
+                      <span>Auto VEX positioning</span>
+                    </label>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
                         checked={effectiveReplayIncludeBase}
                         disabled={replayTarget !== "pi"}
                         onChange={(event) => setReplayIncludeBasePreference(event.target.checked)}
@@ -3259,9 +3335,15 @@ export default function App() {
                     </label>
                     {replayTarget === "pi" &&
                     replayIncludeBasePreference === null &&
-                    selectedRecordingHasBaseReference ? (
+                    selectedRecordingHasBaseReference &&
+                    selectedRecordingReplayOptions.autoVexPositioning ? (
                       <p className="card-note">
-                        This recording contains VEX base motion. Leave this off unless you intentionally want to replay base movement; start-position correction still runs from the gyro and ultrasonic sensors.
+                        This recording contains VEX base motion. Leave base replay off unless you intentionally want to replay base movement; Auto VEX positioning can still use the gyro and ultrasonic sensors.
+                      </p>
+                    ) : null}
+                    {replayTarget === "pi" && !selectedRecordingReplayOptions.autoVexPositioning ? (
+                      <p className="card-note">
+                        Auto VEX positioning is off for this recording.
                       </p>
                     ) : null}
                     {replayTarget === "pi" && !hasArmHomePosition ? (
@@ -3401,7 +3483,13 @@ export default function App() {
                         <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
                       </div>
                       <p className="pin-meta">
-                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} • {move.includeBase ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})` : "Arm only"}
+                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} •{" "}
+                        {move.includeBase
+                          ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})`
+                          : "Arm only"}
+                        {move.target === "pi" && !move.autoVexPositioning
+                          ? " • VEX positioning off"
+                          : ""}
                       </p>
                       <div className="button-cluster inline">
                         <button

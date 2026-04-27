@@ -101,6 +101,44 @@ test("config store upgrades untouched legacy VEX forward axis default", () => {
   assert.equal(loaded.settings.vex.controls.turnAxis, "axis1");
 });
 
+test("config store preserves recording replay speed and auto VEX positioning", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
+  const configDir = path.join(tempRoot, ".lekiwi-ui");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      settings: defaultConfig.settings,
+      pinnedMoves: [],
+      recordingReplayOptions: {
+        "/home/pi/lekiwi-trajectories/slow.json": {
+          homeMode: "start",
+          speed: 0.4,
+          autoVexPositioning: false,
+        },
+        "/home/pi/lekiwi-trajectories/legacy.json": {
+          homeMode: "end",
+        },
+      },
+      training: defaultConfig.training,
+    }),
+  );
+
+  const store = new ConfigStore(defaultConfig, tempRoot);
+  const loaded = store.getConfig();
+
+  assert.deepEqual(loaded.recordingReplayOptions["/home/pi/lekiwi-trajectories/slow.json"], {
+    homeMode: "start",
+    speed: 0.4,
+    autoVexPositioning: false,
+  });
+  assert.deepEqual(loaded.recordingReplayOptions["/home/pi/lekiwi-trajectories/legacy.json"], {
+    homeMode: "end",
+    speed: defaultConfig.settings.trajectories.defaultReplaySpeed,
+    autoVexPositioning: true,
+  });
+});
+
 test("training profile validation rejects unsupported camera modes", () => {
   const profile = createDefaultTrainingProfile(process.cwd(), "Bad Cameras");
   profile.camerasMode = "{}";

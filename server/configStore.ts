@@ -103,74 +103,76 @@ export class ConfigStore {
         !Boolean(rawVexControls?.invertForward) &&
         !Boolean(rawVexControls?.invertStrafe) &&
         !Boolean(rawVexControls?.invertTurn);
+      const settings = this.normalizeSettings({
+        ...this.defaults.settings,
+        ...raw.settings,
+        hotspot: {
+          ...this.defaults.settings.hotspot,
+          ...raw.settings?.hotspot,
+        },
+        pi: {
+          ...this.defaults.settings.pi,
+          ...raw.settings?.pi,
+        },
+        mac: {
+          ...this.defaults.settings.mac,
+          ...raw.settings?.mac,
+        },
+        host: {
+          ...this.defaults.settings.host,
+          ...raw.settings?.host,
+        },
+        trajectories: {
+          ...this.defaults.settings.trajectories,
+          ...raw.settings?.trajectories,
+        },
+        vex: {
+          ...this.defaults.settings.vex,
+          ...raw.settings?.vex,
+          inertial: {
+            ...this.defaults.settings.vex.inertial,
+            ...raw.settings?.vex?.inertial,
+          },
+          motors: {
+            ...this.defaults.settings.vex.motors,
+            ...raw.settings?.vex?.motors,
+            frontRight: {
+              ...this.defaults.settings.vex.motors.frontRight,
+              ...raw.settings?.vex?.motors?.frontRight,
+            },
+            frontLeft: {
+              ...this.defaults.settings.vex.motors.frontLeft,
+              ...raw.settings?.vex?.motors?.frontLeft,
+            },
+            rearRight: {
+              ...this.defaults.settings.vex.motors.rearRight,
+              ...raw.settings?.vex?.motors?.rearRight,
+            },
+            rearLeft: {
+              ...this.defaults.settings.vex.motors.rearLeft,
+              ...raw.settings?.vex?.motors?.rearLeft,
+            },
+          },
+          controls: {
+            ...this.defaults.settings.vex.controls,
+            ...raw.settings?.vex?.controls,
+            ...(shouldUpgradeLegacyVexAxisDefaults ? { forwardAxis: "axis3" as const } : {}),
+          },
+          tuning: {
+            ...this.defaults.settings.vex.tuning,
+            ...raw.settings?.vex?.tuning,
+          },
+        },
+      });
       return {
-        settings: this.normalizeSettings({
-          ...this.defaults.settings,
-          ...raw.settings,
-          hotspot: {
-            ...this.defaults.settings.hotspot,
-            ...raw.settings?.hotspot,
-          },
-          pi: {
-            ...this.defaults.settings.pi,
-            ...raw.settings?.pi,
-          },
-          mac: {
-            ...this.defaults.settings.mac,
-            ...raw.settings?.mac,
-          },
-          host: {
-            ...this.defaults.settings.host,
-            ...raw.settings?.host,
-          },
-          trajectories: {
-            ...this.defaults.settings.trajectories,
-            ...raw.settings?.trajectories,
-          },
-          vex: {
-            ...this.defaults.settings.vex,
-            ...raw.settings?.vex,
-            inertial: {
-              ...this.defaults.settings.vex.inertial,
-              ...raw.settings?.vex?.inertial,
-            },
-            motors: {
-              ...this.defaults.settings.vex.motors,
-              ...raw.settings?.vex?.motors,
-              frontRight: {
-                ...this.defaults.settings.vex.motors.frontRight,
-                ...raw.settings?.vex?.motors?.frontRight,
-              },
-              frontLeft: {
-                ...this.defaults.settings.vex.motors.frontLeft,
-                ...raw.settings?.vex?.motors?.frontLeft,
-              },
-              rearRight: {
-                ...this.defaults.settings.vex.motors.rearRight,
-                ...raw.settings?.vex?.motors?.rearRight,
-              },
-              rearLeft: {
-                ...this.defaults.settings.vex.motors.rearLeft,
-                ...raw.settings?.vex?.motors?.rearLeft,
-              },
-            },
-            controls: {
-              ...this.defaults.settings.vex.controls,
-              ...raw.settings?.vex?.controls,
-              ...(shouldUpgradeLegacyVexAxisDefaults ? { forwardAxis: "axis3" as const } : {}),
-            },
-            tuning: {
-              ...this.defaults.settings.vex.tuning,
-              ...raw.settings?.vex?.tuning,
-            },
-          },
-        }),
+        settings,
         pinnedMoves: Array.isArray(raw.pinnedMoves)
           ? raw.pinnedMoves.map((move) => this.normalizePinnedMove(move))
           : this.defaults.pinnedMoves,
         homePosition: this.normalizeHomePosition(raw.homePosition),
         recordingReplayOptions: this.normalizeRecordingReplayOptions(
           raw.recordingReplayOptions,
+          settings.trajectories.defaultReplaySpeed,
         ),
         training: normalizeTrainingConfig(raw.training, this.rootDir),
       };
@@ -187,11 +189,20 @@ export class ConfigStore {
       target: raw?.target === "leader" ? "leader" : "pi",
       vexReplayMode: raw?.vexReplayMode === "drive" ? "drive" : "ecu",
       homeMode: this.normalizeHomeMode(raw?.homeMode),
-      speed: Number(raw?.speed) > 0 ? Number(raw?.speed) : 1,
+      speed: this.normalizeReplaySpeed(raw?.speed),
+      autoVexPositioning: raw?.autoVexPositioning === false ? false : true,
       includeBase: Boolean(raw?.includeBase),
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
       keyBinding: typeof raw?.keyBinding === "string" ? raw.keyBinding : "",
     };
+  }
+
+  private normalizeReplaySpeed(
+    value: unknown,
+    fallback = this.defaults.settings.trajectories.defaultReplaySpeed,
+  ): number {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
   }
 
   private normalizeHomeMode(value: unknown): RecordingReplayOptions["homeMode"] {
@@ -226,6 +237,7 @@ export class ConfigStore {
 
   private normalizeRecordingReplayOptions(
     raw: unknown,
+    defaultReplaySpeed = this.defaults.settings.trajectories.defaultReplaySpeed,
   ): Record<string, RecordingReplayOptions> {
     if (!raw || typeof raw !== "object") {
       return {};
@@ -236,10 +248,11 @@ export class ConfigStore {
       if (!path.trim() || !value || typeof value !== "object") {
         continue;
       }
+      const candidate = value as Partial<RecordingReplayOptions>;
       normalized[path] = {
-        homeMode: this.normalizeHomeMode(
-          (value as Partial<RecordingReplayOptions>).homeMode,
-        ),
+        homeMode: this.normalizeHomeMode(candidate.homeMode),
+        speed: this.normalizeReplaySpeed(candidate.speed, defaultReplaySpeed),
+        autoVexPositioning: candidate.autoVexPositioning === false ? false : true,
       };
     }
     return normalized;

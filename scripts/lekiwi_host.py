@@ -209,6 +209,12 @@ class UiCommandWatcher:
             print(f"[replay] error include_base is invalid in {self.path}: {exc}", flush=True)
             return None
 
+        try:
+            auto_vex_positioning = coerce_json_bool(payload.get("auto_vex_positioning"), default=True)
+        except argparse.ArgumentTypeError as exc:
+            print(f"[replay] error auto_vex_positioning is invalid in {self.path}: {exc}", flush=True)
+            return None
+
         vex_replay_mode = payload.get("vex_replay_mode", "ecu")
         if vex_replay_mode not in {"drive", "ecu"}:
             print(
@@ -238,6 +244,7 @@ class UiCommandWatcher:
             "speed": speed,
             "hold_final_s": max(0.0, hold_final_s),
             "include_base": include_base,
+            "auto_vex_positioning": auto_vex_positioning,
             "vex_replay_mode": vex_replay_mode,
             "home_mode": home_mode,
             "home_position": home_position,
@@ -714,17 +721,19 @@ def execute_replay(
     speed = float(command["speed"])
     hold_final_s = float(command["hold_final_s"])
     include_base = bool(command["include_base"])
+    auto_vex_positioning = bool(command.get("auto_vex_positioning", True))
     vex_replay_mode = command.get("vex_replay_mode", "ecu")
     home_mode = command.get("home_mode", "none")
     home_position = command.get("home_position")
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
     replay_to_vex_base = include_base and not allow_legacy_base
     start_state = samples[0]["state"] if samples and isinstance(samples[0], dict) else None
-    auto_preposition_base = (
+    auto_positioning_available = (
         not allow_legacy_base
         and isinstance(start_state, dict)
         and recorded_state_has_sensor_reference(start_state)
     )
+    auto_preposition_base = auto_vex_positioning and auto_positioning_available
     prepare_vex_base = replay_to_vex_base or auto_preposition_base
 
     if prepare_vex_base:
@@ -771,9 +780,15 @@ def execute_replay(
 
     print(
         "[replay] start "
-        f"path={trajectory_path} samples={len(samples)} speed={speed:.3f} include_base={str(include_base).lower()} vex_mode={vex_replay_mode} start_align={str(auto_preposition_base).lower()} home_mode={home_mode}",
+        f"path={trajectory_path} samples={len(samples)} speed={speed:.3f} include_base={str(include_base).lower()} vex_mode={vex_replay_mode} auto_vex_positioning={str(auto_vex_positioning).lower()} start_align={str(auto_preposition_base).lower()} home_mode={home_mode}",
         flush=True,
     )
+    if auto_positioning_available and not auto_vex_positioning:
+        print_vex_position_status(
+            "skipped",
+            reason="disabled",
+            message="VEX start positioning is disabled for this replay.",
+        )
 
     last_action: dict[str, float] | None = None
     replay_state = None
@@ -818,7 +833,7 @@ def execute_replay(
             speed=speed,
             control_config=vex_control_config,
         )
-        if isinstance(start_state, dict):
+        if auto_vex_positioning and isinstance(start_state, dict):
             if auto_preposition_base:
                 print("[replay] aligning VEX base to recorded ultrasonic/gyro start pose.", flush=True)
             stop_requested = False

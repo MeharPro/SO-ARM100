@@ -51,6 +51,7 @@ import type {
   RecordingDetailRequest,
   RenameRecordingRequest,
   RecordingEntry,
+  RecordingReplayOptions,
   ResetRecordingUltrasonicPositionRequest,
   ReplayRequest,
   RobotSensorState,
@@ -171,11 +172,42 @@ function normalizeReplayRequest(
     target,
     vexReplayMode: payload.vexReplayMode === "drive" ? "drive" : "ecu",
     homeMode: target === "pi" ? normalizeHomeMode(payload.homeMode) : "none",
-    speed: payload.speed > 0 ? payload.speed : defaults.defaultReplaySpeed,
+    speed: normalizeReplaySpeed(payload.speed, defaults),
+    autoVexPositioning: target === "pi" ? payload.autoVexPositioning !== false : false,
     includeBase: target === "leader" ? false : Boolean(payload.includeBase),
     holdFinalS:
       payload.holdFinalS >= 0 ? payload.holdFinalS : defaults.defaultHoldFinalS,
   };
+}
+
+function normalizeReplaySpeed(
+  value: unknown,
+  defaults: AppSettings["trajectories"],
+): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : defaults.defaultReplaySpeed;
+}
+
+function normalizeRecordingReplayOptions(
+  value: Partial<RecordingReplayOptions> | undefined,
+  defaults: AppSettings["trajectories"],
+): RecordingReplayOptions {
+  return {
+    homeMode: normalizeHomeMode(value?.homeMode),
+    speed: normalizeReplaySpeed(value?.speed, defaults),
+    autoVexPositioning: value?.autoVexPositioning === false ? false : true,
+  };
+}
+
+function recordingReplayOptionsAreDefault(
+  value: RecordingReplayOptions,
+  defaults: AppSettings["trajectories"],
+): boolean {
+  return (
+    value.homeMode === "none" &&
+    Math.abs(value.speed - defaults.defaultReplaySpeed) < 0.000001 &&
+    value.autoVexPositioning
+  );
 }
 
 function normalizeHomeMode(value: unknown): ArmHomeMode {
@@ -1469,12 +1501,15 @@ export class RobotController {
         throw new Error("Choose a recording before changing replay options.");
       }
 
-      const homeMode = normalizeHomeMode(payload.options?.homeMode);
+      const options = normalizeRecordingReplayOptions(
+        payload.options,
+        config.settings.trajectories,
+      );
       const nextOptions = { ...config.recordingReplayOptions };
-      if (homeMode === "none") {
+      if (recordingReplayOptionsAreDefault(options, config.settings.trajectories)) {
         delete nextOptions[recordingPath];
       } else {
-        nextOptions[recordingPath] = { homeMode };
+        nextOptions[recordingPath] = options;
       }
 
       this.configStore.saveRecordingReplayOptions(nextOptions);
@@ -1534,6 +1569,7 @@ export class RobotController {
         vexReplayMode: "ecu",
         homeMode: "none",
         speed: 1,
+        autoVexPositioning: false,
         includeBase: true,
         holdFinalS: 0,
       };
@@ -3172,6 +3208,9 @@ PY
     options: { recaptureUltrasonicStream?: boolean } = {},
   ): string {
     const includeBaseFlag = replay.includeBase ? " \\\n  --include-base" : "";
+    const autoVexPositioningFlag = replay.autoVexPositioning
+      ? ""
+      : " \\\n  --auto-vex-positioning false";
     const recaptureUltrasonicFlag = options.recaptureUltrasonicStream
       ? " \\\n  --recapture-ultrasonic-stream"
       : "";
@@ -3197,7 +3236,7 @@ PY
       `  --input ${shellQuote(replay.trajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
       `  --vex-replay-mode ${shellQuote(replay.vexReplayMode)} \\`,
-      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${recaptureUltrasonicFlag}${homeFlags}${saferServoModeFlag}`,
+      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${autoVexPositioningFlag}${recaptureUltrasonicFlag}${homeFlags}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -3481,6 +3520,7 @@ PY
       speed: replay.speed,
       holdFinalS: replay.holdFinalS,
       includeBase: replay.includeBase,
+      autoVexPositioning: replay.autoVexPositioning,
       vexReplayMode: replay.vexReplayMode,
       homeMode: replay.homeMode,
       homePosition,
@@ -3518,6 +3558,7 @@ PY
           speed: number;
           holdFinalS: number;
           includeBase: boolean;
+          autoVexPositioning: boolean;
           vexReplayMode: "drive" | "ecu";
           homeMode: ArmHomeMode;
           homePosition: ArmHomePosition | null;
@@ -3536,6 +3577,7 @@ PY
         speed: command.speed,
         hold_final_s: command.holdFinalS,
         include_base: command.includeBase,
+        auto_vex_positioning: command.autoVexPositioning,
         vex_replay_mode: command.vexReplayMode,
         home_mode: command.homeMode,
         home_position: isFiniteHomePosition(command.homePosition)

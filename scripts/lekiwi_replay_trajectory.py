@@ -135,6 +135,12 @@ def parse_args() -> argparse.Namespace:
         help="Replay recorded base velocities too. Default is arm-only replay with a stationary base.",
     )
     parser.add_argument(
+        "--auto-vex-positioning",
+        type=parse_bool,
+        default=True,
+        help="Automatically align the VEX base to the recording start using gyro/ultrasonic references.",
+    )
+    parser.add_argument(
         "--vex-replay-mode",
         choices=("drive", "ecu"),
         default="ecu",
@@ -556,12 +562,13 @@ def main() -> None:
     vex_base_bridge.connect()
     start_state = samples[0]["state"] if samples and isinstance(samples[0], dict) else None
     replay_to_vex_base = args.include_base and not args.enable_base
-    auto_preposition_base = (
+    auto_positioning_available = (
         not args.enable_base
         and isinstance(start_state, dict)
         and recorded_state_has_sensor_reference(start_state)
         and not args.recapture_ultrasonic_stream
     )
+    auto_preposition_base = args.auto_vex_positioning and auto_positioning_available
     vex_base_telemetry = VexBaseTelemetryManager(
         requested_vexcom_path=args.vex_vexcom_path,
         telemetry_slot=args.vex_telemetry_slot,
@@ -599,6 +606,12 @@ def main() -> None:
         print("Base replay: arm-only after recorded ultrasonic/gyro start alignment")
     else:
         print("Base replay: disabled (base held at zero velocity)")
+    if auto_positioning_available and not args.auto_vex_positioning:
+        print_vex_position_status(
+            "skipped",
+            reason="disabled",
+            message="VEX start positioning is disabled for this replay.",
+        )
     if args.recapture_ultrasonic_stream:
         print("X/Y ultrasonic stream recapture: enabled; recording will be overwritten after full replay.")
     if args.safer_servo_mode:
@@ -635,7 +648,11 @@ def main() -> None:
             speed=args.speed,
             control_config=vex_control_config,
         )
-        if isinstance(start_state, dict) and not args.recapture_ultrasonic_stream:
+        if (
+            args.auto_vex_positioning
+            and isinstance(start_state, dict)
+            and not args.recapture_ultrasonic_stream
+        ):
             if auto_preposition_base:
                 print("Aligning VEX base to recorded ultrasonic/gyro start pose.", flush=True)
             prepositioned = preposition_vex_base_to_recorded_state(

@@ -91,6 +91,8 @@ export interface ArmHomePosition {
 
 export interface RecordingReplayOptions {
   homeMode: ArmHomeMode;
+  speed: number;
+  autoVexPositioning: boolean;
 }
 
 export interface PolicyBenchmarkResult {
@@ -171,6 +173,7 @@ export interface PinnedMove {
   vexReplayMode: VexReplayMode;
   homeMode: ArmHomeMode;
   speed: number;
+  autoVexPositioning: boolean;
   includeBase: boolean;
   holdFinalS: number;
   keyBinding: string;
@@ -333,6 +336,7 @@ export interface ReplayRequest {
   vexReplayMode: VexReplayMode;
   homeMode: ArmHomeMode;
   speed: number;
+  autoVexPositioning: boolean;
   includeBase: boolean;
   holdFinalS: number;
 }
