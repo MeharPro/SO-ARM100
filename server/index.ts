@@ -8,13 +8,17 @@ import type {
   BenchmarkPolicyRequest,
   CalibrationInputRequest,
   CreatePinnedMoveRequest,
+  DeleteRecordingRequest,
+  DuplicateRecordingRequest,
   DeployTrainingCheckpointRequest,
   DeleteTrainingProfileRequest,
   MarkRecordingGyroZeroRequest,
   RecordingDetailRequest,
   RenameRecordingRequest,
+  ResetRecordingUltrasonicPositionRequest,
   ReplayRequest,
   SelectTrainingProfileRequest,
+  SetRecordingReplayOptionsRequest,
   StartPolicyEvalRequest,
   StartRecordingRequest,
   StartTrainingCaptureRequest,
@@ -88,6 +92,20 @@ app.post(
   "/api/robot/emergency-stop",
   asyncRoute(async (_req, res) => {
     res.json(await controller.emergencyStop());
+  }),
+);
+
+app.post(
+  "/api/arm/home/set",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.setArmHomePosition());
+  }),
+);
+
+app.post(
+  "/api/arm/home/go",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.goToArmHomePosition());
   }),
 );
 
@@ -201,9 +219,41 @@ app.post(
 );
 
 app.post(
+  "/api/recordings/duplicate",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.duplicateRecording(req.body as DuplicateRecordingRequest));
+  }),
+);
+
+app.delete(
+  "/api/recordings",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.deleteRecording(req.body as DeleteRecordingRequest));
+  }),
+);
+
+app.post(
   "/api/recordings/mark-gyro-zero",
   asyncRoute(async (req, res) => {
     res.json(await controller.markRecordingGyroZero(req.body as MarkRecordingGyroZeroRequest));
+  }),
+);
+
+app.post(
+  "/api/recordings/reset-ultrasonic-position",
+  asyncRoute(async (req, res) => {
+    res.json(
+      await controller.resetRecordingUltrasonicPosition(
+        req.body as ResetRecordingUltrasonicPositionRequest,
+      ),
+    );
+  }),
+);
+
+app.post(
+  "/api/recordings/replay-options",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.setRecordingReplayOptions(req.body as SetRecordingReplayOptionsRequest));
   }),
 );
 

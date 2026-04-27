@@ -82,6 +82,16 @@ export interface VexSettings {
 export type TrainingCaptureMode = "leader" | "free-teach" | "leader-as-follower";
 
 export type ReplayTarget = "pi" | "leader";
+export type ArmHomeMode = "none" | "start" | "end" | "both";
+
+export interface ArmHomePosition {
+  capturedAt: string;
+  joints: Record<string, number>;
+}
+
+export interface RecordingReplayOptions {
+  homeMode: ArmHomeMode;
+}
 
 export interface PolicyBenchmarkResult {
   targetFps: number;
@@ -159,6 +169,7 @@ export interface PinnedMove {
   trajectoryPath: string;
   target: ReplayTarget;
   vexReplayMode: VexReplayMode;
+  homeMode: ArmHomeMode;
   speed: number;
   includeBase: boolean;
   holdFinalS: number;
@@ -168,6 +179,8 @@ export interface PinnedMove {
 export interface StoredConfig {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
+  homePosition: ArmHomePosition | null;
+  recordingReplayOptions: Record<string, RecordingReplayOptions>;
   training: TrainingConfig;
 }
 
@@ -205,6 +218,15 @@ export interface RecordingEntry {
 
 export interface RecordingDetailRequest {
   path: string;
+}
+
+export interface DeleteRecordingRequest {
+  path: string;
+}
+
+export interface SetRecordingReplayOptionsRequest {
+  path: string;
+  options: RecordingReplayOptions;
 }
 
 export type RecordingInputMode = "auto" | "leader" | "keyboard" | "free-teach";
@@ -272,6 +294,8 @@ export interface RobotSensorsStatus {
 export interface DashboardState {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
+  homePosition: ArmHomePosition | null;
+  recordingReplayOptions: Record<string, RecordingReplayOptions>;
   training: TrainingConfig & {
     selectedProfile: TrainingProfile | null;
   };
@@ -303,6 +327,7 @@ export interface ReplayRequest {
   trajectoryPath: string;
   target: ReplayTarget;
   vexReplayMode: VexReplayMode;
+  homeMode: ArmHomeMode;
   speed: number;
   includeBase: boolean;
   holdFinalS: number;
@@ -318,7 +343,15 @@ export interface RenameRecordingRequest {
   label: string;
 }
 
+export interface DuplicateRecordingRequest {
+  path: string;
+}
+
 export interface MarkRecordingGyroZeroRequest {
+  path: string;
+}
+
+export interface ResetRecordingUltrasonicPositionRequest {
   path: string;
 }
 

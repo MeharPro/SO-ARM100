@@ -6,9 +6,11 @@ import argparse
 import base64
 import json
 import logging
+import math
 import runpy
 import time
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 import cv2
@@ -17,6 +19,7 @@ import zmq
 from lekiwi_runtime import (
     ArmSafetyFilter,
     COMMAND_SOURCE_KEYBOARD,
+    DEFAULT_SAFER_ARM_MAX_STEP,
     LiveRobotSensorStatusEmitter,
     ResilientObservationReader,
     ServoProtectionSupervisor,
@@ -58,8 +61,11 @@ ARM_STATE_KEYS = (
     "arm_wrist_roll.pos",
     "arm_gripper.pos",
 )
+GRIPPER_STATE_KEY = "arm_gripper.pos"
+ARM_HOME_MOTION_KEYS = tuple(key for key in ARM_STATE_KEYS if key != GRIPPER_STATE_KEY)
 BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
 VEX_POSITION_LOG_PREFIX = "[vex-position]"
+HOME_COMMAND_LOG_PREFIX = "[home-command]"
 
 if "PowerTelemetryLogger" not in globals():
     helper_path = Path(__file__).with_name("lekiwi_power.py")
@@ -149,6 +155,28 @@ class UiCommandWatcher:
                 "command": "zero-vex-gyro",
                 "request_id": request_id if isinstance(request_id, str) else "",
             }
+        if command in {"capture-home", "capture_home"}:
+            request_id = payload.get("request_id")
+            return {
+                "command": "capture-home",
+                "request_id": request_id if isinstance(request_id, str) else "",
+            }
+        if command in {"go-home", "go_home"}:
+            request_id = payload.get("request_id")
+            positions = payload.get("home_position")
+            if not isinstance(positions, dict):
+                print(f"[replay] error go-home command is missing home_position in {self.path}", flush=True)
+                return None
+            try:
+                home_position = validate_home_position(positions)
+            except Exception as exc:
+                print(f"[replay] error invalid home_position in {self.path}: {exc}", flush=True)
+                return None
+            return {
+                "command": "go-home",
+                "request_id": request_id if isinstance(request_id, str) else "",
+                "home_position": home_position,
+            }
         if command != "replay":
             print(f"[replay] error unsupported command in {self.path}: {command!r}", flush=True)
             return None
@@ -187,6 +215,21 @@ class UiCommandWatcher:
             )
             return None
 
+        home_mode = payload.get("home_mode", "none")
+        if home_mode not in {"none", "start", "end", "both"}:
+            print(
+                f"[replay] error home_mode must be 'none', 'start', 'end', or 'both' in {self.path}",
+                flush=True,
+            )
+            return None
+        home_position = None
+        if home_mode != "none":
+            try:
+                home_position = validate_home_position(payload.get("home_position"))
+            except Exception as exc:
+                print(f"[replay] error invalid home_position in {self.path}: {exc}", flush=True)
+                return None
+
         return {
             "command": "replay",
             "trajectory_path": trajectory_path.strip(),
@@ -194,6 +237,8 @@ class UiCommandWatcher:
             "hold_final_s": max(0.0, hold_final_s),
             "include_base": include_base,
             "vex_replay_mode": vex_replay_mode,
+            "home_mode": home_mode,
+            "home_position": home_position,
         }
 
     def _unlink(self) -> None:
@@ -237,6 +282,46 @@ def build_replay_action(state: dict[str, Any], include_base: bool) -> dict[str, 
     else:
         action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
     return action
+
+
+def validate_home_position(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        raise ValueError("home_position must be an object")
+    home_position: dict[str, float] = {}
+    for key in ARM_STATE_KEYS:
+        raw_value = value.get(key)
+        if not isinstance(raw_value, (int, float)):
+            raise ValueError(f"home_position is missing numeric {key}")
+        home_position[key] = float(raw_value)
+    return home_position
+
+
+def extract_home_position(observation: dict[str, Any]) -> dict[str, float]:
+    return validate_home_position({key: observation.get(key) for key in ARM_STATE_KEYS})
+
+
+def home_result_payload(
+    command: str,
+    request_id: str,
+    *,
+    success: bool,
+    status: str,
+    positions: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "command": command,
+        "request_id": request_id,
+        "success": success,
+        "status": status,
+    }
+    if positions is not None:
+        payload["positions"] = positions
+        payload["captured_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return payload
+
+
+def print_home_command_result(payload: dict[str, Any]) -> None:
+    print(f"{HOME_COMMAND_LOG_PREFIX} {json.dumps(payload, separators=(',', ':'))}", flush=True)
 
 
 def publish_observation(
@@ -296,7 +381,11 @@ def stop_replay_motion(
         if last_action is not None and allow_legacy_base:
             robot.send_action(
                 {
-                    **{key: last_action[key] for key in ARM_STATE_KEYS},
+                    **{
+                        key: value
+                        for key, value in last_action.items()
+                        if key.endswith(".pos") and isinstance(value, (int, float))
+                    },
                     **dict.fromkeys(BASE_STATE_KEYS, 0.0),
                 }
             )
@@ -315,6 +404,27 @@ def drain_command_socket(cmd_socket: Any) -> None:
         except Exception as exc:
             logger.warning("Command drain failed: %s", exc)
             return
+
+
+def send_vex_live_base_motion(
+    vex_base_bridge: VexBaseBridge,
+    action: dict[str, Any],
+    *,
+    context: str,
+) -> bool:
+    sent = vex_base_bridge.send_motion(
+        {
+            key: float(action.get(key, 0.0)) if isinstance(action.get(key, 0.0), (int, float)) else 0.0
+            for key in BASE_STATE_KEYS
+        }
+    )
+    if not sent:
+        logger.warning(
+            "VEX live base command was not accepted during %s: %s",
+            context,
+            vex_base_bridge.status_message,
+        )
+    return sent
 
 
 def print_vex_position_status(
@@ -369,6 +479,131 @@ def execute_zero_vex_gyro_command(
     print(f"[vex-command] {json.dumps(result, separators=(',', ':'))}", flush=True)
 
 
+def execute_capture_home_command(
+    command: dict[str, Any],
+    observation_reader: ResilientObservationReader,
+) -> None:
+    request_id = command.get("request_id") or ""
+    try:
+        observation = observation_reader.get_observation()
+        positions = extract_home_position(observation)
+        print_home_command_result(
+            home_result_payload(
+                "capture-home",
+                request_id,
+                success=True,
+                status="Captured current arm pose as home.",
+                positions=positions,
+            )
+        )
+    except Exception as exc:
+        print_home_command_result(
+            home_result_payload(
+                "capture-home",
+                request_id,
+                success=False,
+                status=f"Could not capture arm home position: {exc}",
+            )
+        )
+
+
+def execute_go_home_command(
+    command: dict[str, Any],
+    robot: LeKiwi,
+    observation_reader: ResilientObservationReader,
+    sensor_status_emitter: LiveRobotSensorStatusEmitter,
+    servo_protection: ServoProtectionSupervisor,
+    torque_watcher: TorqueLimitFileWatcher,
+    safety_filter: ArmSafetyFilter,
+    power_logger: Any,
+    obs_socket: Any,
+    vex_base_bridge: VexBaseBridge | None,
+    *,
+    loop_hz: float,
+    allow_legacy_base: bool,
+    should_stop: Any | None = None,
+    emit_result: bool = True,
+    source: str = "host-home",
+) -> dict[str, float] | None:
+    request_id = command.get("request_id") or ""
+    try:
+        if servo_protection.latched:
+            raise RuntimeError("arm safety latch is active; restart the Pi host after inspection")
+
+        home_position = validate_home_position(command.get("home_position"))
+        observation = observation_reader.get_observation()
+        current_position = extract_home_position(observation)
+        safety_filter.seed_from_observation(observation)
+
+        max_steps = 1
+        for key in ARM_HOME_MOTION_KEYS:
+            target = home_position[key]
+            start_value = current_position[key]
+            step_limit = DEFAULT_SAFER_ARM_MAX_STEP.get(key, 8.0)
+            if step_limit > 0:
+                max_steps = max(max_steps, math.ceil(abs(target - start_value) / step_limit))
+        max_steps = max(1, min(600, max_steps))
+        sleep_step_s = 1.0 / max(loop_hz, 1.0)
+        last_action: dict[str, float] | None = None
+
+        for step_index in range(1, max_steps + 1):
+            if should_stop is not None and should_stop():
+                raise RuntimeError("go-home stopped by user")
+            progress = step_index / max_steps
+            target_action = {
+                key: current_position[key] + (home_position[key] - current_position[key]) * progress
+                for key in ARM_HOME_MOTION_KEYS
+            }
+            target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
+            torque_watcher.poll(robot)
+            action = safety_filter.normalize(target_action)
+            sent_action = apply_robot_action(
+                robot,
+                action,
+                allow_legacy_base=allow_legacy_base,
+            )
+            safety_filter.update(sent_action)
+            servo_protection.record_command(sent_action)
+            last_action = sent_action
+            if vex_base_bridge is not None:
+                vex_base_bridge.send_hold()
+            power_logger.maybe_sample()
+            observation = publish_observation(
+                observation_reader,
+                obs_socket,
+                vex_base_bridge,
+                sensor_status_emitter,
+                servo_protection,
+                sensor_status_source=source,
+            )
+            if observation is not None and servo_protection.observe(observation, power_logger.last_sample):
+                raise RuntimeError("arm safety latch tripped during go-home")
+            precise_sleep(sleep_step_s)
+
+        if emit_result:
+            print_home_command_result(
+                home_result_payload(
+                    "go-home",
+                    request_id,
+                    success=True,
+                    status="Arm moved to saved home position without commanding the gripper.",
+                    positions=home_position,
+                )
+            )
+        return last_action
+    except Exception as exc:
+        if emit_result:
+            print_home_command_result(
+                home_result_payload(
+                    "go-home",
+                    request_id,
+                    success=False,
+                    status=f"Could not move arm home: {exc}",
+                )
+            )
+        return None
+
+
 def execute_replay(
     command: dict[str, Any],
     robot: LeKiwi,
@@ -402,6 +637,8 @@ def execute_replay(
     hold_final_s = float(command["hold_final_s"])
     include_base = bool(command["include_base"])
     vex_replay_mode = command.get("vex_replay_mode", "ecu")
+    home_mode = command.get("home_mode", "none")
+    home_position = command.get("home_position")
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
     replay_to_vex_base = include_base and not allow_legacy_base
     start_state = samples[0]["state"] if samples and isinstance(samples[0], dict) else None
@@ -456,7 +693,7 @@ def execute_replay(
 
     print(
         "[replay] start "
-        f"path={trajectory_path} samples={len(samples)} speed={speed:.3f} include_base={str(include_base).lower()} vex_mode={vex_replay_mode} start_align={str(auto_preposition_base).lower()}",
+        f"path={trajectory_path} samples={len(samples)} speed={speed:.3f} include_base={str(include_base).lower()} vex_mode={vex_replay_mode} start_align={str(auto_preposition_base).lower()} home_mode={home_mode}",
         flush=True,
     )
 
@@ -464,6 +701,38 @@ def execute_replay(
     replay_state = None
     last_base_command_at: float | None = None
     vex_base_control_used = False
+    if home_mode in {"start", "both"}:
+        print("[replay] moving arm to saved home before replay.", flush=True)
+
+        def should_stop_home_start() -> bool:
+            next_command = ui_command_watcher.poll()
+            return bool(next_command and next_command["command"] == "stop-replay")
+
+        last_action = execute_go_home_command(
+            {
+                "command": "go-home",
+                "request_id": "",
+                "home_position": home_position,
+            },
+            robot,
+            observation_reader,
+            sensor_status_emitter,
+            servo_protection,
+            torque_watcher,
+            replay_filter,
+            power_logger,
+            obs_socket,
+            vex_base_bridge,
+            loop_hz=loop_hz,
+            allow_legacy_base=allow_legacy_base,
+            should_stop=should_stop_home_start,
+            emit_result=False,
+            source="host-replay-home",
+        )
+        if last_action is None:
+            print("[replay] error failed to move arm home before replay; replay aborted.", flush=True)
+            return None
+
     if prepare_vex_base and vex_base_bridge is not None:
         replay_state = SensorAwareReplayState(
             samples,
@@ -532,6 +801,12 @@ def execute_replay(
                 if next_command["command"] == "stop-replay":
                     print(f"[replay] stopped path={trajectory_path}", flush=True)
                     return None
+                if next_command["command"] != "replay":
+                    print(
+                        f"[replay] ignored command={next_command['command']} while replaying path={trajectory_path}",
+                        flush=True,
+                    )
+                    continue
                 print(
                     f"[replay] interrupted path={trajectory_path} next={next_command['trajectory_path']}",
                     flush=True,
@@ -601,6 +876,12 @@ def execute_replay(
                     if next_command["command"] == "stop-replay":
                         print(f"[replay] stopped path={trajectory_path}", flush=True)
                         return None
+                    if next_command["command"] != "replay":
+                        print(
+                            f"[replay] ignored command={next_command['command']} while holding path={trajectory_path}",
+                            flush=True,
+                        )
+                        continue
                     print(
                         f"[replay] interrupted path={trajectory_path} next={next_command['trajectory_path']}",
                         flush=True,
@@ -621,6 +902,39 @@ def execute_replay(
                     print("[replay] stopped because the arm safety latch tripped.", flush=True)
                     return None
                 precise_sleep(min(sleep_step_s, max(hold_until - time.perf_counter(), 0.0)))
+
+        if home_mode in {"end", "both"}:
+            print("[replay] moving arm to saved home after replay.", flush=True)
+
+            def should_stop_home_end() -> bool:
+                next_command = ui_command_watcher.poll()
+                return bool(next_command and next_command["command"] == "stop-replay")
+
+            home_action = execute_go_home_command(
+                {
+                    "command": "go-home",
+                    "request_id": "",
+                    "home_position": home_position,
+                },
+                robot,
+                observation_reader,
+                sensor_status_emitter,
+                servo_protection,
+                torque_watcher,
+                replay_filter,
+                power_logger,
+                obs_socket,
+                vex_base_bridge,
+                loop_hz=loop_hz,
+                allow_legacy_base=allow_legacy_base,
+                should_stop=should_stop_home_end,
+                emit_result=False,
+                source="host-replay-home",
+            )
+            if home_action is not None:
+                last_action = home_action
+            else:
+                print("[replay] warning failed to move arm home after replay.", flush=True)
 
         print(f"[replay] complete path={trajectory_path}", flush=True)
         return None
@@ -660,6 +974,8 @@ def parse_args() -> argparse.Namespace:
     add_servo_safety_args(parser)
     add_torque_limit_args(parser)
     add_vex_base_args(parser)
+    parser.add_argument("--vex-live-base-control", type=parse_bool, default=False)
+    parser.add_argument("--require-vex-live-base-control", type=parse_bool, default=False)
     add_power_monitor_args(parser)
     return parser.parse_args()
 
@@ -732,6 +1048,37 @@ def main() -> None:
         logger=logger,
     )
 
+    print(vex_base_bridge.status_message, flush=True)
+    print(vex_base_telemetry.status_message, flush=True)
+    vex_live_base_control_ready = False
+    if args.vex_live_base_control and not args.enable_base:
+        vex_live_base_control_ready = ensure_vex_command_stream(
+            vex_base_bridge,
+            vex_base_telemetry,
+            vex_control_config,
+            program_name=args.vex_telemetry_program_name,
+            logger=logger,
+        )
+        if vex_live_base_control_ready:
+            print("VEX live base control is ready for keyboard/teleop velocity commands.", flush=True)
+        else:
+            message = (
+                "VEX live base control requested, but the Brain did not accept live USB commands. "
+                f"{vex_base_bridge.status_message} {vex_base_telemetry.status_message}"
+            )
+            if args.require_vex_live_base_control:
+                try:
+                    disconnect_robot(robot, allow_legacy_base=args.enable_base)
+                except Exception:
+                    pass
+                vex_base_bridge.close()
+                try:
+                    power_logger.close()
+                except Exception:
+                    pass
+                raise SystemExit(f"Failed: {message}")
+            print(f"Warning: {message}", flush=True)
+
     ctx = zmq.Context()
     cmd_socket = ctx.socket(zmq.PULL)
     cmd_socket.setsockopt(zmq.CONFLATE, 1)
@@ -749,8 +1096,6 @@ def main() -> None:
         f"LeKiwi host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
         flush=True,
     )
-    print(vex_base_bridge.status_message, flush=True)
-    print(vex_base_telemetry.status_message, flush=True)
     if args.safer_servo_mode:
         print(
             "Safer servo mode enabled: calibrated joint clamps, wrist continuity, and bounded arm steps are active.",
@@ -788,6 +1133,27 @@ def main() -> None:
                 elif pending_ui_command["command"] == "zero-vex-gyro":
                     execute_zero_vex_gyro_command(pending_ui_command, vex_base_bridge)
                     pending_ui_command = None
+                elif pending_ui_command["command"] == "capture-home":
+                    execute_capture_home_command(pending_ui_command, observation_reader)
+                    pending_ui_command = None
+                elif pending_ui_command["command"] == "go-home":
+                    home_action = execute_go_home_command(
+                        pending_ui_command,
+                        robot,
+                        observation_reader,
+                        sensor_status_emitter,
+                        servo_protection,
+                        torque_watcher,
+                        live_safety_filter,
+                        power_logger,
+                        obs_socket,
+                        vex_base_bridge,
+                        loop_hz=args.loop_hz,
+                        allow_legacy_base=args.enable_base,
+                    )
+                    if home_action is not None:
+                        replay_safety_filter.update(home_action)
+                    pending_ui_command = None
                 else:
                     try:
                         stop_robot_base(robot, allow_legacy_base=args.enable_base)
@@ -807,6 +1173,8 @@ def main() -> None:
                         action,
                         allow_legacy_base=args.enable_base,
                     )
+                    if vex_live_base_control_ready:
+                        send_vex_live_base_motion(vex_base_bridge, sent_action, context="live control")
                     live_safety_filter.update(sent_action)
                     replay_safety_filter.update(sent_action)
                     servo_protection.record_command(sent_action)
@@ -825,6 +1193,8 @@ def main() -> None:
                     args.watchdog_timeout_ms,
                 )
                 stop_robot_base(robot, allow_legacy_base=args.enable_base)
+                if vex_live_base_control_ready:
+                    vex_base_bridge.send_hold()
                 watchdog_active = True
 
             torque_watcher.poll(robot)
@@ -839,6 +1209,8 @@ def main() -> None:
             power_logger.maybe_sample()
             if observation is not None and servo_protection.observe(observation, power_logger.last_sample):
                 stop_robot_base(robot, allow_legacy_base=args.enable_base)
+                if vex_live_base_control_ready:
+                    vex_base_bridge.send_hold()
                 watchdog_active = True
 
             elapsed = time.time() - loop_start
@@ -846,6 +1218,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping LeKiwi host", flush=True)
     finally:
+        if vex_live_base_control_ready:
+            vex_base_bridge.send_hold()
         try:
             disconnect_robot(robot, allow_legacy_base=args.enable_base)
         except Exception as exc:

@@ -3,12 +3,23 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type {
+  ArmHomePosition,
   AppSettings,
   PinnedMove,
+  RecordingReplayOptions,
   StoredConfig,
   TrainingConfig,
 } from "./types.js";
 import { normalizeTrainingConfig } from "./trainingUtils.js";
+
+const ARM_HOME_JOINT_KEYS = [
+  "arm_shoulder_pan.pos",
+  "arm_shoulder_lift.pos",
+  "arm_elbow_flex.pos",
+  "arm_wrist_flex.pos",
+  "arm_wrist_roll.pos",
+  "arm_gripper.pos",
+] as const;
 
 export class ConfigStore {
   private readonly configDir: string;
@@ -40,6 +51,26 @@ export class ConfigStore {
     this.config = {
       ...this.config,
       pinnedMoves: structuredClone(pinnedMoves),
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  saveHomePosition(homePosition: ArmHomePosition | null): StoredConfig {
+    this.config = {
+      ...this.config,
+      homePosition: homePosition ? structuredClone(homePosition) : null,
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  saveRecordingReplayOptions(
+    recordingReplayOptions: Record<string, RecordingReplayOptions>,
+  ): StoredConfig {
+    this.config = {
+      ...this.config,
+      recordingReplayOptions: structuredClone(recordingReplayOptions),
     };
     this.persist();
     return this.getConfig();
@@ -137,6 +168,10 @@ export class ConfigStore {
         pinnedMoves: Array.isArray(raw.pinnedMoves)
           ? raw.pinnedMoves.map((move) => this.normalizePinnedMove(move))
           : this.defaults.pinnedMoves,
+        homePosition: this.normalizeHomePosition(raw.homePosition),
+        recordingReplayOptions: this.normalizeRecordingReplayOptions(
+          raw.recordingReplayOptions,
+        ),
         training: normalizeTrainingConfig(raw.training, this.rootDir),
       };
     } catch {
@@ -151,11 +186,63 @@ export class ConfigStore {
       trajectoryPath: typeof raw?.trajectoryPath === "string" ? raw.trajectoryPath : "",
       target: raw?.target === "leader" ? "leader" : "pi",
       vexReplayMode: raw?.vexReplayMode === "drive" ? "drive" : "ecu",
+      homeMode: this.normalizeHomeMode(raw?.homeMode),
       speed: Number(raw?.speed) > 0 ? Number(raw?.speed) : 1,
       includeBase: Boolean(raw?.includeBase),
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
       keyBinding: typeof raw?.keyBinding === "string" ? raw.keyBinding : "",
     };
+  }
+
+  private normalizeHomeMode(value: unknown): RecordingReplayOptions["homeMode"] {
+    return value === "start" || value === "end" || value === "both" ? value : "none";
+  }
+
+  private normalizeHomePosition(raw: unknown): ArmHomePosition | null {
+    if (!raw || typeof raw !== "object") {
+      return null;
+    }
+    const candidate = raw as Partial<ArmHomePosition>;
+    if (!candidate.joints || typeof candidate.joints !== "object") {
+      return null;
+    }
+    const joints: Record<string, number> = {};
+    for (const key of ARM_HOME_JOINT_KEYS) {
+      const value = candidate.joints[key];
+      if (!Number.isFinite(Number(value))) {
+        return null;
+      }
+      joints[key] = Number(value);
+    }
+
+    return {
+      capturedAt:
+        typeof candidate.capturedAt === "string" && candidate.capturedAt.trim()
+          ? candidate.capturedAt
+          : new Date(0).toISOString(),
+      joints,
+    };
+  }
+
+  private normalizeRecordingReplayOptions(
+    raw: unknown,
+  ): Record<string, RecordingReplayOptions> {
+    if (!raw || typeof raw !== "object") {
+      return {};
+    }
+
+    const normalized: Record<string, RecordingReplayOptions> = {};
+    for (const [path, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!path.trim() || !value || typeof value !== "object") {
+        continue;
+      }
+      normalized[path] = {
+        homeMode: this.normalizeHomeMode(
+          (value as Partial<RecordingReplayOptions>).homeMode,
+        ),
+      };
+    }
+    return normalized;
   }
 
   private normalizeSettings(settings: AppSettings): AppSettings {

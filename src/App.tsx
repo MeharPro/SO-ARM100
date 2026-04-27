@@ -1,8 +1,11 @@
 import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
+  ArmHomeMode,
   AppSettings,
   DashboardState,
+  DeleteRecordingRequest,
+  DuplicateRecordingRequest,
   MarkRecordingGyroZeroRequest,
   PinnedMove,
   RecordingDetail,
@@ -12,6 +15,8 @@ import type {
   RecordingEntry,
   RenameRecordingRequest,
   RecordingTimelinePoint,
+  ResetRecordingUltrasonicPositionRequest,
+  SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
   TrainingArtifact,
@@ -82,6 +87,12 @@ const VEX_REPLAY_MODE_OPTIONS = [
   { value: "ecu", label: "ECU mode" },
   { value: "drive", label: "Drive mode" },
 ] as const;
+const HOME_MODE_OPTIONS: Array<{ value: ArmHomeMode; label: string }> = [
+  { value: "none", label: "Do not go home" },
+  { value: "start", label: "Go home before replay" },
+  { value: "end", label: "Go home after replay" },
+  { value: "both", label: "Go home before and after" },
+];
 const SENSOR_STATUS_LOG_PREFIX = "[sensor-status]";
 const VEX_POSITION_LOG_PREFIX = "[vex-position]";
 
@@ -580,10 +591,16 @@ function labelServo(id: string | null): string {
 
 function labelSensor(key: string): string {
   if (key === "ultrasonic_sensor_1.distance_m") {
-    return "Ultrasonic 1";
+    return "X ultrasonic distance";
   }
   if (key === "ultrasonic_sensor_2.distance_m") {
-    return "Ultrasonic 2";
+    return "Y ultrasonic distance";
+  }
+  if (key === "ultrasonic_sensor_1.position_m") {
+    return "X ultrasonic position";
+  }
+  if (key === "ultrasonic_sensor_2.position_m") {
+    return "Y ultrasonic position";
   }
   return key.replace(/_/g, " ");
 }
@@ -614,6 +631,19 @@ function captureModeLabel(captureMode: TrainingProfile["captureMode"]): string {
 
 function replayTargetLabel(target: ReplayTarget): string {
   return target === "leader" ? "Leader arm" : "Pi follower";
+}
+
+function homeModeLabel(mode: ArmHomeMode): string {
+  if (mode === "start") {
+    return "Home before";
+  }
+  if (mode === "end") {
+    return "Home after";
+  }
+  if (mode === "both") {
+    return "Home before + after";
+  }
+  return "No home";
 }
 
 function vexReplayModeLabel(mode: VexReplayMode): string {
@@ -1027,7 +1057,7 @@ function RecordingPreviewPanel({
               <article key={key}>
                 <span>{labelSensor(key)}</span>
                 <strong>{formatDistanceMeters(currentSensorPoint?.values[key])}</strong>
-                <small>live sample</small>
+                <small>sensor sample</small>
               </article>
             ))}
           </div>
@@ -1357,6 +1387,7 @@ export default function App() {
   const [recordingDetail, setRecordingDetail] = useState<RecordingDetail | null>(null);
   const [recordingDetailLoading, setRecordingDetailLoading] = useState(false);
   const [recordingDetailError, setRecordingDetailError] = useState("");
+  const [recordingDetailReloadToken, setRecordingDetailReloadToken] = useState(0);
   const [replayIncludeBasePreference, setReplayIncludeBasePreference] = useState<boolean | null>(null);
   const [vexReplayMode, setVexReplayMode] = useState<VexReplayMode>("ecu");
   const [playbackTimeS, setPlaybackTimeS] = useState(0);
@@ -1412,7 +1443,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!state?.recordings.length) {
+    if (!state) {
+      return;
+    }
+    if (!state.recordings.length) {
+      if (selectedRecording) {
+        setSelectedRecording("");
+        setRecordingDetail(null);
+      }
       return;
     }
 
@@ -1420,7 +1458,7 @@ export default function App() {
     if (!selectedRecording || !stillExists) {
       setSelectedRecording(state.recordings[0].path);
     }
-  }, [selectedRecording, state?.recordings]);
+  }, [selectedRecording, state]);
 
   useEffect(() => {
     if (!state) {
@@ -1470,6 +1508,8 @@ export default function App() {
     () => state?.recordings.find((item) => item.path === selectedRecording),
     [selectedRecording, state?.recordings],
   );
+  const selectedRecordingHomeMode: ArmHomeMode =
+    state?.recordingReplayOptions[selectedRecording]?.homeMode ?? "none";
   const selectedTrainingProfile = state?.training.selectedProfile ?? null;
   const selectedRecordingHasBaseReference = useMemo(
     () => recordingHasReplayableBaseReference(recordingDetail),
@@ -1542,7 +1582,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedRecordingEntry?.modifiedAt, selectedRecordingEntry?.path]);
+  }, [recordingDetailReloadToken, selectedRecordingEntry?.modifiedAt, selectedRecordingEntry?.path]);
 
   useEffect(() => {
     if (!recordingDetail) {
@@ -1647,11 +1687,20 @@ export default function App() {
       trajectoryPath: selectedRecording,
       target: replayTarget,
       vexReplayMode,
+      homeMode: replayTarget === "pi" ? selectedRecordingHomeMode : "none",
       includeBase: effectiveReplayIncludeBase,
       speed: pinSpeed,
       holdFinalS: pinHoldFinal,
     }),
-    [effectiveReplayIncludeBase, pinHoldFinal, pinSpeed, replayTarget, selectedRecording, vexReplayMode],
+    [
+      effectiveReplayIncludeBase,
+      pinHoldFinal,
+      pinSpeed,
+      replayTarget,
+      selectedRecording,
+      selectedRecordingHomeMode,
+      vexReplayMode,
+    ],
   );
   const recordingDurationS = recordingDetail?.durationS ?? selectedRecordingEntry?.durationS ?? 0;
   const trimStartValueS = parseNumber(trimStartDraft) ?? 0;
@@ -1754,6 +1803,9 @@ export default function App() {
     (state.services.host.mode === "control" || state.services.host.mode === "keyboard-control");
   const warmReplayFromControl =
     state?.services.host.state === "running" && state.services.host.mode === "control";
+  const homeCommandReady = Boolean(warmReplayReady);
+  const hasArmHomePosition = Boolean(state?.homePosition);
+  const recordingUltrasonicResetReady = Boolean(selectedRecordingEntry);
 
   const activeSectionMeta = useMemo(
     () => SECTIONS.find((section) => section.key === activeSection) ?? SECTIONS[0],
@@ -1974,6 +2026,24 @@ export default function App() {
     }
   };
 
+  const handleSetArmHome = async () => {
+    const next = await mutate("set-arm-home", "/api/arm/home/set", {
+      method: "POST",
+    });
+    if (next) {
+      flashToast("Arm home position saved.");
+    }
+  };
+
+  const handleGoArmHome = async () => {
+    const next = await mutate("go-arm-home", "/api/arm/home/go", {
+      method: "POST",
+    });
+    if (next) {
+      flashToast("Arm moved home.");
+    }
+  };
+
   const updateTrainingField = <K extends keyof TrainingProfile>(
     field: K,
     value: TrainingProfile[K],
@@ -2171,6 +2241,64 @@ export default function App() {
     }
   };
 
+  const handleDuplicateRecording = async () => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const existingPaths = new Set(state?.recordings.map((item) => item.path) ?? []);
+    const payload: DuplicateRecordingRequest = {
+      path: selectedRecordingEntry.path,
+    };
+    const next = await mutate("duplicate-recording", "/api/recordings/duplicate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    if (next) {
+      const duplicatedRecording =
+        next.recordings.find((item) => !existingPaths.has(item.path)) ?? next.recordings[0];
+      if (duplicatedRecording) {
+        setSelectedRecording(duplicatedRecording.path);
+        setRecordingNameDraft(duplicatedRecording.name);
+        setPlaybackTimeS(0);
+      }
+      setRecordingDetail(null);
+      setRecordingDetailError("");
+      flashToast("Recording duplicated.");
+    }
+  };
+
+  const handleDeleteRecording = async () => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${selectedRecordingEntry.name}? This removes the trajectory JSON from the Pi.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    const payload: DeleteRecordingRequest = {
+      path: selectedRecordingEntry.path,
+    };
+    const next = await mutate("delete-recording", "/api/recordings", {
+      method: "DELETE",
+      body: JSON.stringify(payload),
+    });
+
+    if (next) {
+      setSelectedRecording(next.recordings[0]?.path ?? "");
+      setRecordingDetail(null);
+      setRecordingDetailError("");
+      flashToast("Recording deleted.");
+    }
+  };
+
   const handleTrimRecording = async () => {
     if (!selectedRecordingEntry) {
       flashToast("Select a recording first.");
@@ -2222,6 +2350,49 @@ export default function App() {
 
     if (next) {
       flashToast("Recording start marked as gyro zero.");
+    }
+  };
+
+  const handleResetRecordingUltrasonicPosition = async () => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const payload: ResetRecordingUltrasonicPositionRequest = {
+      path: selectedRecordingEntry.path,
+    };
+    const next = await mutate(
+      "reset-recording-ultrasonic-position",
+      "/api/recordings/reset-ultrasonic-position",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+
+    if (next) {
+      flashToast("X/Y ultrasonic recapture replay started.");
+    }
+  };
+
+  const handleRecordingHomeModeChange = async (homeMode: ArmHomeMode) => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const payload: SetRecordingReplayOptionsRequest = {
+      path: selectedRecordingEntry.path,
+      options: { homeMode },
+    };
+    const next = await mutate("recording-home-mode", "/api/recordings/replay-options", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    if (next) {
+      flashToast("Replay home option saved.");
     }
   };
 
@@ -2393,6 +2564,18 @@ export default function App() {
                   Arm Hotkeys
                 </button>
                 <button
+                  disabled={disabled || !homeCommandReady}
+                  onClick={() => void handleSetArmHome()}
+                >
+                  Set Arm Home
+                </button>
+                <button
+                  disabled={disabled || !homeCommandReady || !hasArmHomePosition}
+                  onClick={() => void handleGoArmHome()}
+                >
+                  Go Home
+                </button>
+                <button
                   className="danger"
                   disabled={disabled}
                   onClick={() => void mutate("emergency-stop", "/api/robot/emergency-stop", { method: "POST" })}
@@ -2414,6 +2597,14 @@ export default function App() {
                 </span>
                 <p className="card-note">
                   Arm hotkeys keeps the Pi host live without teleop so pinned Pi replays can start immediately.
+                </p>
+              </div>
+              <div className="mode-strip">
+                <span className={`status-pill ${hasArmHomePosition ? "good" : "muted"}`}>
+                  {hasArmHomePosition ? "home saved" : "home not set"}
+                </span>
+                <p className="card-note">
+                  Set Arm Home captures the current follower pose from the running Pi host. Go Home uses that saved pose without needing the VEX Brain.
                 </p>
               </div>
 
@@ -2853,23 +3044,50 @@ export default function App() {
                         placeholder="Desk pickup"
                       />
                     </label>
-                    <button
-                      disabled={
-                        disabled ||
-                        !selectedRecordingEntry ||
-                        !recordingNameDraft.trim() ||
-                        recordingNameDraft.trim() === selectedRecordingEntry.name
-                      }
-                      onClick={() => void handleRenameRecording()}
-                    >
-                      Save Name
-                    </button>
-                    <button
-                      disabled={disabled || !selectedRecordingEntry}
-                      onClick={() => void handleMarkRecordingGyroZero()}
-                    >
-                      Mark Gyro Zero
-                    </button>
+                    <div className="selected-recording-actions">
+                      <button
+                        disabled={
+                          disabled ||
+                          !selectedRecordingEntry ||
+                          !recordingNameDraft.trim() ||
+                          recordingNameDraft.trim() === selectedRecordingEntry.name
+                        }
+                        onClick={() => void handleRenameRecording()}
+                      >
+                        Save Name
+                      </button>
+                      <button
+                        disabled={disabled || !selectedRecordingEntry}
+                        title="Copy this recording so it can get its own X/Y ultrasonic recapture."
+                        onClick={() => void handleDuplicateRecording()}
+                      >
+                        Duplicate
+                      </button>
+                      <button
+                        disabled={disabled || !selectedRecordingEntry}
+                        onClick={() => void handleMarkRecordingGyroZero()}
+                      >
+                        Mark Gyro Zero
+                      </button>
+                      <button
+                        disabled={disabled || !selectedRecordingEntry || !recordingUltrasonicResetReady}
+                        title={
+                          recordingUltrasonicResetReady
+                            ? "Replay the whole recording and overwrite its X/Y ultrasonic stream from live sensor readings."
+                            : "Select a recording to replay and recapture its X/Y ultrasonic stream."
+                        }
+                        onClick={() => void handleResetRecordingUltrasonicPosition()}
+                      >
+                        Replay + Recapture X/Y
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={disabled || !selectedRecordingEntry}
+                        onClick={() => void handleDeleteRecording()}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
                   <RecordingPreviewPanel
                     detail={recordingDetail}
@@ -2963,6 +3181,22 @@ export default function App() {
                         onChange={(event) => setPinHoldFinal(Number(event.target.value))}
                       />
                     </label>
+                    <label>
+                      Go home
+                      <select
+                        value={selectedRecordingHomeMode}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi" || !hasArmHomePosition}
+                        onChange={(event) =>
+                          void handleRecordingHomeModeChange(event.target.value as ArmHomeMode)
+                        }
+                      >
+                        {HOME_MODE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <label className="checkbox-row">
                       <input
                         type="checkbox"
@@ -2995,6 +3229,16 @@ export default function App() {
                     selectedRecordingHasBaseReference ? (
                       <p className="card-note">
                         This recording contains VEX base motion. Leave this off unless you intentionally want to replay base movement; start-position correction still runs from the gyro and ultrasonic sensors.
+                      </p>
+                    ) : null}
+                    {replayTarget === "pi" && !hasArmHomePosition ? (
+                      <p className="card-note">
+                        Set Arm Home from Overview before enabling automatic home movement for recordings.
+                      </p>
+                    ) : null}
+                    {replayTarget === "pi" && hasArmHomePosition && selectedRecordingHomeMode !== "none" ? (
+                      <p className="card-note">
+                        This recording will {HOME_MODE_OPTIONS.find((option) => option.value === selectedRecordingHomeMode)?.label.toLowerCase()}.
                       </p>
                     ) : null}
                     {replayTarget === "pi" && effectiveReplayIncludeBase ? (
@@ -3124,7 +3368,7 @@ export default function App() {
                         <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
                       </div>
                       <p className="pin-meta">
-                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {move.includeBase ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})` : "Arm only"}
+                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} • {move.includeBase ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})` : "Arm only"}
                       </p>
                       <div className="button-cluster inline">
                         <button

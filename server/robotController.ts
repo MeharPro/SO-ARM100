@@ -34,12 +34,16 @@ import {
   validateTrainingProfile,
 } from "./trainingUtils.js";
 import type {
+  ArmHomeMode,
+  ArmHomePosition,
   AppSettings,
   BenchmarkPolicyRequest,
   CreatePinnedMoveRequest,
   DashboardState,
   DeployTrainingCheckpointRequest,
   DeleteTrainingProfileRequest,
+  DeleteRecordingRequest,
+  DuplicateRecordingRequest,
   LeaderStatus,
   MarkRecordingGyroZeroRequest,
   PinnedMove,
@@ -47,11 +51,13 @@ import type {
   RecordingDetailRequest,
   RenameRecordingRequest,
   RecordingEntry,
+  ResetRecordingUltrasonicPositionRequest,
   ReplayRequest,
   RobotSensorState,
   RobotSensorStatus,
   RobotSensorsStatus,
   SelectTrainingProfileRequest,
+  SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
   StartPolicyEvalRequest,
@@ -105,6 +111,7 @@ const POWER_LOG_SYNC_INTERVAL_MS = 15000;
 const VEX_STATUS_REFRESH_MS = 5000;
 const LIVE_SENSOR_STATUS_STALE_MS = 6000;
 const SENSOR_STATUS_LOG_PREFIX = "[sensor-status]";
+const HOME_COMMAND_LOG_PREFIX = "[home-command]";
 const ARM_MOTORS = [
   "arm_shoulder_pan",
   "arm_shoulder_lift",
@@ -113,6 +120,7 @@ const ARM_MOTORS = [
   "arm_wrist_roll",
   "arm_gripper",
 ] as const;
+const ARM_HOME_JOINT_KEYS = ARM_MOTORS.map((motor) => `${motor}.pos`);
 const TORQUE_LIMIT_MIN = 0;
 const TORQUE_LIMIT_MAX = 1000;
 const LEKIWI_MOTOR_NAMES_BY_ID: Record<string, string> = {
@@ -156,15 +164,28 @@ function normalizeReplayRequest(
   payload: ReplayRequest,
   defaults: AppSettings["trajectories"],
 ): ReplayRequest {
+  const target = payload.target === "leader" ? "leader" : "pi";
   return {
     trajectoryPath: payload.trajectoryPath.trim(),
-    target: payload.target === "leader" ? "leader" : "pi",
+    target,
     vexReplayMode: payload.vexReplayMode === "drive" ? "drive" : "ecu",
+    homeMode: target === "pi" ? normalizeHomeMode(payload.homeMode) : "none",
     speed: payload.speed > 0 ? payload.speed : defaults.defaultReplaySpeed,
-    includeBase: payload.target === "leader" ? false : Boolean(payload.includeBase),
+    includeBase: target === "leader" ? false : Boolean(payload.includeBase),
     holdFinalS:
       payload.holdFinalS >= 0 ? payload.holdFinalS : defaults.defaultHoldFinalS,
   };
+}
+
+function normalizeHomeMode(value: unknown): ArmHomeMode {
+  return value === "start" || value === "end" || value === "both" ? value : "none";
+}
+
+function isFiniteHomePosition(homePosition: ArmHomePosition | null): homePosition is ArmHomePosition {
+  return Boolean(
+    homePosition &&
+      ARM_HOME_JOINT_KEYS.every((key) => Number.isFinite(homePosition.joints[key])),
+  );
 }
 
 export class RobotController {
@@ -205,7 +226,8 @@ export class RobotController {
   };
 
   async getState(): Promise<DashboardState> {
-    const { settings, pinnedMoves, training } = this.configStore.getConfig();
+    const { settings, pinnedMoves, homePosition, recordingReplayOptions, training } =
+      this.configStore.getConfig();
     const wifi = await getWifiStatus();
     const resolvedPiHost = await this.findReachablePiHost(settings);
     const piReachable = Boolean(resolvedPiHost);
@@ -268,6 +290,8 @@ export class RobotController {
     return {
       settings,
       pinnedMoves,
+      homePosition,
+      recordingReplayOptions,
       training: {
         ...trainingConfig,
         selectedProfile,
@@ -907,7 +931,10 @@ export class RobotController {
       await this.clearRemoteHostCommand(settings, host);
 
       await this.hostRunner.start(
-        this.buildHostScript(settings, true),
+        this.buildHostScript(settings, true, {
+          vexLiveBaseControl: true,
+          requireVexLiveBaseControl: false,
+        }),
         this.toConnectConfig(settings, host),
         "keyboard-control",
         { host, hotkeysArmed: true, keyboardBackup: true },
@@ -958,6 +985,59 @@ export class RobotController {
       await this.localDatasetCaptureRunner.stop("Emergency stop requested.");
       await this.policyEvalRunner.stop("Emergency stop requested.");
       await this.execRemoteScript(this.buildStopAllScript(settings), host, settings);
+
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async setArmHomePosition(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      this.logActivity("Set arm home position requested.");
+      const host = this.requireWarmHostForHomeCommand();
+      const requestId = `capture-home-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await this.writeRemoteHostCommand(settings, host, {
+        command: "capture-home",
+        requestId,
+      });
+      const result = await this.waitForWarmHostHomeCommandResult(requestId, 6000);
+      if (!result) {
+        throw new Error("Timed out waiting for the running Pi host to capture the arm home position.");
+      }
+      if (!result.success || !isFiniteHomePosition(result.homePosition)) {
+        throw new Error(result.status || "The running Pi host could not capture a valid arm home position.");
+      }
+
+      this.configStore.saveHomePosition(result.homePosition);
+      this.logActivity("Saved current arm pose as the home position.");
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async goToArmHomePosition(): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, homePosition } = this.configStore.getConfig();
+      if (!isFiniteHomePosition(homePosition)) {
+        throw new Error("Set an arm home position before using Go Home.");
+      }
+
+      this.logActivity("Go home requested.");
+      const host = this.requireWarmHostForHomeCommand();
+      const requestId = `go-home-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await this.writeRemoteHostCommand(settings, host, {
+        command: "go-home",
+        requestId,
+        homePosition,
+      });
+      const result = await this.waitForWarmHostHomeCommandResult(requestId, 12000);
+      if (!result) {
+        throw new Error("Timed out waiting for the running Pi host to move the arm home.");
+      }
+      if (!result.success) {
+        throw new Error(result.status || "The running Pi host failed to move the arm home.");
+      }
 
       this.lastError = null;
       return this.getState();
@@ -1294,6 +1374,90 @@ export class RobotController {
     });
   }
 
+  async duplicateRecording(payload: DuplicateRecordingRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, recordingReplayOptions } = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+
+      if (!recordingPath) {
+        throw new Error("Choose a recording before duplicating it.");
+      }
+
+      this.logActivity(`Duplicating recording ${recordingPath}.`);
+      const host = await this.preparePi(settings, "duplicate recording");
+      const duplicate = await this.duplicateRemoteRecordingFile(settings, host, recordingPath);
+
+      const sourceReplayOptions = recordingReplayOptions[recordingPath];
+      if (sourceReplayOptions) {
+        this.configStore.saveRecordingReplayOptions({
+          ...recordingReplayOptions,
+          [duplicate.path]: { ...sourceReplayOptions },
+        });
+      }
+
+      this.logActivity(`Created duplicate recording ${duplicate.path}.`);
+      this.cachedRecordings = await this.fetchRecordings(settings, host);
+      this.lastRecordingRefresh = Date.now();
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async deleteRecording(payload: DeleteRecordingRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings, pinnedMoves, recordingReplayOptions } = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+
+      if (!recordingPath) {
+        throw new Error("Choose a recording before deleting it.");
+      }
+
+      this.logActivity(`Deleting recording ${recordingPath}.`);
+      const host = await this.preparePi(settings, "delete recording");
+      await this.deleteRemoteRecordingFile(settings, host, recordingPath);
+
+      const remainingPins = pinnedMoves.filter((move) => move.trajectoryPath !== recordingPath);
+      if (remainingPins.length !== pinnedMoves.length) {
+        this.configStore.savePinnedMoves(remainingPins);
+        this.logActivity("Removed pinned moves that referenced the deleted recording.");
+      }
+      if (recordingReplayOptions[recordingPath]) {
+        const nextOptions = { ...recordingReplayOptions };
+        delete nextOptions[recordingPath];
+        this.configStore.saveRecordingReplayOptions(nextOptions);
+      }
+
+      this.cachedRecordings = await this.fetchRecordings(settings, host);
+      this.lastRecordingRefresh = Date.now();
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async setRecordingReplayOptions(
+    payload: SetRecordingReplayOptionsRequest,
+  ): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+      if (!recordingPath) {
+        throw new Error("Choose a recording before changing replay options.");
+      }
+
+      const homeMode = normalizeHomeMode(payload.options?.homeMode);
+      const nextOptions = { ...config.recordingReplayOptions };
+      if (homeMode === "none") {
+        delete nextOptions[recordingPath];
+      } else {
+        nextOptions[recordingPath] = { homeMode };
+      }
+
+      this.configStore.saveRecordingReplayOptions(nextOptions);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
   async markRecordingGyroZero(payload: MarkRecordingGyroZeroRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
@@ -1308,6 +1472,54 @@ export class RobotController {
       await this.markRecordingStartGyroZero(settings, host, recordingPath);
       this.cachedRecordings = await this.fetchRecordings(settings, host);
       this.lastRecordingRefresh = Date.now();
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async resetRecordingUltrasonicPosition(
+    payload: ResetRecordingUltrasonicPositionRequest,
+  ): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+
+      if (!recordingPath) {
+        throw new Error("Choose a recording before resetting its ultrasonic position.");
+      }
+
+      this.logActivity(
+        `Replaying recording ${recordingPath} to recapture and overwrite its X/Y ultrasonic stream.`,
+      );
+      await this.stopWarmHostReplay(settings, "Ultrasonic stream recapture needs a standalone replay.");
+      await this.stopRobotExclusiveProcesses("Ultrasonic stream recapture needs the robot exclusively.");
+
+      const host = await this.preparePi(settings, "recapture recording ultrasonic stream");
+      assertHelperExists(REPLAY_SCRIPT);
+      assertHelperExists(POWER_SCRIPT);
+      assertHelperExists(RUNTIME_SCRIPT);
+      assertHelperExists(VEX_BASE_BRIDGE_SCRIPT);
+      assertHelperExists(SENSOR_REPLAY_SCRIPT);
+      await this.ensureRemoteHelpers(settings, host);
+      await this.writeRemoteTorqueLimits(settings, host);
+
+      const replay: ReplayRequest = {
+        trajectoryPath: recordingPath,
+        target: "pi",
+        vexReplayMode: "ecu",
+        homeMode: "none",
+        speed: 1,
+        includeBase: true,
+        holdFinalS: 0,
+      };
+      await this.replayRunner.start(
+        this.buildReplayScript(settings, replay, null, {
+          recaptureUltrasonicStream: true,
+        }),
+        this.toConnectConfig(settings, host),
+        "ultrasonic-recapture",
+        { ...replay, recaptureUltrasonicStream: true },
+      );
       this.lastError = null;
       return this.getState();
     });
@@ -1344,15 +1556,18 @@ export class RobotController {
 
   async startReplay(payload: ReplayRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
-      const { settings } = this.configStore.getConfig();
+      const { settings, homePosition } = this.configStore.getConfig();
       const replay = normalizeReplayRequest(payload, settings.trajectories);
       if (!replay.trajectoryPath) {
         throw new Error("Choose a saved trajectory before starting replay.");
       }
+      if (replay.homeMode !== "none" && !isFiniteHomePosition(homePosition)) {
+        throw new Error("Set an arm home position before replaying with Go Home enabled.");
+      }
       this.logActivity(
         `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}${
           replay.target === "pi" ? ` (${replay.includeBase ? "VEX base + arm" : "arm only"})` : ""
-        }.`,
+        }${replay.homeMode !== "none" ? `, home ${replay.homeMode}` : ""}.`,
       );
 
       await this.replayRunner.stop("Restarting replay.");
@@ -1371,7 +1586,7 @@ export class RobotController {
         await this.datasetCaptureRunner.stop("Replay needs the robot exclusively.");
         await this.localDatasetCaptureRunner.stop("Replay needs the robot exclusively.");
         await this.policyEvalRunner.stop("Replay needs the robot exclusively.");
-        await this.sendWarmHostReplay(settings, host, replay);
+        await this.sendWarmHostReplay(settings, host, replay, homePosition);
 
         this.lastError = null;
         return this.getState();
@@ -1413,7 +1628,7 @@ export class RobotController {
         await this.writeRemoteTorqueLimits(settings, host);
 
         await this.replayRunner.start(
-          this.buildReplayScript(settings, replay),
+          this.buildReplayScript(settings, replay, homePosition),
           this.toConnectConfig(settings, host),
           "replay",
           { ...replay },
@@ -1656,7 +1871,10 @@ export class RobotController {
 
     await this.clearRemoteHostCommand(settings, host);
     await this.hostRunner.start(
-      this.buildHostScript(settings, true),
+      this.buildHostScript(settings, true, {
+        vexLiveBaseControl: true,
+        requireVexLiveBaseControl: false,
+      }),
       this.toConnectConfig(settings, host),
       "keyboard-control",
       { host, hotkeysArmed: true, keyboardBackup: true, ...meta },
@@ -2530,6 +2748,12 @@ PY
   private extractLatestRobotSensorPayload(
     ...snapshots: ServiceSnapshot[]
   ): Record<string, unknown> | null {
+    return this.extractLatestRobotSensorReading(...snapshots)?.payload ?? null;
+  }
+
+  private extractLatestRobotSensorReading(
+    ...snapshots: ServiceSnapshot[]
+  ): { observedAtMs: number; payload: Record<string, unknown> } | null {
     let latest: { observedAtMs: number; payload: Record<string, unknown> } | null = null;
 
     for (const snapshot of snapshots) {
@@ -2547,7 +2771,7 @@ PY
       }
     }
 
-    return latest?.payload ?? null;
+    return latest;
   }
 
   private buildFallbackGyroStatus(
@@ -2850,12 +3074,25 @@ PY
     }
   }
 
-  private buildHostScript(settings: AppSettings, includeUiCommandPath = false): string {
+  private buildHostScript(
+    settings: AppSettings,
+    includeUiCommandPath = false,
+    options: {
+      vexLiveBaseControl?: boolean;
+      requireVexLiveBaseControl?: boolean;
+    } = {},
+  ): string {
     const uiCommandFlag = includeUiCommandPath
       ? ` \\\n  --ui-command-path ${shellQuote(this.getRemoteHostCommandPath(settings))}`
       : "";
     const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
     const vexBaseFlags = this.buildVexBaseFlags(settings);
+    const vexLiveBaseControlFlag = options.vexLiveBaseControl
+      ? ` \\\n  --vex-live-base-control true`
+      : "";
+    const requireVexLiveBaseControlFlag = options.requireVexLiveBaseControl
+      ? ` \\\n  --require-vex-live-base-control true`
+      : "";
     return [
       this.buildPiActivation(settings),
       `python ${shellQuote(`${settings.pi.remoteHelperDir}/scripts/lekiwi_host.py`)} \\`,
@@ -2870,7 +3107,7 @@ PY
       `  --base-wheel-torque-limit ${settings.host.baseWheelTorqueLimit} \\`,
       `  --loop-hz ${CONTROL_LOOP_HZ} \\`,
       `  --enable-base false \\`,
-      `${vexBaseFlags}${uiCommandFlag}${saferServoModeFlag}`,
+      `${vexBaseFlags}${uiCommandFlag}${saferServoModeFlag}${vexLiveBaseControlFlag}${requireVexLiveBaseControlFlag}`,
     ].join("\n");
   }
 
@@ -2903,8 +3140,20 @@ PY
     ].join("\n");
   }
 
-  private buildReplayScript(settings: AppSettings, replay: ReplayRequest): string {
+  private buildReplayScript(
+    settings: AppSettings,
+    replay: ReplayRequest,
+    homePosition: ArmHomePosition | null,
+    options: { recaptureUltrasonicStream?: boolean } = {},
+  ): string {
     const includeBaseFlag = replay.includeBase ? " \\\n  --include-base" : "";
+    const recaptureUltrasonicFlag = options.recaptureUltrasonicStream
+      ? " \\\n  --recapture-ultrasonic-stream"
+      : "";
+    const homeFlags =
+      replay.homeMode !== "none" && isFiniteHomePosition(homePosition)
+        ? ` \\\n  --home-mode ${shellQuote(replay.homeMode)} \\\n  --home-position-json ${shellQuote(JSON.stringify(homePosition.joints))}`
+        : "";
     const saferServoModeFlag = this.buildSaferServoModeFlag(settings);
     const vexBaseFlags = this.buildVexBaseFlags(settings);
     return [
@@ -2923,7 +3172,7 @@ PY
       `  --input ${shellQuote(replay.trajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
       `  --vex-replay-mode ${shellQuote(replay.vexReplayMode)} \\`,
-      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${saferServoModeFlag}`,
+      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${recaptureUltrasonicFlag}${homeFlags}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -3054,6 +3303,22 @@ PY
     );
   }
 
+  private requireWarmHostForHomeCommand(): string {
+    const hostSnapshot = this.hostRunner.getSnapshot();
+    if (
+      hostSnapshot.state !== "running" ||
+      !this.hostSupportsInlineReplay(hostSnapshot.mode)
+    ) {
+      throw new Error("Start Control, Start Keyboard Backup, or Arm Hotkeys before setting or using arm home.");
+    }
+
+    const host = this.getActiveHostAddress();
+    if (!host) {
+      throw new Error("The running Pi host is active, but its address is unavailable.");
+    }
+    return host;
+  }
+
   private async zeroVexGyroViaWarmHost(settings: AppSettings, host: string): Promise<void> {
     const requestId = `zero-vex-gyro-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     await this.writeRemoteHostCommand(settings, host, {
@@ -3117,10 +3382,73 @@ PY
     return null;
   }
 
+  private async waitForWarmHostHomeCommandResult(
+    requestId: string,
+    timeoutMs: number,
+  ): Promise<{ success: boolean; status: string; homePosition: ArmHomePosition | null } | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const parsed = this.findWarmHostHomeCommandResult(requestId);
+      if (parsed) {
+        return parsed;
+      }
+      await sleep(100);
+    }
+    return this.findWarmHostHomeCommandResult(requestId);
+  }
+
+  private findWarmHostHomeCommandResult(
+    requestId: string,
+  ): { success: boolean; status: string; homePosition: ArmHomePosition | null } | null {
+    const logs = this.hostRunner.getSnapshot().logs;
+    for (let index = logs.length - 1; index >= 0; index -= 1) {
+      const line = logs[index] ?? "";
+      const markerIndex = line.indexOf(`${HOME_COMMAND_LOG_PREFIX} `);
+      if (markerIndex < 0) {
+        continue;
+      }
+      const jsonText = line.slice(markerIndex + HOME_COMMAND_LOG_PREFIX.length + 1).trim();
+      try {
+        const payload = JSON.parse(jsonText) as Record<string, unknown>;
+        if (payload.request_id !== requestId) {
+          continue;
+        }
+        const positions = payload.positions;
+        const homePosition =
+          positions && typeof positions === "object"
+            ? {
+                capturedAt:
+                  typeof payload.captured_at === "string" && payload.captured_at.trim()
+                    ? payload.captured_at
+                    : new Date().toISOString(),
+                joints: Object.fromEntries(
+                  ARM_HOME_JOINT_KEYS.map((key) => [
+                    key,
+                    Number((positions as Record<string, unknown>)[key]),
+                  ]),
+                ),
+              }
+            : null;
+        return {
+          success: payload.success === true,
+          status:
+            typeof payload.status === "string" && payload.status.trim()
+              ? payload.status.trim()
+              : "Home command finished.",
+          homePosition,
+        };
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
   private async sendWarmHostReplay(
     settings: AppSettings,
     host: string,
     replay: ReplayRequest,
+    homePosition: ArmHomePosition | null,
   ): Promise<void> {
     await this.writeRemoteHostCommand(settings, host, {
       command: "replay",
@@ -3129,6 +3457,8 @@ PY
       holdFinalS: replay.holdFinalS,
       includeBase: replay.includeBase,
       vexReplayMode: replay.vexReplayMode,
+      homeMode: replay.homeMode,
+      homePosition,
     });
     this.logActivity(`Queued replay command on the warm host at ${host}.`);
   }
@@ -3164,9 +3494,13 @@ PY
           holdFinalS: number;
           includeBase: boolean;
           vexReplayMode: "drive" | "ecu";
+          homeMode: ArmHomeMode;
+          homePosition: ArmHomePosition | null;
         }
       | { command: "stop-replay" }
-      | { command: "zero-vex-gyro"; requestId: string },
+      | { command: "zero-vex-gyro"; requestId: string }
+      | { command: "capture-home"; requestId: string }
+      | { command: "go-home"; requestId: string; homePosition: ArmHomePosition },
   ): Promise<void> {
     const commandPath = this.getRemoteHostCommandPath(settings);
     let payload: Record<string, unknown>;
@@ -3178,12 +3512,29 @@ PY
         hold_final_s: command.holdFinalS,
         include_base: command.includeBase,
         vex_replay_mode: command.vexReplayMode,
+        home_mode: command.homeMode,
+        home_position: isFiniteHomePosition(command.homePosition)
+          ? command.homePosition.joints
+          : null,
         requested_at: new Date().toISOString(),
       };
     } else if (command.command === "zero-vex-gyro") {
       payload = {
         command: "zero-vex-gyro",
         request_id: command.requestId,
+        requested_at: new Date().toISOString(),
+      };
+    } else if (command.command === "capture-home") {
+      payload = {
+        command: "capture-home",
+        request_id: command.requestId,
+        requested_at: new Date().toISOString(),
+      };
+    } else if (command.command === "go-home") {
+      payload = {
+        command: "go-home",
+        request_id: command.requestId,
+        home_position: command.homePosition.joints,
         requested_at: new Date().toISOString(),
       };
     } else {
@@ -3726,6 +4077,141 @@ if not isinstance(payload, dict):
 
 payload["label"] = label
 path.write_text(json.dumps(payload, indent=2) + "\\n")
+PY
+`.trim();
+
+    await this.execRemoteScript(script, host, settings);
+  }
+
+  private async duplicateRemoteRecordingFile(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+  ): Promise<{ path: string; label: string }> {
+    const script = `
+export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
+export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+python - <<'PY'
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
+requested = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser()
+
+try:
+    path = requested.resolve(strict=True)
+except FileNotFoundError:
+    raise SystemExit(f"Recording does not exist: {requested}")
+
+if path.parent != root:
+    raise SystemExit("Recording path is outside the trajectory directory.")
+if path.suffix != ".json":
+    raise SystemExit("Only trajectory JSON recordings can be duplicated.")
+if not path.is_file():
+    raise SystemExit(f"Recording is not a file: {path}")
+
+payload = json.loads(path.read_text())
+if not isinstance(payload, dict):
+    raise SystemExit("Recording payload is invalid.")
+
+def base_copy_label(value):
+    normalized = value.strip()
+    match = re.match(r"^(?P<base>.+?) copy(?: (?P<index>\\d+))?$", normalized, flags=re.IGNORECASE)
+    return match.group("base").strip() if match else normalized
+
+def base_copy_stem(value):
+    match = re.match(r"^(?P<base>.+?)-copy(?:-(?P<index>\\d+))?$", value, flags=re.IGNORECASE)
+    return match.group("base") if match else value
+
+def existing_label_values():
+    labels = set()
+    for candidate in root.glob("*.json"):
+        try:
+            candidate_payload = json.loads(candidate.read_text())
+        except Exception:
+            candidate_payload = None
+        if isinstance(candidate_payload, dict):
+            raw_label = candidate_payload.get("label")
+            if isinstance(raw_label, str) and raw_label.strip():
+                labels.add(raw_label.strip().lower())
+                continue
+        labels.add(candidate.stem.lower())
+    return labels
+
+source_label = payload.get("label")
+source_name = source_label.strip() if isinstance(source_label, str) and source_label.strip() else path.stem
+label_base = base_copy_label(source_name)
+labels = existing_label_values()
+next_label = f"{label_base} copy"
+label_index = 2
+while next_label.lower() in labels:
+    next_label = f"{label_base} copy {label_index}"
+    label_index += 1
+
+stem_base = base_copy_stem(path.stem)
+next_path = root / f"{stem_base}-copy.json"
+path_index = 2
+while next_path.exists():
+    next_path = root / f"{stem_base}-copy-{path_index}.json"
+    path_index += 1
+
+duplicated_from = payload.get("duplicated_from")
+root_source_path = None
+if isinstance(duplicated_from, dict):
+    raw_root_source = duplicated_from.get("root_source_path")
+    if isinstance(raw_root_source, str) and raw_root_source.strip():
+        root_source_path = raw_root_source.strip()
+
+payload["label"] = next_label
+payload["duplicated_from"] = {
+    "source_path": str(path),
+    "source_label": source_name,
+    "root_source_path": root_source_path or str(path),
+    "duplicated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+}
+
+next_path.write_text(json.dumps(payload, indent=2) + "\\n")
+print(json.dumps({"path": str(next_path), "label": next_label}))
+PY
+`.trim();
+
+    const { stdout } = await this.execRemoteScript(script, host, settings);
+    return JSON.parse(stdout) as { path: string; label: string };
+  }
+
+  private async deleteRemoteRecordingFile(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+  ): Promise<void> {
+    const script = `
+export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
+export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
+requested = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser()
+
+try:
+    path = requested.resolve(strict=True)
+except FileNotFoundError:
+    raise SystemExit(f"Recording does not exist: {requested}")
+
+if path.parent != root:
+    raise SystemExit("Recording path is outside the trajectory directory.")
+if path.suffix != ".json":
+    raise SystemExit("Only trajectory JSON recordings can be deleted.")
+if not path.is_file():
+    raise SystemExit(f"Recording is not a file: {path}")
+
+path.unlink()
+print(json.dumps({"ok": True, "path": str(path)}))
 PY
 `.trim();
 

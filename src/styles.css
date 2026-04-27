@@ -740,7 +740,7 @@ code {
 }
 
 .record-toolbar {
-  grid-template-columns: minmax(220px, 320px) minmax(180px, 240px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 320px) minmax(210px, 260px) minmax(260px, 1fr);
   align-items: end;
 }
 
@@ -866,6 +866,13 @@ code {
   align-items: end;
   padding: 0 0 1rem;
   border-bottom: 1px solid var(--line);
+}
+
+.selected-recording-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.65rem;
 }
 
 .recording-preview {
@@ -1265,6 +1272,10 @@ label {
   .stage-header,
   .selected-recording-editor {
     grid-template-columns: 1fr;
+  }
+
+  .selected-recording-actions {
+    justify-content: flex-start;
   }
 
   .recording-preview-head {

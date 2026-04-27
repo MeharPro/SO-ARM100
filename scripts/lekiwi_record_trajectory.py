@@ -17,6 +17,8 @@ import zmq
 from lekiwi_runtime import (
     ArmSafetyFilter,
     LiveRobotSensorStatusEmitter,
+    ULTRASONIC_MAX_DISTANCE_M,
+    ULTRASONIC_MIN_DISTANCE_M,
     ULTRASONIC_STATE_KEYS,
     ResilientObservationReader,
     ServoProtectionSupervisor,
@@ -65,6 +67,14 @@ ARM_STATE_KEYS = (
 )
 BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
 DEFAULT_RECORD_DIR = Path("~/lekiwi-trajectories").expanduser()
+ULTRASONIC_X_DISTANCE_KEY = ULTRASONIC_STATE_KEYS[0]
+ULTRASONIC_Y_DISTANCE_KEY = ULTRASONIC_STATE_KEYS[1]
+ULTRASONIC_X_POSITION_KEY = "ultrasonic_sensor_1.position_m"
+ULTRASONIC_Y_POSITION_KEY = "ultrasonic_sensor_2.position_m"
+ULTRASONIC_POSITION_KEYS = (
+    ULTRASONIC_X_POSITION_KEY,
+    ULTRASONIC_Y_POSITION_KEY,
+)
 
 
 def parse_bool(value: str) -> bool:
@@ -162,7 +172,50 @@ def build_output_path(requested: str | None) -> Path:
     return path
 
 
-def build_sample(observation: dict[str, float], t_s: float) -> dict[str, object]:
+def finite_number(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        if parsed == parsed and parsed not in {float("inf"), float("-inf")}:
+            return parsed
+    return None
+
+
+def valid_ultrasonic_distance(value: object) -> float | None:
+    parsed = finite_number(value)
+    if parsed is None:
+        return None
+    if ULTRASONIC_MIN_DISTANCE_M <= parsed <= ULTRASONIC_MAX_DISTANCE_M:
+        return parsed
+    return None
+
+
+def maybe_capture_ultrasonic_position_reference(
+    observation: dict[str, float],
+    t_s: float,
+) -> dict[str, object] | None:
+    x_m = valid_ultrasonic_distance(observation.get(ULTRASONIC_X_DISTANCE_KEY))
+    y_m = valid_ultrasonic_distance(observation.get(ULTRASONIC_Y_DISTANCE_KEY))
+    if x_m is None or y_m is None:
+        return None
+
+    return {
+        "type": "recording-stream",
+        "x_distance_key": ULTRASONIC_X_DISTANCE_KEY,
+        "y_distance_key": ULTRASONIC_Y_DISTANCE_KEY,
+        "x_position_key": ULTRASONIC_X_POSITION_KEY,
+        "y_position_key": ULTRASONIC_Y_POSITION_KEY,
+        "x_distance_m": x_m,
+        "y_distance_m": y_m,
+        "reference_t_s": round(float(t_s), 6),
+        "marked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def build_sample(
+    observation: dict[str, float],
+    t_s: float,
+    ultrasonic_position_reference: dict[str, object] | None = None,
+) -> dict[str, object]:
     state = {key: float(observation.get(key, 0.0)) for key in ARM_STATE_KEYS + BASE_STATE_KEYS}
     for key in VEX_MOTOR_STATE_KEYS:
         value = observation.get(key)
@@ -180,6 +233,15 @@ def build_sample(observation: dict[str, float], t_s: float) -> dict[str, object]
         value = observation.get(key)
         if isinstance(value, (int, float)):
             state[key] = float(value)
+    if ultrasonic_position_reference:
+        x_reference_m = finite_number(ultrasonic_position_reference.get("x_distance_m"))
+        y_reference_m = finite_number(ultrasonic_position_reference.get("y_distance_m"))
+        x_m = valid_ultrasonic_distance(state.get(ULTRASONIC_X_DISTANCE_KEY))
+        y_m = valid_ultrasonic_distance(state.get(ULTRASONIC_Y_DISTANCE_KEY))
+        if x_reference_m is not None and x_m is not None:
+            state[ULTRASONIC_X_POSITION_KEY] = round(x_m - x_reference_m, 6)
+        if y_reference_m is not None and y_m is not None:
+            state[ULTRASONIC_Y_POSITION_KEY] = round(y_m - y_reference_m, 6)
     return {
         "t_s": round(t_s, 6),
         "state": state,
@@ -203,7 +265,11 @@ def write_trajectory(
     args: argparse.Namespace,
     samples: list[dict[str, object]],
     command_samples: list[dict[str, object]],
+    ultrasonic_position_reference: dict[str, object] | None,
 ) -> None:
+    sensor_state_keys = list(ULTRASONIC_STATE_KEYS)
+    if ultrasonic_position_reference:
+        sensor_state_keys.extend(ULTRASONIC_POSITION_KEYS)
     payload = {
         "format": "lekiwi-follower-trajectory",
         "version": 4,
@@ -221,10 +287,12 @@ def write_trajectory(
         "vex_motor_state_keys": list(VEX_MOTOR_STATE_KEYS),
         "vex_inertial_state_keys": list(VEX_INERTIAL_STATE_KEYS),
         "vex_pose_state_keys": list(VEX_POSE_STATE_KEYS),
-        "sensor_state_keys": list(ULTRASONIC_STATE_KEYS),
+        "sensor_state_keys": sensor_state_keys,
         "samples": samples,
         "command_samples": command_samples,
     }
+    if ultrasonic_position_reference:
+        payload["ultrasonic_position_reference"] = ultrasonic_position_reference
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
@@ -320,7 +388,7 @@ def main() -> None:
         )
     if args.recording_mode != "free-teach" and not vex_command_stream_ready:
         print(
-            "Warning: VEX USB command stream is unavailable; recording will store live sensors but cannot reset a stable inertial origin.",
+            "Warning: VEX USB command stream is unavailable; recording will store live sensors but cannot drive the VEX base or reset a stable inertial origin.",
             flush=True,
         )
 
@@ -337,6 +405,7 @@ def main() -> None:
     watchdog_active = False
     samples: list[dict[str, object]] = []
     command_samples: list[dict[str, object]] = []
+    ultrasonic_position_reference: dict[str, object] | None = None
 
     print(
         f"LeKiwi recording host listening on tcp://*:{args.port_zmq_cmd} and tcp://*:{args.port_zmq_observations}",
@@ -359,9 +428,12 @@ def main() -> None:
         initial_observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
         initial_observation = servo_protection.enrich_observation(initial_observation)
         recording_started_at = time.perf_counter()
-        samples.append(build_sample(initial_observation, 0.0))
+        ultrasonic_position_reference = maybe_capture_ultrasonic_position_reference(initial_observation, 0.0)
+        samples.append(build_sample(initial_observation, 0.0, ultrasonic_position_reference))
         print("Recording started.", flush=True)
         print("[00001] t=  0.000s captured initial hand-guided state.", flush=True)
+        if ultrasonic_position_reference:
+            print("X/Y ultrasonic position zero captured at t=0.000s.", flush=True)
     try:
         while time.perf_counter() - session_started_at < args.connection_time_s:
             loop_start = time.time()
@@ -382,9 +454,15 @@ def main() -> None:
                         initial_observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
                         initial_observation = servo_protection.enrich_observation(initial_observation)
                         recording_started_at = time.perf_counter()
-                        samples.append(build_sample(initial_observation, 0.0))
+                        ultrasonic_position_reference = maybe_capture_ultrasonic_position_reference(
+                            initial_observation,
+                            0.0,
+                        )
+                        samples.append(build_sample(initial_observation, 0.0, ultrasonic_position_reference))
                         print("First control command received. Recording started.", flush=True)
                         print("[00001] t=  0.000s captured initial pre-move state.", flush=True)
+                        if ultrasonic_position_reference:
+                            print("X/Y ultrasonic position zero captured at t=0.000s.", flush=True)
                         command_t_s = 0.0
                     else:
                         command_t_s = time.perf_counter() - recording_started_at
@@ -393,6 +471,8 @@ def main() -> None:
                         action,
                         allow_legacy_base=args.enable_base,
                     )
+                    if vex_command_stream_ready:
+                        vex_base_bridge.send_motion(sent_action)
                     safety_filter.update(sent_action)
                     servo_protection.record_command(sent_action)
                     command_samples.append(
@@ -417,6 +497,8 @@ def main() -> None:
                     args.watchdog_timeout_ms,
                 )
                 stop_robot_base(robot, allow_legacy_base=args.enable_base)
+                if vex_command_stream_ready:
+                    vex_base_bridge.send_hold()
                 watchdog_active = True
 
             if args.recording_mode != "free-teach":
@@ -431,13 +513,24 @@ def main() -> None:
                 vex_base_bridge=vex_base_bridge,
             )
             if recording_started_at is not None:
-                sample = build_sample(observation, time.perf_counter() - recording_started_at)
+                sample_t_s = time.perf_counter() - recording_started_at
+                if ultrasonic_position_reference is None:
+                    ultrasonic_position_reference = maybe_capture_ultrasonic_position_reference(
+                        observation,
+                        sample_t_s,
+                    )
+                    if ultrasonic_position_reference:
+                        reference_t_s = ultrasonic_position_reference["reference_t_s"]
+                        print(f"X/Y ultrasonic position zero captured at t={reference_t_s:.3f}s.", flush=True)
+                sample = build_sample(observation, sample_t_s, ultrasonic_position_reference)
                 samples.append(sample)
                 if len(samples) % args.print_every == 0:
                     print(f"[{len(samples):05d}] t={sample['t_s']:7.3f}s {summarize_sample(sample)}", flush=True)
             power_logger.maybe_sample()
             if servo_protection.observe(observation, power_logger.last_sample):
                 stop_robot_base(robot, allow_legacy_base=args.enable_base)
+                if vex_command_stream_ready:
+                    vex_base_bridge.send_hold()
                 print("Recording stopped because the arm safety latch tripped.", flush=True)
                 break
 
@@ -462,6 +555,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping LeKiwi recording host", flush=True)
     finally:
+        if vex_command_stream_ready:
+            vex_base_bridge.send_hold()
         if power_logger is not None:
             try:
                 power_logger.maybe_sample(force=True)
@@ -469,7 +564,7 @@ def main() -> None:
                 print(f"power telemetry: {exc}", flush=True)
         if samples:
             try:
-                write_trajectory(output_path, args, samples, command_samples)
+                write_trajectory(output_path, args, samples, command_samples, ultrasonic_position_reference)
                 print(f"Saved {len(samples)} samples to {output_path}", flush=True)
             except Exception as exc:
                 print(f"save trajectory: {exc}", flush=True)
