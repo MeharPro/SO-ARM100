@@ -124,6 +124,9 @@ const REMOTE_HANDSHAKE_RETRY_DELAYS_MS = [500, 1200, 2500];
 const DEFAULT_VEX_POSITIONING_TIMEOUT_S = 8;
 const MIN_VEX_POSITIONING_TIMEOUT_S = 0.5;
 const MAX_VEX_POSITIONING_TIMEOUT_S = 60;
+const DEFAULT_VEX_POSITIONING_SPEED = 1;
+const MIN_VEX_POSITIONING_SPEED = 0.1;
+const MAX_VEX_POSITIONING_SPEED = 3;
 const DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M = 0.02;
 const DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 1.5;
 const DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M = 0.05;
@@ -192,6 +195,10 @@ function normalizeReplayRequest(
     homeMode: target === "pi" ? normalizeHomeMode(payload.homeMode) : "none",
     speed: normalizeReplaySpeed(payload.speed, defaults),
     autoVexPositioning: target === "pi" ? payload.autoVexPositioning !== false : false,
+    vexPositioningSpeed:
+      target === "pi"
+        ? normalizeVexPositioningSpeed(payload.vexPositioningSpeed)
+        : DEFAULT_VEX_POSITIONING_SPEED,
     vexPositioningTimeoutS:
       target === "pi"
         ? normalizeVexPositioningTimeout(payload.vexPositioningTimeoutS)
@@ -226,6 +233,14 @@ function normalizeReplaySpeed(
   return Number.isFinite(numeric) && numeric > 0 ? numeric : defaults.defaultReplaySpeed;
 }
 
+function normalizeVexPositioningSpeed(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return DEFAULT_VEX_POSITIONING_SPEED;
+  }
+  return Math.min(MAX_VEX_POSITIONING_SPEED, Math.max(MIN_VEX_POSITIONING_SPEED, numeric));
+}
+
 function normalizeRecordingReplayOptions(
   value: Partial<RecordingReplayOptions> | undefined,
   defaults: AppSettings["trajectories"],
@@ -234,6 +249,7 @@ function normalizeRecordingReplayOptions(
     homeMode: normalizeHomeMode(value?.homeMode),
     speed: normalizeReplaySpeed(value?.speed, defaults),
     autoVexPositioning: value?.autoVexPositioning === false ? false : true,
+    vexPositioningSpeed: normalizeVexPositioningSpeed(value?.vexPositioningSpeed),
     vexPositioningTimeoutS: normalizeVexPositioningTimeout(value?.vexPositioningTimeoutS),
     vexPositioningXyToleranceM: normalizeVexPositioningXyTolerance(
       value?.vexPositioningXyToleranceM,
@@ -258,6 +274,7 @@ function recordingReplayOptionsAreDefault(
     value.homeMode === "none" &&
     Math.abs(value.speed - defaults.defaultReplaySpeed) < 0.000001 &&
     value.autoVexPositioning &&
+    Math.abs(value.vexPositioningSpeed - DEFAULT_VEX_POSITIONING_SPEED) < 0.000001 &&
     Math.abs(value.vexPositioningTimeoutS - DEFAULT_VEX_POSITIONING_TIMEOUT_S) < 0.000001 &&
     Math.abs(value.vexPositioningXyToleranceM - DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M) < 0.000001 &&
     Math.abs(value.vexPositioningHeadingToleranceDeg - DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG) < 0.000001 &&
@@ -1737,6 +1754,7 @@ export class RobotController {
         homeMode: "none",
         speed: 1,
         autoVexPositioning: false,
+        vexPositioningSpeed: DEFAULT_VEX_POSITIONING_SPEED,
         vexPositioningTimeoutS: DEFAULT_VEX_POSITIONING_TIMEOUT_S,
         vexPositioningXyToleranceM: DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
         vexPositioningHeadingToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
@@ -3476,6 +3494,7 @@ PY
     const vexPositioningTimeoutFlag =
       ` \\\n  --vex-positioning-timeout-s ${replay.vexPositioningTimeoutS}`;
     const vexPositioningTolerancesFlags =
+      ` \\\n  --vex-positioning-speed ${replay.vexPositioningSpeed}` +
       ` \\\n  --vex-positioning-xy-tolerance-m ${replay.vexPositioningXyToleranceM}` +
       ` \\\n  --vex-positioning-heading-tolerance-deg ${replay.vexPositioningHeadingToleranceDeg}` +
       ` \\\n  --vex-positioning-xy-trim-tolerance-m ${replay.vexPositioningXyTrimToleranceM}` +
@@ -3825,6 +3844,7 @@ PY
       holdFinalS: replay.holdFinalS,
       includeBase: replay.includeBase,
       autoVexPositioning: replay.autoVexPositioning,
+      vexPositioningSpeed: replay.vexPositioningSpeed,
       vexPositioningTimeoutS: replay.vexPositioningTimeoutS,
       vexPositioningXyToleranceM: replay.vexPositioningXyToleranceM,
       vexPositioningHeadingToleranceDeg: replay.vexPositioningHeadingToleranceDeg,
@@ -3868,6 +3888,7 @@ PY
           holdFinalS: number;
           includeBase: boolean;
           autoVexPositioning: boolean;
+          vexPositioningSpeed: number;
           vexPositioningTimeoutS: number;
           vexPositioningXyToleranceM: number;
           vexPositioningHeadingToleranceDeg: number;
@@ -3892,6 +3913,7 @@ PY
         hold_final_s: command.holdFinalS,
         include_base: command.includeBase,
         auto_vex_positioning: command.autoVexPositioning,
+        vex_positioning_speed: command.vexPositioningSpeed,
         vex_positioning_timeout_s: command.vexPositioningTimeoutS,
         vex_positioning_xy_tolerance_m: command.vexPositioningXyToleranceM,
         vex_positioning_heading_tolerance_deg: command.vexPositioningHeadingToleranceDeg,

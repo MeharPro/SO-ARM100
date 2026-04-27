@@ -93,6 +93,7 @@ export interface RecordingReplayOptions {
   homeMode: ArmHomeMode;
   speed: number;
   autoVexPositioning: boolean;
+  vexPositioningSpeed: number;
   vexPositioningTimeoutS: number;
   vexPositioningXyToleranceM: number;
   vexPositioningHeadingToleranceDeg: number;
@@ -179,6 +180,7 @@ export interface PinnedMove {
   homeMode: ArmHomeMode;
   speed: number;
   autoVexPositioning: boolean;
+  vexPositioningSpeed: number;
   vexPositioningTimeoutS: number;
   vexPositioningXyToleranceM: number;
   vexPositioningHeadingToleranceDeg: number;
@@ -361,6 +363,7 @@ export interface ReplayRequest {
   homeMode: ArmHomeMode;
   speed: number;
   autoVexPositioning: boolean;
+  vexPositioningSpeed: number;
   vexPositioningTimeoutS: number;
   vexPositioningXyToleranceM: number;
   vexPositioningHeadingToleranceDeg: number;

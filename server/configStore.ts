@@ -24,6 +24,9 @@ const ARM_HOME_JOINT_KEYS = [
 const DEFAULT_VEX_POSITIONING_TIMEOUT_S = 8;
 const MIN_VEX_POSITIONING_TIMEOUT_S = 0.5;
 const MAX_VEX_POSITIONING_TIMEOUT_S = 60;
+const DEFAULT_VEX_POSITIONING_SPEED = 1;
+const MIN_VEX_POSITIONING_SPEED = 0.1;
+const MAX_VEX_POSITIONING_SPEED = 3;
 const DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M = 0.02;
 const DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 1.5;
 const DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M = 0.05;
@@ -215,6 +218,7 @@ export class ConfigStore {
       homeMode: this.normalizeHomeMode(raw?.homeMode),
       speed: this.normalizeReplaySpeed(raw?.speed),
       autoVexPositioning: raw?.autoVexPositioning === false ? false : true,
+      vexPositioningSpeed: this.normalizeVexPositioningSpeed(raw?.vexPositioningSpeed),
       vexPositioningTimeoutS: this.normalizeVexPositioningTimeout(raw?.vexPositioningTimeoutS),
       vexPositioningXyToleranceM: this.normalizeVexPositioningXyTolerance(
         raw?.vexPositioningXyToleranceM,
@@ -262,6 +266,10 @@ export class ConfigStore {
       homeMode: target === "pi" ? this.normalizeHomeMode(raw?.homeMode) : "none",
       speed: this.normalizeReplaySpeed(raw?.speed),
       autoVexPositioning: target === "pi" ? raw?.autoVexPositioning !== false : false,
+      vexPositioningSpeed:
+        target === "pi"
+          ? this.normalizeVexPositioningSpeed(raw?.vexPositioningSpeed)
+          : DEFAULT_VEX_POSITIONING_SPEED,
       vexPositioningTimeoutS:
         target === "pi"
           ? this.normalizeVexPositioningTimeout(raw?.vexPositioningTimeoutS)
@@ -293,6 +301,14 @@ export class ConfigStore {
   ): number {
     const numeric = Number(value);
     return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+  }
+
+  private normalizeVexPositioningSpeed(value: unknown): number {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      return DEFAULT_VEX_POSITIONING_SPEED;
+    }
+    return Math.min(MAX_VEX_POSITIONING_SPEED, Math.max(MIN_VEX_POSITIONING_SPEED, numeric));
   }
 
   private normalizeHomeMode(value: unknown): RecordingReplayOptions["homeMode"] {
@@ -401,6 +417,7 @@ export class ConfigStore {
         homeMode: this.normalizeHomeMode(candidate.homeMode),
         speed: this.normalizeReplaySpeed(candidate.speed, defaultReplaySpeed),
         autoVexPositioning: candidate.autoVexPositioning === false ? false : true,
+        vexPositioningSpeed: this.normalizeVexPositioningSpeed(candidate.vexPositioningSpeed),
         vexPositioningTimeoutS: this.normalizeVexPositioningTimeout(candidate.vexPositioningTimeoutS),
         vexPositioningXyToleranceM: this.normalizeVexPositioningXyTolerance(
           candidate.vexPositioningXyToleranceM,

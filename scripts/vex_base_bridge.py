@@ -25,7 +25,7 @@ VEX_COMM_SUFFIXES = ("if00", "if01")
 DEFAULT_COMMAND_TIMEOUT_S = 0.35
 DEFAULT_TELEMETRY_SLOT = 8
 DEFAULT_REPLAY_SLOT = 7
-REQUIRED_VEX_MIXER_VERSION = 6
+REQUIRED_VEX_MIXER_VERSION = 7
 DEFAULT_PROGRAM_CACHE_DIR = "~/.lekiwi-vex/programs"
 DEFAULT_REPLAY_CACHE_DIR = "~/.lekiwi-vex/replays"
 DEFAULT_VEXCOM_PATH_GLOBS = (
@@ -405,6 +405,14 @@ def zero_motion():
     return {{"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}}
 
 
+def motion_is_active(motion):
+    return (
+        abs(motion["x.vel"]) > 0.0001
+        or abs(motion["y.vel"]) > 0.0001
+        or abs(motion["theta.vel"]) > 0.0001
+    )
+
+
 def controller_motion():
     forward_pct = apply_deadband({forward_expr})
     strafe_pct = apply_deadband({strafe_expr})
@@ -712,20 +720,15 @@ def main():
                     apply_drive_motion(active_motion)
                     source = "pi-drive"
             else:
-                if remote_mode in ("hold", "origin"):
-                    active_motion = controller_motion()
-                    if (
-                        abs(active_motion["x.vel"]) > 0.0001
-                        or abs(active_motion["y.vel"]) > 0.0001
-                        or abs(active_motion["theta.vel"]) > 0.0001
-                    ):
-                        clear_remote_command(release_controller=True)
-                        apply_drive_motion(active_motion)
-                        source = "controller"
-                    else:
-                        active_motion = zero_motion()
-                        hold_drive()
-                        source = "pi-origin" if remote_mode == "origin" else "pi-hold"
+                active_motion = controller_motion()
+                if motion_is_active(active_motion):
+                    clear_remote_command(release_controller=True)
+                    apply_drive_motion(active_motion)
+                    source = "controller"
+                elif remote_mode in ("hold", "origin"):
+                    active_motion = zero_motion()
+                    hold_drive()
+                    source = "pi-origin" if remote_mode == "origin" else "pi-hold"
                 else:
                     active_motion = zero_motion()
                     hold_drive()

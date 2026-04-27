@@ -151,6 +151,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum seconds to spend aligning the VEX base before arm replay.",
     )
     parser.add_argument(
+        "--vex-positioning-speed",
+        type=float,
+        default=1.0,
+        help="Speed multiplier for VEX start-position correction pulses.",
+    )
+    parser.add_argument(
         "--vex-positioning-xy-tolerance-m",
         type=float,
         default=XY_TRACK_TOLERANCE_M,
@@ -711,6 +717,7 @@ def main() -> None:
                 heading_tolerance_deg=args.vex_positioning_heading_tolerance_deg,
                 xy_trim_tolerance_m=args.vex_positioning_xy_trim_tolerance_m,
                 heading_trim_tolerance_deg=args.vex_positioning_heading_trim_tolerance_deg,
+                speed_scale=args.vex_positioning_speed,
                 sensor_status_emitter=sensor_status_emitter,
                 sensor_status_source="replay-preposition",
             )

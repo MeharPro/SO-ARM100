@@ -453,6 +453,38 @@ class SensorReplayTests(unittest.TestCase):
         self.assertTrue(all(ttl <= sensor_replay.PREPOSITION_LARGE_PULSE_TTL_MS for ttl in vex_bridge.motion_ttls_ms))
         self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
+    def test_preposition_speed_scale_slows_correction_velocity(self) -> None:
+        samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
+        replay_state = SensorAwareReplayState(
+            samples,
+            replay_mode="drive",
+            speed=1.0,
+            control_config={"tuning": {"maxLinearSpeedMps": 0.35, "maxTurnSpeedDps": 90.0}},
+        )
+        live_state = {"x": 1.04, "y": 2.0, "heading": 0.0, "pose_epoch": 1}
+        observation_reader = FakeObservationReader(live_state)
+        vex_bridge = FakeVexBridge(live_state)
+
+        with mock.patch.object(sensor_replay.time, "sleep", return_value=None):
+            aligned = preposition_vex_base_to_recorded_state(
+                vex_bridge,
+                observation_reader,
+                replay_state,
+                samples[0]["state"],  # type: ignore[arg-type]
+                timeout_s=SENSOR_PREPOSITION_TIMEOUT_S,
+                settle_s=0.0,
+                speed_scale=0.5,
+            )
+
+        self.assertTrue(aligned)
+        x_commands = [
+            motion
+            for command_type, motion in vex_bridge.commands
+            if command_type != "hold" and abs(motion["x.vel"]) > 1e-6
+        ]
+        self.assertGreater(len(x_commands), 0)
+        self.assertAlmostEqual(abs(x_commands[0]["x.vel"]), 0.03)
+
     def test_preposition_moves_away_when_ultrasonic_distance_is_too_close(self) -> None:
         samples = [build_sample(x_m=1.0, y_m=2.0, heading_deg=0.0, pose_epoch=1)]
         replay_state = SensorAwareReplayState(
@@ -949,7 +981,7 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("inertial_1.reset_heading()", source)
         self.assertIn("pose_epoch += 1", source)
         self.assertIn('"vex_pose_epoch":%d', source)
-        self.assertIn("VEX_MIXER_VERSION = 6", source)
+        self.assertIn("VEX_MIXER_VERSION = 7", source)
         self.assertIn('"vex_mixer_version":%d', source)
         self.assertIn("remote_takeover = True", source)
         self.assertIn('remote_mode = "hold"', source)
@@ -1009,6 +1041,21 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("motor.spin(FORWARD if percent >= 0 else REVERSE)", source)
         self.assertIn("spin_drive_motor(front_right, front_right_pct)", source)
         self.assertNotIn("front_right.set_velocity(front_right_pct, PERCENT)", source)
+
+    def test_generated_vex_program_allows_controller_override_after_remote_timeout(self) -> None:
+        source = build_vex_telemetry_program_source({})
+
+        self.assertIn("def motion_is_active(motion):", source)
+        self.assertIn(
+            'active_motion = controller_motion()\n'
+            '                if motion_is_active(active_motion):\n'
+            '                    clear_remote_command(release_controller=True)\n'
+            '                    apply_drive_motion(active_motion)\n'
+            '                    source = "controller"',
+            source,
+        )
+        self.assertIn('elif remote_mode in ("hold", "origin"):', source)
+        self.assertIn('source = "pi-timeout"', source)
 
     def test_wheel_correction_signs_match_default_x_drive_mixer(self) -> None:
         self.assertEqual(sensor_replay.WHEEL_CORRECTION_SIGNS["vex_front_left.pos"], (1.0, 1.0))

@@ -79,6 +79,8 @@ PREPOSITION_LINEAR_CROSS_ACCEPT_M = XY_TRACK_TOLERANCE_M
 PREPOSITION_LINEAR_CROSS_TRIM_M = 0.05
 PREPOSITION_LINEAR_CROSS_CONFIRMATIONS = 2
 PREPOSITION_MAX_WHEEL_PERCENT = 18.0
+PREPOSITION_SPEED_SCALE_MIN = 0.1
+PREPOSITION_SPEED_SCALE_MAX = 3.0
 ULTRASONIC_FILTER_WINDOW = 5
 ULTRASONIC_FILTER_MIN_SAMPLES = 3
 ULTRASONIC_FILTER_MAX_STEP_M = 0.03
@@ -191,6 +193,16 @@ def _bounded_signed_correction(raw_value: float, *, limit: float, floor: float) 
     magnitude = min(abs(float(raw_value)), correction_limit)
     magnitude = max(magnitude, correction_floor)
     return magnitude if raw_value > 0.0 else -magnitude
+
+
+def _preposition_speed_scale(value: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if numeric <= 0.0:
+        return 1.0
+    return clamp(numeric, PREPOSITION_SPEED_SCALE_MIN, PREPOSITION_SPEED_SCALE_MAX)
 
 
 def _preposition_pulse_ttl_ms(axis: str, abs_error: float, *, axis_motion_count: int = 0) -> int:
@@ -995,6 +1007,7 @@ def preposition_vex_base_to_recorded_state(
     heading_tolerance_deg: float = THETA_TRACK_TOLERANCE_DEG,
     xy_trim_tolerance_m: float = PREPOSITION_LINEAR_CROSS_TRIM_M,
     heading_trim_tolerance_deg: float = PREPOSITION_HEADING_CROSS_TRIM_DEG,
+    speed_scale: float = 1.0,
     sensor_status_emitter: Any | None = None,
     sensor_status_source: str = "preposition",
     should_stop: Any | None = None,
@@ -1003,6 +1016,7 @@ def preposition_vex_base_to_recorded_state(
     heading_tolerance = max(float(heading_tolerance_deg), 0.0)
     xy_trim_tolerance = max(float(xy_trim_tolerance_m), xy_tolerance)
     heading_trim_tolerance = max(float(heading_trim_tolerance_deg), heading_tolerance)
+    positioning_speed_scale = _preposition_speed_scale(speed_scale)
 
     def axis_cross_accept_tolerance(axis: str) -> float:
         return _axis_cross_accept_tolerance(
@@ -1671,6 +1685,11 @@ def preposition_vex_base_to_recorded_state(
                 max_turn_speed_dps=replay_state.max_turn_speed_dps,
             )
             command.motion["theta.vel"] *= axis_direction_multipliers.get(active_axis, 1.0)
+        if abs(positioning_speed_scale - 1.0) > 1e-6:
+            command.motion = {
+                key: float(value) * positioning_speed_scale
+                for key, value in command.motion.items()
+            }
         command.motion = _limit_motion_by_wheel_percent(
             command.motion,
             max_linear_speed_mps=replay_state.max_linear_speed_mps,
@@ -1704,6 +1723,7 @@ def preposition_vex_base_to_recorded_state(
                     "axis": active_axis,
                     "nonzero_axes": nonzero_motion_axes,
                     "ttl_ms": command_ttl_ms,
+                    "speed_scale": round(positioning_speed_scale, 3),
                     "axis_motion_count": axis_motion_counts.get(active_axis, 0),
                     "motion": {key: round(float(value), 4) for key, value in command.motion.items()},
                     "wheel_pct": _drive_wheel_percentages(

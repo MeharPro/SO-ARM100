@@ -231,6 +231,15 @@ class UiCommandWatcher:
             return None
 
         try:
+            vex_positioning_speed = float(payload.get("vex_positioning_speed", 1.0))
+        except (TypeError, ValueError):
+            print(f"[replay] error vex_positioning_speed is invalid in {self.path}", flush=True)
+            return None
+        if vex_positioning_speed <= 0:
+            print(f"[replay] error vex_positioning_speed must be greater than 0 in {self.path}", flush=True)
+            return None
+
+        try:
             vex_positioning_xy_tolerance_m = float(
                 payload.get("vex_positioning_xy_tolerance_m", XY_TRACK_TOLERANCE_M)
             )
@@ -316,6 +325,7 @@ class UiCommandWatcher:
             "hold_final_s": max(0.0, hold_final_s),
             "include_base": include_base,
             "auto_vex_positioning": auto_vex_positioning,
+            "vex_positioning_speed": vex_positioning_speed,
             "vex_positioning_timeout_s": vex_positioning_timeout_s,
             "vex_positioning_xy_tolerance_m": vex_positioning_xy_tolerance_m,
             "vex_positioning_heading_tolerance_deg": vex_positioning_heading_tolerance_deg,
@@ -798,6 +808,7 @@ def execute_replay(
     hold_final_s = float(command["hold_final_s"])
     include_base = bool(command["include_base"])
     auto_vex_positioning = bool(command.get("auto_vex_positioning", True))
+    vex_positioning_speed = float(command.get("vex_positioning_speed", 1.0))
     vex_positioning_timeout_s = float(command.get("vex_positioning_timeout_s", SENSOR_PREPOSITION_TIMEOUT_S))
     vex_positioning_xy_tolerance_m = float(
         command.get("vex_positioning_xy_tolerance_m", XY_TRACK_TOLERANCE_M)
@@ -948,6 +959,7 @@ def execute_replay(
                 heading_tolerance_deg=vex_positioning_heading_tolerance_deg,
                 xy_trim_tolerance_m=vex_positioning_xy_trim_tolerance_m,
                 heading_trim_tolerance_deg=vex_positioning_heading_trim_tolerance_deg,
+                speed_scale=vex_positioning_speed,
                 sensor_status_emitter=sensor_status_emitter,
                 sensor_status_source="host-replay-preposition",
                 should_stop=should_stop_preposition,

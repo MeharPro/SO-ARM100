@@ -103,6 +103,9 @@ const VEX_POSITION_LOG_PREFIX = "[vex-position]";
 const DEFAULT_VEX_POSITIONING_TIMEOUT_S = 8;
 const MIN_VEX_POSITIONING_TIMEOUT_S = 0.5;
 const MAX_VEX_POSITIONING_TIMEOUT_S = 60;
+const DEFAULT_VEX_POSITIONING_SPEED = 1;
+const MIN_VEX_POSITIONING_SPEED = 0.1;
+const MAX_VEX_POSITIONING_SPEED = 3;
 const DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M = 0.02;
 const DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 1.5;
 const DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M = 0.05;
@@ -652,6 +655,10 @@ function parseNumber(value: string | undefined): number | null {
 
 function clampVexPositioningTimeout(value: number): number {
   return clampNumber(value, MIN_VEX_POSITIONING_TIMEOUT_S, MAX_VEX_POSITIONING_TIMEOUT_S);
+}
+
+function clampVexPositioningSpeed(value: number): number {
+  return clampNumber(value, MIN_VEX_POSITIONING_SPEED, MAX_VEX_POSITIONING_SPEED);
 }
 
 function clampVexPositioningXyTolerance(value: number): number {
@@ -1489,6 +1496,7 @@ export default function App() {
   const [recordingDetailError, setRecordingDetailError] = useState("");
   const [recordingDetailReloadToken, setRecordingDetailReloadToken] = useState(0);
   const [replayIncludeBasePreference, setReplayIncludeBasePreference] = useState<boolean | null>(null);
+  const [vexPositioningSpeed, setVexPositioningSpeed] = useState(DEFAULT_VEX_POSITIONING_SPEED);
   const [vexPositioningTimeoutDraft, setVexPositioningTimeoutDraft] = useState(
     formatSecondsInput(DEFAULT_VEX_POSITIONING_TIMEOUT_S),
   );
@@ -1643,6 +1651,7 @@ export default function App() {
       homeMode: savedOptions?.homeMode ?? "none",
       speed: savedOptions?.speed ?? state?.settings.trajectories.defaultReplaySpeed ?? 1,
       autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+      vexPositioningSpeed: savedOptions?.vexPositioningSpeed ?? DEFAULT_VEX_POSITIONING_SPEED,
       vexPositioningTimeoutS:
         savedOptions?.vexPositioningTimeoutS ?? DEFAULT_VEX_POSITIONING_TIMEOUT_S,
       vexPositioningXyToleranceM:
@@ -1670,6 +1679,12 @@ export default function App() {
   );
   const effectiveReplayIncludeBase =
     replayTarget === "pi" ? (replayIncludeBasePreference ?? false) : false;
+  const effectiveVexPositioningSpeed = useMemo(() => {
+    if (!Number.isFinite(vexPositioningSpeed) || vexPositioningSpeed <= 0) {
+      return selectedRecordingReplayOptions.vexPositioningSpeed;
+    }
+    return clampVexPositioningSpeed(vexPositioningSpeed);
+  }, [selectedRecordingReplayOptions.vexPositioningSpeed, vexPositioningSpeed]);
   const effectiveVexPositioningTimeoutS = useMemo(() => {
     const draftTimeoutS = parseNumber(vexPositioningTimeoutDraft);
     if (draftTimeoutS === null || draftTimeoutS <= 0) {
@@ -1729,6 +1744,10 @@ export default function App() {
   useEffect(() => {
     setPinSpeed(selectedRecordingReplayOptions.speed);
   }, [selectedRecordingEntry?.path, selectedRecordingReplayOptions.speed]);
+
+  useEffect(() => {
+    setVexPositioningSpeed(selectedRecordingReplayOptions.vexPositioningSpeed);
+  }, [selectedRecordingEntry?.path, selectedRecordingReplayOptions.vexPositioningSpeed]);
 
   useEffect(() => {
     setVexPositioningTimeoutDraft(
@@ -1922,6 +1941,10 @@ export default function App() {
       homeMode: replayTarget === "pi" ? selectedRecordingHomeMode : "none",
       autoVexPositioning:
         replayTarget === "pi" ? selectedRecordingReplayOptions.autoVexPositioning : false,
+      vexPositioningSpeed:
+        replayTarget === "pi"
+          ? effectiveVexPositioningSpeed
+          : DEFAULT_VEX_POSITIONING_SPEED,
       vexPositioningTimeoutS:
         replayTarget === "pi"
           ? effectiveVexPositioningTimeoutS
@@ -1954,6 +1977,7 @@ export default function App() {
       selectedRecording,
       selectedRecordingHomeMode,
       selectedRecordingReplayOptions.autoVexPositioning,
+      effectiveVexPositioningSpeed,
       effectiveVexPositioningTimeoutS,
       effectiveVexPositioningXyToleranceM,
       effectiveVexPositioningHeadingToleranceDeg,
@@ -2735,6 +2759,22 @@ export default function App() {
     );
   };
 
+  const handleVexPositioningSpeedChange = (speed: number) => {
+    setVexPositioningSpeed(speed);
+    if (!Number.isFinite(speed) || speed <= 0) {
+      return;
+    }
+
+    const clampedSpeed = clampVexPositioningSpeed(speed);
+    if (Math.abs(clampedSpeed - speed) > 0.000001) {
+      setVexPositioningSpeed(clampedSpeed);
+    }
+    void saveSelectedRecordingReplayOptions({
+      ...selectedRecordingReplayOptions,
+      vexPositioningSpeed: clampedSpeed,
+    });
+  };
+
   const handleVexPositioningTimeoutChange = (value: string) => {
     setVexPositioningTimeoutDraft(value);
     const timeoutS = parseNumber(value);
@@ -2837,6 +2877,7 @@ export default function App() {
       homeMode: savedOptions?.homeMode ?? "none",
       speed: savedOptions?.speed ?? defaultSpeed,
       autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+      vexPositioningSpeed: savedOptions?.vexPositioningSpeed ?? DEFAULT_VEX_POSITIONING_SPEED,
       vexPositioningTimeoutS:
         savedOptions?.vexPositioningTimeoutS ?? DEFAULT_VEX_POSITIONING_TIMEOUT_S,
       vexPositioningXyToleranceM:
@@ -3911,6 +3952,20 @@ export default function App() {
                       />
                       <span>Auto VEX positioning</span>
                     </label>
+                    <label>
+                      Speed position fixing
+                      <input
+                        type="number"
+                        min={MIN_VEX_POSITIONING_SPEED}
+                        max={MAX_VEX_POSITIONING_SPEED}
+                        step="0.1"
+                        value={vexPositioningSpeed}
+                        disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                        onChange={(event) =>
+                          handleVexPositioningSpeedChange(Number(event.target.value))
+                        }
+                      />
+                    </label>
                     <label className="checkbox-row">
                       <input
                         type="checkbox"
@@ -4492,7 +4547,7 @@ export default function App() {
                           ? " • VEX positioning off"
                           : ""}
                         {move.target === "pi" && move.autoVexPositioning
-                          ? ` • VEX timeout ${formatSecondsInput(move.vexPositioningTimeoutS)}s • X/Y tol ${formatSecondsInput(move.vexPositioningXyToleranceM)}m • X/Y trim ${formatSecondsInput(move.vexPositioningXyTrimToleranceM)}m`
+                          ? ` • VEX fix ${move.vexPositioningSpeed}x • VEX timeout ${formatSecondsInput(move.vexPositioningTimeoutS)}s • X/Y tol ${formatSecondsInput(move.vexPositioningXyToleranceM)}m • X/Y trim ${formatSecondsInput(move.vexPositioningXyTrimToleranceM)}m`
                           : ""}
                       </p>
                       <div className="button-cluster inline">

@@ -80,9 +80,9 @@ ARM_BINDINGS = (
 )
 
 BASE_BINDINGS = (
-    ("x.vel", ("j",), ("l",)),
+    ("x.vel", ("l",), ("j",)),
     ("y.vel", ("i",), ("k",)),
-    ("theta.vel", ("u",), ("o",)),
+    ("theta.vel", ("o",), ("u",)),
 )
 CONTROL_KEYS = {
     "esc",
@@ -416,9 +416,9 @@ def build_base_action(
     turn_speed: float,
 ) -> dict[str, float]:
     return {
-        "x.vel": axis_from_keys(pressed, ("j",), ("l",)) * linear_speed,
-        "y.vel": axis_from_keys(pressed, ("i",), ("k",)) * linear_speed,
-        "theta.vel": axis_from_keys(pressed, ("u",), ("o",)) * turn_speed,
+        axis: axis_from_keys(pressed, positive_keys, negative_keys)
+        * (turn_speed if axis == "theta.vel" else linear_speed)
+        for axis, positive_keys, negative_keys in BASE_BINDINGS
     }
 
 
