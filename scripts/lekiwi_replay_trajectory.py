@@ -26,6 +26,7 @@ from lekiwi_runtime import (
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
+    servo_protection_kwargs_from_args,
     stop_robot_base,
     ULTRASONIC_MAX_DISTANCE_M,
     ULTRASONIC_MIN_DISTANCE_M,
@@ -451,6 +452,7 @@ def move_arm_to_home(
         target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
         torque_watcher.poll(robot)
         action = safety_filter.normalize(target_action)
+        action = servo_protection.limit_action(action)
         sent_action = apply_robot_action(
             robot,
             action,
@@ -494,6 +496,7 @@ def move_arm_to_home(
         target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
         torque_watcher.poll(robot)
         action = safety_filter.normalize(target_action)
+        action = servo_protection.limit_action(action)
         sent_action = apply_robot_action(
             robot,
             action,
@@ -591,7 +594,11 @@ def main() -> None:
         enabled=args.safer_servo_mode,
         absolute_position_limits=absolute_position_limits,
     )
-    servo_protection = ServoProtectionSupervisor(robot, logger)
+    servo_protection = ServoProtectionSupervisor(
+        robot,
+        logger,
+        **servo_protection_kwargs_from_args(args),
+    )
     observation_reader = ResilientObservationReader(robot, logger)
     sensor_status_emitter = LiveRobotSensorStatusEmitter()
     try:
@@ -765,6 +772,7 @@ def main() -> None:
 
             torque_watcher.poll(robot)
             action = safety_filter.normalize(build_action(state, include_base=args.include_base))
+            action = servo_protection.limit_action(action)
             sent_action = apply_robot_action(
                 robot,
                 action,

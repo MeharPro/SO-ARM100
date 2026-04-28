@@ -32,6 +32,7 @@ from lekiwi_runtime import (
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
+    servo_protection_kwargs_from_args,
     stop_robot_base,
 )
 from lekiwi_sensor_replay import (
@@ -683,6 +684,7 @@ def execute_go_home_command(
             target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
             torque_watcher.poll(robot)
             action = safety_filter.normalize(target_action)
+            action = servo_protection.limit_action(action)
             sent_action = apply_robot_action(
                 robot,
                 action,
@@ -725,6 +727,7 @@ def execute_go_home_command(
             target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
             torque_watcher.poll(robot)
             action = safety_filter.normalize(target_action)
+            action = servo_protection.limit_action(action)
             sent_action = apply_robot_action(
                 robot,
                 action,
@@ -1031,6 +1034,7 @@ def execute_replay(
             precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
             torque_watcher.poll(robot)
             action = replay_filter.normalize(build_replay_action(state, include_base=include_base))
+            action = servo_protection.limit_action(action)
             sent_action = apply_robot_action(
                 robot,
                 action,
@@ -1225,7 +1229,11 @@ def main() -> None:
         enabled=args.safer_servo_mode,
         absolute_position_limits=absolute_position_limits,
     )
-    servo_protection = ServoProtectionSupervisor(robot, logger)
+    servo_protection = ServoProtectionSupervisor(
+        robot,
+        logger,
+        **servo_protection_kwargs_from_args(args),
+    )
     observation_reader = ResilientObservationReader(robot, logger)
     sensor_status_emitter = LiveRobotSensorStatusEmitter()
     try:
@@ -1375,6 +1383,7 @@ def main() -> None:
                 msg = cmd_socket.recv_string(zmq.NOBLOCK)
                 if not servo_protection.latched:
                     action = live_safety_filter.normalize(dict(json.loads(msg)))
+                    action = servo_protection.limit_action(action)
                     sent_action = apply_robot_action(
                         robot,
                         action,

@@ -97,6 +97,8 @@ const KEYBOARD_TELEOP_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_keyboard_t
 const CONTROL_LOOP_HZ = 90;
 const KEYBOARD_TELEOP_FPS = 90;
 const KEYBOARD_TELEOP_PRINT_EVERY = 30;
+const KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS = 0.06;
+const KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS = 18;
 const DATASET_CAPTURE_SCRIPT = path.join(ROOT_DIR, "scripts", "lekiwi_record_dataset_host.py");
 const LOCAL_LEADER_CAPTURE_SCRIPT = path.join(
   ROOT_DIR,
@@ -2674,6 +2676,14 @@ export class RobotController {
     jointLimitsJson: string,
   ): string {
     assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
+    const keyboardLinearSpeed = Math.min(
+      settings.vex.tuning.maxLinearSpeedMps,
+      KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
+    );
+    const keyboardTurnSpeed = Math.min(
+      settings.vex.tuning.maxTurnSpeedDps,
+      KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
+    );
     return [
       this.buildMacActivation(settings),
       `python ${shellQuote(KEYBOARD_TELEOP_SCRIPT)} \\`,
@@ -2681,8 +2691,8 @@ export class RobotController {
       `  --robot-id ${shellQuote(settings.host.robotId)} \\`,
       `  --fps ${KEYBOARD_TELEOP_FPS} \\`,
       `  --print-every ${KEYBOARD_TELEOP_PRINT_EVERY} \\`,
-      `  --base-linear-speed ${settings.vex.tuning.maxLinearSpeedMps} \\`,
-      `  --base-turn-speed ${settings.vex.tuning.maxTurnSpeedDps} \\`,
+      `  --base-linear-speed ${keyboardLinearSpeed} \\`,
+      `  --base-turn-speed ${keyboardTurnSpeed} \\`,
       `  --joint-limits-json ${shellQuote(jointLimitsJson)}`,
     ].join("\n");
   }

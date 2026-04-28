@@ -62,23 +62,97 @@ class KeyboardTeleopTests(unittest.TestCase):
     def test_base_keyboard_mapping_matches_documented_vex_controls(self) -> None:
         forward_left_turn_left = keyboard_teleop.build_base_action(
             {"i", "j", "u"},
-            linear_speed=0.25,
-            turn_speed=30.0,
+            linear_speed=0.04,
+            turn_speed=12.0,
         )
 
-        self.assertEqual(forward_left_turn_left["x.vel"], -0.25)
-        self.assertEqual(forward_left_turn_left["y.vel"], 0.25)
-        self.assertEqual(forward_left_turn_left["theta.vel"], -30.0)
+        self.assertEqual(forward_left_turn_left["x.vel"], -0.04)
+        self.assertEqual(forward_left_turn_left["y.vel"], 0.04)
+        self.assertEqual(forward_left_turn_left["theta.vel"], -12.0)
 
         back_right_turn_right = keyboard_teleop.build_base_action(
             {"k", "l", "o"},
-            linear_speed=0.25,
-            turn_speed=30.0,
+            linear_speed=0.04,
+            turn_speed=12.0,
         )
 
-        self.assertEqual(back_right_turn_right["x.vel"], 0.25)
-        self.assertEqual(back_right_turn_right["y.vel"], -0.25)
-        self.assertEqual(back_right_turn_right["theta.vel"], 30.0)
+        self.assertEqual(back_right_turn_right["x.vel"], 0.04)
+        self.assertEqual(back_right_turn_right["y.vel"], -0.04)
+        self.assertEqual(back_right_turn_right["theta.vel"], 12.0)
+
+    def test_base_keyboard_single_keys_are_axis_isolated_and_speed_limited(self) -> None:
+        requested_linear_speed = 0.35
+        requested_turn_speed = 90.0
+        linear_limit = keyboard_teleop.KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS
+        turn_limit = keyboard_teleop.KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS
+
+        forward = keyboard_teleop.build_base_action(
+            {"i"},
+            linear_speed=requested_linear_speed,
+            turn_speed=requested_turn_speed,
+        )
+        self.assertEqual(forward, {"x.vel": 0.0, "y.vel": linear_limit, "theta.vel": 0.0})
+
+        back = keyboard_teleop.build_base_action(
+            {"k"},
+            linear_speed=requested_linear_speed,
+            turn_speed=requested_turn_speed,
+        )
+        self.assertEqual(back, {"x.vel": 0.0, "y.vel": -linear_limit, "theta.vel": 0.0})
+
+        turn_left = keyboard_teleop.build_base_action(
+            {"u"},
+            linear_speed=requested_linear_speed,
+            turn_speed=requested_turn_speed,
+        )
+        self.assertEqual(turn_left, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": -turn_limit})
+
+        turn_right = keyboard_teleop.build_base_action(
+            {"o"},
+            linear_speed=requested_linear_speed,
+            turn_speed=requested_turn_speed,
+        )
+        self.assertEqual(turn_right, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": turn_limit})
+
+    def test_base_keyboard_ramp_accelerates_held_key_slowly(self) -> None:
+        ramp = keyboard_teleop.KeyboardBaseRamp()
+        linear_limit = keyboard_teleop.KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS
+        initial_ratio = keyboard_teleop.KEYBOARD_BASE_INITIAL_SPEED_RATIO
+
+        first = ramp.update(
+            {"i"},
+            linear_speed=0.35,
+            turn_speed=90.0,
+            now_s=10.0,
+        )
+        halfway = ramp.update(
+            {"i"},
+            linear_speed=0.35,
+            turn_speed=90.0,
+            now_s=10.0 + keyboard_teleop.KEYBOARD_BASE_ACCELERATION_S / 2.0,
+        )
+        fully_ramped = ramp.update(
+            {"i"},
+            linear_speed=0.35,
+            turn_speed=90.0,
+            now_s=10.0 + keyboard_teleop.KEYBOARD_BASE_ACCELERATION_S,
+        )
+
+        self.assertAlmostEqual(first["y.vel"], linear_limit * initial_ratio)
+        self.assertGreater(halfway["y.vel"], first["y.vel"])
+        self.assertLess(halfway["y.vel"], fully_ramped["y.vel"])
+        self.assertAlmostEqual(fully_ramped["y.vel"], linear_limit)
+        self.assertEqual(first["x.vel"], 0.0)
+        self.assertEqual(first["theta.vel"], 0.0)
+
+        ramp.update(set(), linear_speed=0.35, turn_speed=90.0, now_s=13.0)
+        reset = ramp.update(
+            {"i"},
+            linear_speed=0.35,
+            turn_speed=90.0,
+            now_s=14.0,
+        )
+        self.assertAlmostEqual(reset["y.vel"], linear_limit * initial_ratio)
 
     def test_direction_lock_blocks_outward_motion_but_allows_reverse(self) -> None:
         joint = "arm_shoulder_lift.pos"

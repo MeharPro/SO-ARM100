@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -27,6 +28,10 @@ except Exception:  # pragma: no cover - runtime dependency in the lerobot env
 
 FPS = 30
 OBSERVATION_POLL_INTERVAL_S = 1.0 / 30.0
+KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS = 0.06
+KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS = 18.0
+KEYBOARD_BASE_INITIAL_SPEED_RATIO = 0.25
+KEYBOARD_BASE_ACCELERATION_S = 2.5
 LIMIT_LOCK_ERROR_DEG = 2.0
 LIMIT_LOCK_PROGRESS_EPSILON_DEG = 0.2
 LIMIT_LOCK_TIMEOUT_S = 0.3
@@ -107,8 +112,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--robot-id", default=os.getenv("LEKIWI_ROBOT_ID", "follow-mobile"))
     parser.add_argument("--keyboard-id", default=os.getenv("LEKIWI_KEYBOARD_ID", "my_laptop_keyboard"))
     parser.add_argument("--fps", type=int, default=int(os.getenv("LEKIWI_FPS", FPS)))
-    parser.add_argument("--base-linear-speed", type=float, default=0.2)
-    parser.add_argument("--base-turn-speed", type=float, default=60.0)
+    parser.add_argument("--base-linear-speed", type=float, default=KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS)
+    parser.add_argument("--base-turn-speed", type=float, default=KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS)
     parser.add_argument("--joint-limits-json", default="{}")
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--connect-timeout-s", type=int, default=10)
@@ -123,6 +128,22 @@ def axis_from_keys(
     return float(any(key in pressed for key in positive_keys)) - float(
         any(key in pressed for key in negative_keys)
     )
+
+
+def clamp_keyboard_base_speed(value: float, limit: float) -> float:
+    if not isinstance(value, (int, float)):
+        return 0.0
+    if not math.isfinite(float(value)):
+        return 0.0
+    return max(0.0, min(float(value), float(limit)))
+
+
+def clamp_unit_interval(value: float) -> float:
+    if not isinstance(value, (int, float)):
+        return 0.0
+    if not math.isfinite(float(value)):
+        return 0.0
+    return max(0.0, min(float(value), 1.0))
 
 
 def _poll_quartz_pressed_keys() -> set[str]:
@@ -414,12 +435,69 @@ def build_base_action(
     pressed: set[str],
     linear_speed: float,
     turn_speed: float,
+    axis_speed_scales: dict[str, float] | None = None,
 ) -> dict[str, float]:
+    limited_linear_speed = clamp_keyboard_base_speed(
+        linear_speed,
+        KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
+    )
+    limited_turn_speed = clamp_keyboard_base_speed(
+        turn_speed,
+        KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
+    )
     return {
         axis: axis_from_keys(pressed, positive_keys, negative_keys)
-        * (turn_speed if axis == "theta.vel" else linear_speed)
+        * (limited_turn_speed if axis == "theta.vel" else limited_linear_speed)
+        * clamp_unit_interval((axis_speed_scales or {}).get(axis, 1.0))
         for axis, positive_keys, negative_keys in BASE_BINDINGS
     }
+
+
+class KeyboardBaseRamp:
+    def __init__(self) -> None:
+        self.active_since: dict[str, float] = {}
+        self.active_sign: dict[str, float] = {}
+
+    def update(
+        self,
+        pressed: set[str],
+        *,
+        linear_speed: float,
+        turn_speed: float,
+        now_s: float,
+    ) -> dict[str, float]:
+        scales: dict[str, float] = {}
+        active_axes: set[str] = set()
+        for axis, positive_keys, negative_keys in BASE_BINDINGS:
+            sign = axis_from_keys(pressed, positive_keys, negative_keys)
+            if sign == 0.0:
+                self.active_since.pop(axis, None)
+                self.active_sign.pop(axis, None)
+                continue
+
+            active_axes.add(axis)
+            if self.active_sign.get(axis) != sign:
+                self.active_sign[axis] = sign
+                self.active_since[axis] = now_s
+
+            held_s = max(now_s - self.active_since.get(axis, now_s), 0.0)
+            ramp_progress = clamp_unit_interval(held_s / KEYBOARD_BASE_ACCELERATION_S)
+            scales[axis] = (
+                KEYBOARD_BASE_INITIAL_SPEED_RATIO
+                + (1.0 - KEYBOARD_BASE_INITIAL_SPEED_RATIO) * ramp_progress
+            )
+
+        for axis in tuple(self.active_since):
+            if axis not in active_axes:
+                self.active_since.pop(axis, None)
+                self.active_sign.pop(axis, None)
+
+        return build_base_action(
+            pressed,
+            linear_speed=linear_speed,
+            turn_speed=turn_speed,
+            axis_speed_scales=scales,
+        )
 
 
 def update_arm_targets(
@@ -498,6 +576,7 @@ def main() -> None:
     observed_arm_positions: dict[str, float] = {}
     last_pressed: set[str] = set()
     next_observation_poll_t = 0.0
+    base_ramp = KeyboardBaseRamp()
 
     try:
         print(f"Connecting to LeKiwi host at {args.remote_host}", flush=True)
@@ -549,10 +628,11 @@ def main() -> None:
                 position_limits,
                 direction_limiter,
             )
-            base_action = build_base_action(
+            base_action = base_ramp.update(
                 pressed,
                 linear_speed=args.base_linear_speed,
                 turn_speed=args.base_turn_speed,
+                now_s=loop_start_t,
             )
             action = {
                 **arm_targets,

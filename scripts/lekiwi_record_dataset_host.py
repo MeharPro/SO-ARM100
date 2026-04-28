@@ -25,6 +25,7 @@ from lekiwi_runtime import (
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
+    servo_protection_kwargs_from_args,
     stop_robot_base,
 )
 from vex_base_bridge import VexBaseBridge, add_vex_base_args
@@ -208,6 +209,7 @@ def main() -> None:
         robot,
         logger,
         stall_detection_enabled=not is_free_teach,
+        **servo_protection_kwargs_from_args(args),
     )
     observation_reader = ResilientObservationReader(robot, logger)
     sensor_status_emitter = LiveRobotSensorStatusEmitter()
@@ -328,9 +330,11 @@ def main() -> None:
                 current_action = make_free_teach_action(observation)
 
             if phase == "recording":
+                action = safety_filter.normalize(current_action)
+                action = servo_protection.limit_action(action)
                 sent_action = apply_robot_action(
                     robot,
-                    safety_filter.normalize(current_action),
+                    action,
                     allow_legacy_base=args.enable_base,
                 )
                 safety_filter.update(sent_action)
@@ -361,9 +365,11 @@ def main() -> None:
                         flush=True,
                     )
             else:
+                action = safety_filter.normalize(current_action)
+                action = servo_protection.limit_action(action)
                 sent_action = apply_robot_action(
                     robot,
-                    safety_filter.normalize(current_action),
+                    action,
                     allow_legacy_base=args.enable_base,
                 )
                 safety_filter.update(sent_action)

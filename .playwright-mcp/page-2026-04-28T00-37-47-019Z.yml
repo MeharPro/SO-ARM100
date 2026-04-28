@@ -1,0 +1,264 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - paragraph [ref=e6]: Robot Arm Console
+      - heading "Robert" [level=1] [ref=e7]
+      - paragraph [ref=e8]: Start control, record motion, replay saved moves, and watch the robot processes from one place.
+    - figure [ref=e9]:
+      - img "Cute yellow robot avatar" [ref=e10]
+    - generic [ref=e11]:
+      - generic [ref=e12]: "Pi: offline"
+      - generic [ref=e13]: "Leader: missing"
+      - generic [ref=e14]: "VEX: missing"
+      - generic [ref=e15]: "Host: idle"
+      - generic [ref=e16]: "Teleop: idle"
+    - navigation [ref=e17]:
+      - button "Overview" [ref=e18] [cursor=pointer]
+      - button "Recordings" [active] [ref=e19] [cursor=pointer]
+      - button "Pinned Moves" [ref=e20] [cursor=pointer]
+      - button "Training" [ref=e21] [cursor=pointer]
+      - button "Settings" [ref=e22] [cursor=pointer]
+      - button "Logs" [ref=e23] [cursor=pointer]
+    - generic [ref=e24]:
+      - strong [ref=e25]: Leader check
+      - generic [ref=e26]: Leader arm is not connected on /dev/tty.usbmodem5AE60840411. No matching USB serial ports are visible on the Mac.
+      - strong [ref=e27]: VEX check
+      - generic [ref=e28]: Pi is offline, so VEX Brain status is unavailable.
+  - generic [ref=e29]:
+    - banner [ref=e30]:
+      - generic [ref=e31]:
+        - paragraph [ref=e32]: Dashboard
+        - heading "Recordings" [level=2] [ref=e424]
+      - paragraph [ref=e34]: Record follower motion on the Pi, replay saved trajectories, and pin them for reuse.
+    - generic [ref=e425]:
+      - generic [ref=e426]:
+        - generic [ref=e427]:
+          - paragraph [ref=e428]: Record & Replay
+          - heading "Movement Library" [level=2] [ref=e429]
+        - paragraph [ref=e430]: Record exact follower motion on the Pi, then replay or pin it.
+      - generic [ref=e431]:
+        - generic [ref=e432]: No-drop Pi replay inactive
+        - paragraph [ref=e433]: Start Control or Arm Hotkeys first if you want Pi replays to keep the robot host connected.
+      - generic [ref=e434]:
+        - generic [ref=e435]:
+          - text: Recording label
+          - textbox "Recording label" [ref=e436]:
+            - /placeholder: Pick up cube
+        - generic [ref=e437]:
+          - text: Recording mode
+          - combobox "Recording mode" [ref=e438]:
+            - option "Auto" [selected]
+            - option "Leader arm"
+            - option "Keyboard"
+            - option "Hand-guide"
+        - generic [ref=e439]:
+          - button "Start Recording" [ref=e440] [cursor=pointer]
+          - button "Stop Recording" [ref=e441] [cursor=pointer]
+          - button "Zero VEX Gyro" [ref=e442] [cursor=pointer]
+          - button "Refresh List" [ref=e443] [cursor=pointer]
+          - button "Save Start as Home" [ref=e444] [cursor=pointer]
+          - button "Go Home Position" [ref=e445] [cursor=pointer]
+      - generic [ref=e446]:
+        - generic [ref=e447]:
+          - 'button "Dummy: Offline pick and place offline dummy dummy-offline-pick-place.json 44.9 KB • 00:06 1/1/2026, 7:00:00 AM" [ref=e448] [cursor=pointer]':
+            - generic [ref=e449]:
+              - text: "Dummy: Offline pick and place"
+              - generic [ref=e450]: offline dummy
+            - generic [ref=e451]: dummy-offline-pick-place.json
+            - generic [ref=e452]: 44.9 KB • 00:06
+            - generic [ref=e453]: 1/1/2026, 7:00:00 AM
+          - 'button "Dummy: ECU alignment check offline dummy dummy-ecu-alignment.json 52.9 KB • 00:04 1/1/2026, 7:05:00 AM" [ref=e454] [cursor=pointer]':
+            - generic [ref=e455]:
+              - text: "Dummy: ECU alignment check"
+              - generic [ref=e456]: offline dummy
+            - generic [ref=e457]: dummy-ecu-alignment.json
+            - generic [ref=e458]: 52.9 KB • 00:04
+            - generic [ref=e459]: 1/1/2026, 7:05:00 AM
+          - 'button "Dummy: Servo tuning pass offline dummy dummy-servo-tune.json 60.9 KB • 00:08 1/1/2026, 7:10:00 AM" [ref=e460] [cursor=pointer]':
+            - generic [ref=e461]:
+              - text: "Dummy: Servo tuning pass"
+              - generic [ref=e462]: offline dummy
+            - generic [ref=e463]: dummy-servo-tune.json
+            - generic [ref=e464]: 60.9 KB • 00:08
+            - generic [ref=e465]: 1/1/2026, 7:10:00 AM
+        - generic [ref=e466]:
+          - heading "Replay Selected Move" [level=3] [ref=e467]
+          - paragraph [ref=e468]: "Dummy: Offline pick and place • 44.9 KB • 00:06"
+          - generic [ref=e469]:
+            - generic [ref=e470]: offline dummy
+            - paragraph [ref=e471]: Dummy recordings are local UI test data. They can be previewed, pinned, chained, and configured while the Pi is disconnected, but they will not appear when the Pi is reachable.
+          - generic [ref=e472]:
+            - generic:
+              - text: Recording name
+              - textbox "Recording name" [ref=e473]:
+                - /placeholder: Desk pickup
+                - text: "Dummy: Offline pick and place"
+            - generic [ref=e474]:
+              - button "Save Name" [disabled] [ref=e475]
+              - button "Duplicate" [disabled] [ref=e476]
+              - button "Mark Gyro Zero" [disabled] [ref=e477]
+              - button "Replay + Recapture X/Y" [disabled] [ref=e478]
+              - button "Delete" [disabled] [ref=e479]
+          - generic [ref=e480]:
+            - generic [ref=e481]:
+              - generic [ref=e482]:
+                - heading "Servo Recording Adjustment" [level=3] [ref=e483]
+                - paragraph [ref=e484]: Using recorded servo command timing for the playhead. Pause at the exact frame, edit the six servo targets, then save.
+              - generic [ref=e485]:
+                - button "Play" [ref=e486] [cursor=pointer]
+                - button "Replay" [disabled] [ref=e487]
+                - button "Pause Replay" [disabled] [ref=e488]
+                - button "Stop Replay" [disabled] [ref=e489]
+                - button "Restart" [ref=e490] [cursor=pointer]
+            - generic [ref=e491]:
+              - generic [ref=e492]:
+                - generic [ref=e493]:
+                  - generic [ref=e494]: ID 1 - Shoulder pan
+                  - spinbutton "ID 1 - Shoulder pan" [ref=e495]: "4.38"
+                - generic [ref=e496]:
+                  - generic [ref=e497]: ID 2 - Shoulder lift
+                  - spinbutton "ID 2 - Shoulder lift" [ref=e498]: "-34.16"
+                - generic [ref=e499]:
+                  - generic [ref=e500]: ID 3 - Elbow flex
+                  - spinbutton "ID 3 - Elbow flex" [ref=e501]: "101.71"
+                - generic [ref=e502]:
+                  - generic [ref=e503]: ID 4 - Wrist flex
+                  - spinbutton "ID 4 - Wrist flex" [ref=e504]: "43.53"
+                - generic [ref=e505]:
+                  - generic [ref=e506]: ID 5 - Wrist roll
+                  - spinbutton "ID 5 - Wrist roll" [ref=e507]: "21.58"
+                - generic [ref=e508]:
+                  - generic [ref=e509]: ID 6 - Gripper
+                  - spinbutton "ID 6 - Gripper" [ref=e510]: "38.10"
+              - generic [ref=e511]:
+                - article [ref=e512]:
+                  - generic [ref=e513]: Playhead
+                  - strong [ref=e514]: 00:00
+                  - generic [ref=e515]: 0.00s
+                - article [ref=e516]:
+                  - generic [ref=e517]: Keep Window
+                  - strong [ref=e518]: 00:06
+                  - generic [ref=e519]: 0s to 6.4s
+                - article [ref=e520]:
+                  - generic [ref=e521]: Command Points
+                  - strong [ref=e522]: "73"
+                  - generic [ref=e523]: 73 follower samples also recorded
+            - generic [ref=e524]:
+              - text: Timeline
+              - slider "Timeline" [ref=e525]: "0"
+            - generic [ref=e526]:
+              - button "Set Trim Start to Playhead" [ref=e527] [cursor=pointer]
+              - button "Set Trim End to Playhead" [ref=e528] [cursor=pointer]
+              - button "Save Servo Adjustment" [disabled] [ref=e529]
+            - generic [ref=e530]:
+              - article [ref=e531]:
+                - generic [ref=e532]: ID 1 - Shoulder pan
+                - strong [ref=e533]: 4.4 deg
+              - article [ref=e534]:
+                - generic [ref=e535]: ID 2 - Shoulder lift
+                - strong [ref=e536]: "-34.2 deg"
+              - article [ref=e537]:
+                - generic [ref=e538]: ID 3 - Elbow flex
+                - strong [ref=e539]: 101.7 deg
+              - article [ref=e540]:
+                - generic [ref=e541]: ID 4 - Wrist flex
+                - strong [ref=e542]: 43.5 deg
+              - article [ref=e543]:
+                - generic [ref=e544]: ID 5 - Wrist roll
+                - strong [ref=e545]: 21.6 deg
+              - article [ref=e546]:
+                - generic [ref=e547]: ID 6 - Gripper
+                - strong [ref=e548]: 38.1 deg
+              - article [ref=e549]:
+                - generic [ref=e550]: X ultrasonic distance
+                - strong [ref=e551]: 32.0 cm
+                - generic [ref=e552]: sensor sample
+              - article [ref=e553]:
+                - generic [ref=e554]: Y ultrasonic distance
+                - strong [ref=e555]: 76.0 cm
+                - generic [ref=e556]: sensor sample
+              - article [ref=e557]:
+                - generic [ref=e558]: X ultrasonic position
+                - strong [ref=e559]: 18.0 cm
+                - generic [ref=e560]: sensor sample
+              - article [ref=e561]:
+                - generic [ref=e562]: Y ultrasonic position
+                - strong [ref=e563]: 48.2 cm
+                - generic [ref=e564]: sensor sample
+          - generic [ref=e565]:
+            - generic [ref=e566]:
+              - generic [ref=e567]:
+                - text: Trim Start (s)
+                - spinbutton "Trim Start (s)" [ref=e568]: "0"
+              - generic [ref=e569]:
+                - text: Trim End (s)
+                - spinbutton "Trim End (s)" [ref=e570]: "6.4"
+            - generic [ref=e571]:
+              - paragraph [ref=e572]: Scrub the preview, set trim start and end from the playhead, then keep only that action window.
+              - button "Trim Selected" [disabled] [ref=e573]
+          - generic [ref=e574]:
+            - generic [ref=e575]:
+              - text: Replay target
+              - combobox "Replay target" [ref=e576]:
+                - option "Pi follower" [selected]
+                - option "Leader arm"
+            - generic [ref=e577]:
+              - text: Speed
+              - spinbutton "Speed" [ref=e578]: "1"
+            - generic [ref=e579]:
+              - text: Hold Final (s)
+              - spinbutton "Hold Final (s)" [ref=e580]: "0.5"
+            - generic [ref=e581]:
+              - text: Go home
+              - combobox "Go home" [ref=e582]:
+                - option "Do not go home" [selected]
+                - option "Go home before replay"
+                - option "Go home after replay"
+                - option "Go home before and after"
+            - generic [ref=e583]:
+              - checkbox "Auto VEX positioning" [checked] [ref=e584]
+              - generic [ref=e585]: Auto VEX positioning
+            - generic [ref=e586]:
+              - text: Speed position fixing
+              - spinbutton "Speed position fixing" [ref=e587]: "1"
+            - generic [ref=e588]:
+              - checkbox "Replay VEX base with this move" [ref=e589]
+              - generic [ref=e590]: Replay VEX base with this move
+            - generic [ref=e591]:
+              - text: VEX timeout (s)
+              - spinbutton "VEX timeout (s)" [ref=e592]: "8"
+            - generic [ref=e593]:
+              - text: X/Y tolerance (m)
+              - spinbutton "X/Y tolerance (m)" [ref=e594]: "0.02"
+            - generic [ref=e595]:
+              - text: Heading tolerance (deg)
+              - spinbutton "Heading tolerance (deg)" [ref=e596]: "1.5"
+            - generic [ref=e597]:
+              - text: X/Y trim tolerance (m)
+              - spinbutton "X/Y trim tolerance (m)" [ref=e598]: "0.05"
+            - generic [ref=e599]:
+              - text: Heading trim tolerance (deg)
+              - spinbutton "Heading trim tolerance (deg)" [ref=e600]: "8.5"
+            - generic [ref=e601]:
+              - text: VEX replay mode
+              - combobox "VEX replay mode" [disabled] [ref=e602]:
+                - option "ECU mode" [selected]
+                - option "Drive mode"
+            - paragraph [ref=e603]: This recording contains VEX base motion. Leave base replay off unless you intentionally want to replay base movement; Auto VEX positioning can still use the gyro and ultrasonic sensors.
+          - generic [ref=e604]:
+            - button "Replay" [disabled] [ref=e605]
+            - button "Pause Replay" [disabled] [ref=e606]
+            - button "Stop Replay" [disabled] [ref=e607]
+          - generic [ref=e608]:
+            - heading "Pin This Move" [level=3] [ref=e609]
+            - generic [ref=e610]:
+              - generic [ref=e611]:
+                - text: Button label
+                - textbox "Button label" [ref=e612]:
+                  - /placeholder: Desk pickup
+                  - text: "Dummy: Offline pick and place"
+              - generic [ref=e613]:
+                - text: Hotkey
+                - textbox "Hotkey" [ref=e614]:
+                  - /placeholder: SHIFT+1
+            - button "Pin Move to Dashboard" [ref=e615] [cursor=pointer]

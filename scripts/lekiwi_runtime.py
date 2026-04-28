@@ -58,10 +58,16 @@ SPEED_OF_SOUND_MPS = 343.0
 SENSOR_STATUS_LOG_PREFIX = "[sensor-status]"
 SENSOR_STATUS_EMIT_INTERVAL_S = 2.0
 WRIST_ROLL_KEY = "arm_wrist_roll.pos"
+GRIPPER_MOTOR = "arm_gripper"
 GRIPPER_KEY = "arm_gripper.pos"
 WRIST_ROLL_MOTOR = "arm_wrist_roll"
 WRIST_ROLL_SINGLE_TURN_LIMITS = (0, 4095)
 WRIST_ROLL_CONTINUOUS_LIMITS = (0, 0)
+DEFAULT_GRIPPER_FORCE_CURRENT_LIMIT_MA = 900.0
+DEFAULT_GRIPPER_FORCE_HOLD_MARGIN = 0.8
+DEFAULT_GRIPPER_FORCE_RELEASE_MARGIN = 2.0
+DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION = 1.0
+DEFAULT_GRIPPER_FORCE_MIN_CLOSING_ERROR = 1.0
 
 DEFAULT_SAFER_ARM_MAX_STEP = {
     "arm_shoulder_pan.pos": 8.0,
@@ -112,7 +118,7 @@ SERVO_STALL_TIMEOUT_S = {
     "arm_elbow_flex": 0.45,
     "arm_wrist_flex": 0.45,
     "arm_wrist_roll": 0.45,
-    "arm_gripper": 0.35,
+    "arm_gripper": 0.18,
 }
 SERVO_HARD_TEMPERATURE_LIMIT_C = 50.0
 SERVO_OVERTEMP_CONFIRMATION_SAMPLES = 2
@@ -280,6 +286,44 @@ def add_servo_safety_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Enable wrist continuity handling plus per-command arm step limiting.",
     )
+    parser.add_argument(
+        "--disable-gripper-force-limit",
+        action="store_true",
+        help="Disable the follower gripper's soft force-limit hold behavior.",
+    )
+    parser.add_argument(
+        "--gripper-force-current-limit-ma",
+        type=float,
+        default=DEFAULT_GRIPPER_FORCE_CURRENT_LIMIT_MA,
+        help="Estimated gripper current threshold that activates soft hold while closing.",
+    )
+    parser.add_argument(
+        "--gripper-force-hold-margin",
+        type=float,
+        default=DEFAULT_GRIPPER_FORCE_HOLD_MARGIN,
+        help="Small extra closing offset added to the observed gripper position when soft hold activates.",
+    )
+    parser.add_argument(
+        "--gripper-force-release-margin",
+        type=float,
+        default=DEFAULT_GRIPPER_FORCE_RELEASE_MARGIN,
+        help="Leader/opening motion required before the follower gripper leaves soft hold.",
+    )
+
+
+def servo_protection_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "gripper_force_limit_enabled": not bool(getattr(args, "disable_gripper_force_limit", False)),
+        "gripper_current_limit_ma": float(
+            getattr(args, "gripper_force_current_limit_ma", DEFAULT_GRIPPER_FORCE_CURRENT_LIMIT_MA)
+        ),
+        "gripper_hold_margin": float(
+            getattr(args, "gripper_force_hold_margin", DEFAULT_GRIPPER_FORCE_HOLD_MARGIN)
+        ),
+        "gripper_release_margin": float(
+            getattr(args, "gripper_force_release_margin", DEFAULT_GRIPPER_FORCE_RELEASE_MARGIN)
+        ),
+    }
 
 
 class ResilientObservationReader:
@@ -802,6 +846,26 @@ class TemperatureProtectionState:
         self.peak_temperature_c = None
 
 
+@dataclass
+class GripperForceLimitState:
+    active: bool = False
+    hold_position: float | None = None
+    hold_target: float | None = None
+    close_direction: float = DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION
+    activated_at: float | None = None
+    reason: str = ""
+    current_ma: float | None = None
+
+    def reset(self) -> None:
+        self.active = False
+        self.hold_position = None
+        self.hold_target = None
+        self.close_direction = DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION
+        self.activated_at = None
+        self.reason = ""
+        self.current_ma = None
+
+
 class ServoProtectionSupervisor:
     def __init__(
         self,
@@ -811,12 +875,22 @@ class ServoProtectionSupervisor:
         enabled: bool = True,
         stall_detection_enabled: bool = True,
         hard_temperature_c: float = SERVO_HARD_TEMPERATURE_LIMIT_C,
+        gripper_force_limit_enabled: bool = True,
+        gripper_current_limit_ma: float = DEFAULT_GRIPPER_FORCE_CURRENT_LIMIT_MA,
+        gripper_hold_margin: float = DEFAULT_GRIPPER_FORCE_HOLD_MARGIN,
+        gripper_release_margin: float = DEFAULT_GRIPPER_FORCE_RELEASE_MARGIN,
+        gripper_close_direction: float = DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION,
     ) -> None:
         self.robot = robot
         self.logger = logger
         self.enabled = bool(enabled)
         self.stall_detection_enabled = bool(stall_detection_enabled)
         self.hard_temperature_c = max(float(hard_temperature_c), 0.0)
+        self.gripper_force_limit_enabled = bool(gripper_force_limit_enabled)
+        self.gripper_current_limit_ma = max(float(gripper_current_limit_ma), 0.0)
+        self.gripper_hold_margin = max(float(gripper_hold_margin), 0.0)
+        self.gripper_release_margin = max(float(gripper_release_margin), 0.0)
+        self.gripper_close_direction = 1.0 if float(gripper_close_direction) >= 0.0 else -1.0
         self.arm_motors = list(getattr(robot, "arm_motors", ARM_MOTORS))
         all_robot_motors = getattr(getattr(robot, "bus", None), "motors", None)
         if isinstance(all_robot_motors, dict) and all_robot_motors:
@@ -828,6 +902,9 @@ class ServoProtectionSupervisor:
             motor: TemperatureProtectionState()
             for motor in self.all_motors
         }
+        self.gripper_force_limit = GripperForceLimitState(
+            close_direction=self.gripper_close_direction,
+        )
         self.fault: dict[str, Any] | None = None
 
     @property
@@ -880,6 +957,99 @@ class ServoProtectionSupervisor:
     @staticmethod
     def _stall_timeout_s(motor: str) -> float:
         return float(SERVO_STALL_TIMEOUT_S.get(motor, 0.5))
+
+    def _clamp_gripper_target(self, value: float) -> float:
+        low, high = SAFE_ABSOLUTE_POSITION_LIMITS.get(GRIPPER_KEY, (0.0, 100.0))
+        return min(max(float(value), low), high)
+
+    def _is_gripper_closing(self, observed: float, command: float) -> bool:
+        error_in_close_direction = (float(command) - float(observed)) * self.gripper_close_direction
+        return error_in_close_direction > DEFAULT_GRIPPER_FORCE_MIN_CLOSING_ERROR
+
+    def _activate_gripper_force_limit(
+        self,
+        *,
+        observed: float,
+        command: float,
+        reason: str,
+        current_ma: float | None,
+    ) -> bool:
+        if (
+            not self.gripper_force_limit_enabled
+            or GRIPPER_MOTOR not in self.states
+            or not self._is_gripper_closing(observed, command)
+        ):
+            return False
+
+        close_direction = self.gripper_close_direction
+        hold_position = float(observed)
+        hold_target = self._clamp_gripper_target(hold_position + close_direction * self.gripper_hold_margin)
+        already_active = self.gripper_force_limit.active
+        self.gripper_force_limit.active = True
+        self.gripper_force_limit.hold_position = hold_position
+        self.gripper_force_limit.hold_target = hold_target
+        self.gripper_force_limit.close_direction = close_direction
+        self.gripper_force_limit.activated_at = time.monotonic()
+        self.gripper_force_limit.reason = reason
+        self.gripper_force_limit.current_ma = current_ma
+
+        state = self.states[GRIPPER_MOTOR]
+        state.last_command = hold_target
+        state.candidate_since = None
+
+        if not already_active:
+            current_text = f", current {current_ma:.0f}mA" if current_ma is not None else ""
+            print(
+                f"{ARM_SAFETY_LOG_PREFIX} gripper force limit active; "
+                f"holding {GRIPPER_KEY} at {hold_target:.2f} instead of {command:.2f} "
+                f"({reason}{current_text})",
+                flush=True,
+            )
+        return True
+
+    def _clear_gripper_force_limit(self, command: float | None = None) -> None:
+        if not self.gripper_force_limit.active:
+            return
+
+        command_text = f" command={command:.2f}" if command is not None else ""
+        print(
+            f"{ARM_SAFETY_LOG_PREFIX} gripper force limit released; opening command accepted{command_text}",
+            flush=True,
+        )
+        self.gripper_force_limit.reset()
+        self.gripper_force_limit.close_direction = self.gripper_close_direction
+        state = self.states.get(GRIPPER_MOTOR)
+        if state is not None:
+            state.candidate_since = None
+
+    def limit_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        if (
+            not self.enabled
+            or self.fault is not None
+            or not self.gripper_force_limit.active
+            or GRIPPER_KEY not in action
+        ):
+            return action
+
+        command = action.get(GRIPPER_KEY)
+        if not isinstance(command, (int, float)):
+            return action
+
+        hold_target = self.gripper_force_limit.hold_target
+        close_direction = self.gripper_force_limit.close_direction
+        if hold_target is None:
+            self._clear_gripper_force_limit(float(command))
+            return action
+
+        numeric_command = float(command)
+        opening_delta = (numeric_command - hold_target) * close_direction
+        if opening_delta <= -self.gripper_release_margin:
+            self._clear_gripper_force_limit(numeric_command)
+            return action
+
+        limited = dict(action)
+        limited[GRIPPER_KEY] = hold_target
+        return limited
 
     @staticmethod
     def _power_sample_id(power_sample: dict[str, Any] | None, now: float) -> str:
@@ -1002,6 +1172,25 @@ class ServoProtectionSupervisor:
                 state.candidate_since = None
                 continue
 
+            gripper_current_ma = None
+            if motor == GRIPPER_MOTOR:
+                gripper_current_ma = self._sample_float(power_sample, f"{GRIPPER_MOTOR}.current_ma_est")
+                if (
+                    gripper_current_ma is not None
+                    and self.gripper_current_limit_ma > 0.0
+                    and gripper_current_ma >= self.gripper_current_limit_ma
+                    and self._activate_gripper_force_limit(
+                        observed=observed,
+                        command=command,
+                        reason=(
+                            f"{GRIPPER_MOTOR} current reached {gripper_current_ma:.0f}mA "
+                            f"(soft limit {self.gripper_current_limit_ma:.0f}mA)"
+                        ),
+                        current_ma=gripper_current_ma,
+                    )
+                ):
+                    continue
+
             error = abs(command - observed)
             if error <= self._error_threshold(motor):
                 state.candidate_since = None
@@ -1017,6 +1206,16 @@ class ServoProtectionSupervisor:
 
             duration_s = now - state.candidate_since
             if duration_s >= self._stall_timeout_s(motor):
+                if motor == GRIPPER_MOTOR and self._activate_gripper_force_limit(
+                    observed=observed,
+                    command=command,
+                    reason=(
+                        f"{GRIPPER_MOTOR} met resistance with {error:.2f} position error "
+                        f"for {duration_s:.2f}s"
+                    ),
+                    current_ma=gripper_current_ma,
+                ):
+                    continue
                 self._trip(
                     motor,
                     (
@@ -1031,14 +1230,24 @@ class ServoProtectionSupervisor:
         return False
 
     def enrich_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
-        if self.fault is None:
+        if self.fault is None and not self.gripper_force_limit.active:
             return observation
 
         enriched = dict(observation)
-        enriched["telemetry.safety_fault_active"] = True
-        enriched["telemetry.safety_fault_motor"] = self.fault.get("motor", "")
-        enriched["telemetry.safety_fault_reason"] = self.fault.get("reason", "")
-        enriched["telemetry.safety_fault_at"] = self.fault.get("timestamp", "")
+        if self.gripper_force_limit.active:
+            enriched["telemetry.gripper_force_limit_active"] = True
+            enriched["telemetry.gripper_force_limit_hold_target"] = self.gripper_force_limit.hold_target
+            enriched["telemetry.gripper_force_limit_reason"] = self.gripper_force_limit.reason
+            if self.gripper_force_limit.current_ma is not None:
+                enriched["telemetry.gripper_force_limit_current_ma"] = round(
+                    self.gripper_force_limit.current_ma,
+                    3,
+                )
+        if self.fault is not None:
+            enriched["telemetry.safety_fault_active"] = True
+            enriched["telemetry.safety_fault_motor"] = self.fault.get("motor", "")
+            enriched["telemetry.safety_fault_reason"] = self.fault.get("reason", "")
+            enriched["telemetry.safety_fault_at"] = self.fault.get("timestamp", "")
         return enriched
 
 

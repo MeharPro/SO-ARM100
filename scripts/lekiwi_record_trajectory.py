@@ -31,6 +31,7 @@ from lekiwi_runtime import (
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
+    servo_protection_kwargs_from_args,
     stop_robot_base,
 )
 from vex_base_bridge import (
@@ -340,6 +341,7 @@ def main() -> None:
         robot,
         logger,
         stall_detection_enabled=not is_free_teach,
+        **servo_protection_kwargs_from_args(args),
     )
     observation_reader = ResilientObservationReader(robot, logger)
     sensor_status_emitter = LiveRobotSensorStatusEmitter()
@@ -442,6 +444,7 @@ def main() -> None:
                 try:
                     msg = cmd_socket.recv_string(zmq.NOBLOCK)
                     action = safety_filter.normalize(dict(json.loads(msg)))
+                    action = servo_protection.limit_action(action)
                     if recording_started_at is None:
                         if vex_command_stream_ready:
                             if vex_base_bridge.set_pose_origin(ttl_ms=1200, timeout_s=1.5):
