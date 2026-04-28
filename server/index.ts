@@ -8,6 +8,7 @@ import {
   isTransientRemoteTransportError,
 } from "./transportErrors.js";
 import type {
+  AdjustRecordingServoRequest,
   AppSettings,
   BenchmarkPolicyRequest,
   CalibrationInputRequest,
@@ -274,6 +275,13 @@ app.post(
   "/api/recordings/replay-options",
   asyncRoute(async (req, res) => {
     res.json(await controller.setRecordingReplayOptions(req.body as SetRecordingReplayOptionsRequest));
+  }),
+);
+
+app.post(
+  "/api/recordings/adjust-servo",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.adjustRecordingServos(req.body as AdjustRecordingServoRequest));
   }),
 );
 

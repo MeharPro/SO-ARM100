@@ -38,6 +38,7 @@ import {
   isTransientRemoteTransportError,
 } from "./transportErrors.js";
 import type {
+  AdjustRecordingServoRequest,
   ArmHomeMode,
   ArmHomePosition,
   AppSettings,
@@ -1697,6 +1698,44 @@ export class RobotController {
       }
 
       this.configStore.saveRecordingReplayOptions(nextOptions);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async adjustRecordingServos(payload: AdjustRecordingServoRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const { settings } = this.configStore.getConfig();
+      const recordingPath = payload.path.trim();
+      const timeS = Number(payload.timeS);
+      const values = payload.values;
+
+      if (!recordingPath) {
+        throw new Error("Choose a recording before saving servo adjustments.");
+      }
+      if (!Number.isFinite(timeS) || timeS < 0) {
+        throw new Error("Servo adjustment time must be valid.");
+      }
+      if (!values || typeof values !== "object") {
+        throw new Error("Servo adjustment values are missing.");
+      }
+
+      const servoValues: Record<string, number> = {};
+      for (const key of ARM_HOME_JOINT_KEYS) {
+        const value = Number(values[key]);
+        if (!Number.isFinite(value)) {
+          throw new Error(`Servo adjustment is missing numeric ${key}.`);
+        }
+        servoValues[key] = value;
+      }
+
+      this.logActivity(
+        `Saving servo adjustments for ${recordingPath} at ${timeS.toFixed(2)}s.`,
+      );
+      const host = await this.preparePi(settings, "save servo recording adjustment");
+      await this.writeRecordingServoAdjustment(settings, host, recordingPath, timeS, servoValues);
+      this.cachedRecordings = await this.fetchRecordings(settings, host);
+      this.lastRecordingRefresh = Date.now();
       this.lastError = null;
       return this.getState();
     });
@@ -4250,6 +4289,115 @@ PY
 
     const { stdout } = await this.execRemoteScript(script, host, settings);
     return JSON.parse(stdout) as RecordingDetail;
+  }
+
+  private async writeRecordingServoAdjustment(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+    timeS: number,
+    values: Record<string, number>,
+  ): Promise<void> {
+    const script = `
+export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
+export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+export LEKIWI_ADJUST_TIME_S=${shellQuote(String(timeS))}
+export LEKIWI_SERVO_VALUES_JSON=${shellQuote(JSON.stringify(values))}
+python - <<'PY'
+from datetime import datetime
+import json
+import os
+from pathlib import Path
+
+ARM_STATE_KEYS = (
+    "arm_shoulder_pan.pos",
+    "arm_shoulder_lift.pos",
+    "arm_elbow_flex.pos",
+    "arm_wrist_flex.pos",
+    "arm_wrist_roll.pos",
+    "arm_gripper.pos",
+)
+
+root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
+path = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser().resolve()
+time_s = float(os.environ["LEKIWI_ADJUST_TIME_S"])
+values = json.loads(os.environ["LEKIWI_SERVO_VALUES_JSON"])
+
+if root not in path.parents:
+    raise SystemExit("Recording path is outside the trajectory directory.")
+if not path.is_file():
+    raise SystemExit(f"Recording does not exist: {path}")
+if not isinstance(values, dict):
+    raise SystemExit("Servo values payload is invalid.")
+
+normalized_values = {}
+for key in ARM_STATE_KEYS:
+    value = values.get(key)
+    if not isinstance(value, (int, float)):
+        raise SystemExit(f"Servo values payload is missing numeric {key}.")
+    normalized_values[key] = float(value)
+
+payload = json.loads(path.read_text())
+if not isinstance(payload, dict):
+    raise SystemExit("Recording payload is invalid.")
+
+def nearest_index(points):
+    if not isinstance(points, list):
+        return None
+    best_index = None
+    best_distance = None
+    for index, item in enumerate(points):
+        if not isinstance(item, dict):
+            continue
+        raw_t_s = item.get("t_s")
+        if not isinstance(raw_t_s, (int, float)):
+            continue
+        distance = abs(float(raw_t_s) - time_s)
+        if best_distance is None or distance < best_distance:
+            best_index = index
+            best_distance = distance
+    return best_index
+
+def update_point(points, value_key):
+    index = nearest_index(points)
+    if index is None:
+        return None
+    item = points[index]
+    target = item.get(value_key)
+    if not isinstance(target, dict):
+        target = {}
+        item[value_key] = target
+    for key, value in normalized_values.items():
+        target[key] = value
+    return float(item.get("t_s", time_s))
+
+sample_time_s = update_point(payload.get("samples"), "state")
+command_time_s = update_point(payload.get("command_samples"), "action")
+if sample_time_s is None and command_time_s is None:
+    raise SystemExit("Recording does not contain any editable servo samples.")
+
+payload["arm_state_keys"] = list(ARM_STATE_KEYS)
+adjustments = payload.get("servo_adjustments")
+if not isinstance(adjustments, list):
+    adjustments = []
+adjustments.append(
+    {
+        "time_s": round(time_s, 6),
+        "sample_time_s": round(sample_time_s, 6) if sample_time_s is not None else None,
+        "command_time_s": round(command_time_s, 6) if command_time_s is not None else None,
+        "values": normalized_values,
+        "adjusted_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+)
+payload["servo_adjustments"] = adjustments[-100:]
+
+tmp_path = path.with_name(f".{path.name}.tmp")
+tmp_path.write_text(json.dumps(payload, indent=2) + "\\n")
+tmp_path.replace(path)
+PY
+`.trim();
+
+    await this.execRemoteScript(script, host, settings);
   }
 
   private async readRecordingStartHomePosition(

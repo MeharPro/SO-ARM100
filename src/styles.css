@@ -922,6 +922,37 @@ code {
   cursor: pointer;
 }
 
+.servo-adjustment-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.servo-adjustment-field {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.72rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+
+.servo-adjustment-field span {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.servo-adjustment-field input {
+  min-height: 38px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .recording-preview-chart svg {
   display: block;
   width: 100%;
@@ -1517,6 +1548,7 @@ label {
   .calibration-grid,
   .recording-preview-stats,
   .recording-preview-poses,
+  .servo-adjustment-grid,
   .chain-link-panel,
   .recordings-layout,
   .logs-shell {

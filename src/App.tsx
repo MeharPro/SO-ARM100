@@ -1,6 +1,7 @@
-import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
+  AdjustRecordingServoRequest,
   ArmHomeMode,
   AppSettings,
   ChainLink,
@@ -59,15 +60,10 @@ const ARM_SERVO_IDS = [
   "arm_wrist_roll",
   "arm_gripper",
 ] as const;
-const SERVO_TRACE_COLORS: Record<string, string> = {
-  arm_shoulder_pan: "#ea580c",
-  arm_shoulder_lift: "#ca8a04",
-  arm_elbow_flex: "#16a34a",
-  arm_wrist_flex: "#0891b2",
-  arm_wrist_roll: "#2563eb",
-  arm_gripper: "#c026d3",
-};
-
+const ARM_SERVO_POSITION_KEYS = ARM_SERVO_IDS.map((id) => `${id}.pos`);
+const SERVO_KEY_TO_NUMBER = Object.fromEntries(
+  ARM_SERVO_POSITION_KEYS.map((key, index) => [key, index + 1]),
+) as Record<string, number>;
 const TORQUE_LIMIT_MIN = 0;
 const TORQUE_LIMIT_MAX = 1000;
 const DEFAULT_ARM_TORQUE_LIMITS = Object.fromEntries(
@@ -685,7 +681,13 @@ function labelServo(id: string | null): string {
   if (!id) {
     return "n/a";
   }
-  return SERVO_LABELS[id] ?? id.replace(/^arm_/, "").replace(/_/g, " ");
+  const normalized = id.replace(/\.pos$/, "");
+  return SERVO_LABELS[normalized] ?? normalized.replace(/^arm_/, "").replace(/_/g, " ");
+}
+
+function labelServoWithId(key: string): string {
+  const servoNumber = SERVO_KEY_TO_NUMBER[key];
+  return servoNumber ? `ID ${servoNumber} - ${labelServo(key)}` : labelServo(key);
 }
 
 function labelSensor(key: string): string {
@@ -851,38 +853,12 @@ function findRecordingPoint(
   return points[Math.max(0, high)] ?? points[0] ?? null;
 }
 
-function evenlySampleTimeline(
-  points: RecordingTimelinePoint[],
-  maxPoints: number,
-): RecordingTimelinePoint[] {
-  if (points.length <= maxPoints) {
-    return points;
-  }
-
-  const sampled: RecordingTimelinePoint[] = [];
-  const lastIndex = points.length - 1;
-  const step = lastIndex / Math.max(maxPoints - 1, 1);
-  let previousIndex = -1;
-
-  for (let index = 0; index < maxPoints; index += 1) {
-    const nextIndex = Math.min(lastIndex, Math.round(index * step));
-    const point = points[nextIndex];
-    if (nextIndex !== previousIndex && point) {
-      sampled.push(point);
-      previousIndex = nextIndex;
-    }
-  }
-
-  const finalPoint = points[lastIndex];
-  if (finalPoint && sampled.at(-1) !== finalPoint) {
-    sampled.push(finalPoint);
-  }
-
-  return sampled;
-}
-
 function formatServoPosition(value: number | undefined): string {
   return Number.isFinite(value) ? `${value.toFixed(1)} deg` : "n/a";
+}
+
+function formatServoInputValue(value: number | undefined): string {
+  return Number.isFinite(value) ? value.toFixed(2) : "";
 }
 
 function formatDistanceMeters(value: number | undefined): string {
@@ -899,26 +875,46 @@ function RecordingPreviewPanel({
   detail,
   loading,
   error,
+  controlsDisabled,
   playheadS,
   playing,
+  replayActive,
   trimStartS,
   trimEndS,
+  servoDrafts,
+  savingServoAdjustment,
+  canSaveServoAdjustment,
   onScrub,
   onTogglePlayback,
   onReset,
+  onStartReplay,
+  onPauseReplay,
+  onStopReplay,
+  onServoDraftChange,
+  onSaveServoAdjustment,
   onSetTrimStart,
   onSetTrimEnd,
 }: {
   detail: RecordingDetail | null;
   loading: boolean;
   error: string;
+  controlsDisabled: boolean;
   playheadS: number;
   playing: boolean;
+  replayActive: boolean;
   trimStartS: number;
   trimEndS: number;
+  servoDrafts: Record<string, string>;
+  savingServoAdjustment: boolean;
+  canSaveServoAdjustment: boolean;
   onScrub: (timeS: number) => void;
   onTogglePlayback: () => void;
   onReset: () => void;
+  onStartReplay: () => void;
+  onPauseReplay: () => void;
+  onStopReplay: () => void;
+  onServoDraftChange: (key: string, value: string) => void;
+  onSaveServoAdjustment: () => void;
   onSetTrimStart: () => void;
   onSetTrimEnd: () => void;
 }) {
@@ -927,7 +923,6 @@ function RecordingPreviewPanel({
     [detail],
   );
   const durationS = detail?.durationS ?? timelinePoints.at(-1)?.tS ?? 0;
-  const sampledPoints = useMemo(() => evenlySampleTimeline(timelinePoints, 260), [timelinePoints]);
   const currentPoint = useMemo(
     () => findRecordingPoint(timelinePoints, playheadS),
     [playheadS, timelinePoints],
@@ -937,38 +932,6 @@ function RecordingPreviewPanel({
     [detail?.samples, playheadS],
   );
 
-  const displayArmKeys = useMemo(
-    () =>
-      detail?.armKeys.length
-        ? detail.armKeys
-        : ARM_SERVO_IDS.filter((key) => currentPoint?.values[key] !== undefined),
-    [currentPoint?.values, detail?.armKeys],
-  );
-
-  const tracePaths = useMemo(
-    () =>
-      displayArmKeys.map((key) => {
-        const values = sampledPoints.map((point) => point.values[key] ?? 0);
-        const min = values.length ? Math.min(...values) : 0;
-        const max = values.length ? Math.max(...values) : 0;
-        const span = max - min;
-        const points = sampledPoints
-          .map((point) => {
-            const x = durationS > 0 ? (point.tS / durationS) * 100 : 0;
-            const value = point.values[key] ?? 0;
-            const y = span < 1e-6 ? 50 : 92 - (((value - min) / span) * 84);
-            return `${x.toFixed(3)},${y.toFixed(3)}`;
-          })
-          .join(" ");
-        return {
-          key,
-          color: SERVO_TRACE_COLORS[key] ?? "#2563eb",
-          points,
-        };
-      }),
-    [displayArmKeys, durationS, sampledPoints],
-  );
-
   const safePlayheadS = clampPlaybackTime(playheadS, durationS);
   const safeTrimStartS = clampPlaybackTime(trimStartS, durationS);
   const candidateTrimEndS = Number.isFinite(trimEndS) ? trimEndS : durationS;
@@ -976,34 +939,35 @@ function RecordingPreviewPanel({
   const effectiveTrimEndS =
     safeTrimEndS > safeTrimStartS ? safeTrimEndS : durationS;
   const keepWindowS = Math.max(effectiveTrimEndS - safeTrimStartS, 0);
-  const playheadPct = durationS > 0 ? (safePlayheadS / durationS) * 100 : 0;
-  const trimStartPct = durationS > 0 ? (safeTrimStartS / durationS) * 100 : 0;
-  const trimEndPct = durationS > 0 ? (effectiveTrimEndS / durationS) * 100 : 100;
-
-  const handleSeekFromChart = (event: MouseEvent<HTMLDivElement>) => {
-    if (durationS <= 0) {
-      return;
-    }
-
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const ratio = Math.min(Math.max((event.clientX - bounds.left) / bounds.width, 0), 1);
-    onScrub(ratio * durationS);
-  };
 
   return (
     <div className="recording-preview">
       <div className="recording-preview-head">
         <div>
-          <h3>Recording Preview</h3>
+          <h3>Servo Recording Adjustment</h3>
           <p className="card-note">
-            {detail ? recordingTimelineCopy(detail.timelineSource) : "Load a recording to scrub and trim it here."}
+            {detail
+              ? `${recordingTimelineCopy(detail.timelineSource)} Pause at the exact frame, edit the six servo targets, then save.`
+              : "Load a recording to scrub, preview, and adjust servo targets here."}
           </p>
         </div>
         <div className="button-cluster inline recording-preview-buttons">
-          <button disabled={!detail || durationS <= 0} onClick={onTogglePlayback}>
+          <button disabled={controlsDisabled || !detail || durationS <= 0} onClick={onTogglePlayback}>
             {playing ? "Pause" : "Play"}
           </button>
-          <button disabled={!detail || durationS <= 0} onClick={onReset}>
+          <button disabled={controlsDisabled || !detail || durationS <= 0 || replayActive} onClick={onStartReplay}>
+            Replay
+          </button>
+          <button disabled={controlsDisabled || !replayActive} onClick={onPauseReplay}>
+            Pause Replay
+          </button>
+          <button disabled={controlsDisabled || !replayActive} onClick={onStopReplay}>
+            Stop Replay
+          </button>
+          <button
+            disabled={controlsDisabled || !detail || durationS <= 0 || replayActive || playing}
+            onClick={onReset}
+          >
             Restart
           </button>
         </div>
@@ -1018,69 +982,27 @@ function RecordingPreviewPanel({
       {!loading && !error && detail && timelinePoints.length ? (
         <>
           <div className="recording-preview-chart-shell">
-            <div
-              className="recording-preview-chart"
-              onClick={handleSeekFromChart}
-              role="presentation"
-            >
-              <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                <rect x="0" y="0" width="100" height="100" className="recording-preview-chart-bg" />
-                <rect
-                  x="0"
-                  y="0"
-                  width={trimStartPct}
-                  height="100"
-                  className="recording-preview-chart-mask"
-                />
-                <rect
-                  x={trimEndPct}
-                  y="0"
-                  width={Math.max(100 - trimEndPct, 0)}
-                  height="100"
-                  className="recording-preview-chart-mask"
-                />
-                <rect
-                  x={trimStartPct}
-                  y="0"
-                  width={Math.max(trimEndPct - trimStartPct, 0)}
-                  height="100"
-                  className="recording-preview-chart-window"
-                />
-                {tracePaths.map((trace) =>
-                  trace.points ? (
-                    <polyline
-                      key={trace.key}
-                      fill="none"
-                      points={trace.points}
-                      stroke={trace.color}
-                      strokeWidth="1.4"
-                      strokeLinejoin="round"
-                      strokeLinecap="round"
+            <div className="servo-adjustment-grid">
+              {ARM_SERVO_POSITION_KEYS.map((key) => {
+                const liveValue = currentPoint?.values[key];
+                const inputValue =
+                  playing || replayActive
+                    ? formatServoInputValue(liveValue)
+                    : servoDrafts[key] ?? formatServoInputValue(liveValue);
+                return (
+                  <label key={key} className="servo-adjustment-field">
+                    <span>{labelServoWithId(key)}</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      inputMode="decimal"
+                      value={inputValue}
+                      disabled={playing || replayActive || savingServoAdjustment}
+                      onChange={(event) => onServoDraftChange(key, event.target.value)}
                     />
-                  ) : null,
-                )}
-                <line
-                  x1={trimStartPct}
-                  y1="0"
-                  x2={trimStartPct}
-                  y2="100"
-                  className="recording-preview-boundary start"
-                />
-                <line
-                  x1={trimEndPct}
-                  y1="0"
-                  x2={trimEndPct}
-                  y2="100"
-                  className="recording-preview-boundary end"
-                />
-                <line
-                  x1={playheadPct}
-                  y1="0"
-                  x2={playheadPct}
-                  y2="100"
-                  className="recording-preview-playhead"
-                />
-              </svg>
+                  </label>
+                );
+              })}
             </div>
 
             <div className="recording-preview-stats">
@@ -1131,24 +1053,25 @@ function RecordingPreviewPanel({
             <button disabled={durationS <= 0} onClick={onSetTrimEnd}>
               Set Trim End to Playhead
             </button>
-          </div>
-
-          <div className="recording-preview-legend">
-            {displayArmKeys.map((key) => (
-              <span key={key} className="recording-preview-legend-item">
-                <span
-                  className="recording-preview-swatch"
-                  style={{ backgroundColor: SERVO_TRACE_COLORS[key] ?? "#2563eb" }}
-                />
-                {labelServo(key)}
-              </span>
-            ))}
+            <button
+              className="primary"
+              disabled={
+                controlsDisabled ||
+                !canSaveServoAdjustment ||
+                savingServoAdjustment ||
+                playing ||
+                replayActive
+              }
+              onClick={onSaveServoAdjustment}
+            >
+              {savingServoAdjustment ? "Saving..." : "Save Servo Adjustment"}
+            </button>
           </div>
 
           <div className="recording-preview-poses">
-            {displayArmKeys.map((key) => (
+            {ARM_SERVO_POSITION_KEYS.map((key) => (
               <article key={key}>
-                <span>{labelServo(key)}</span>
+                <span>{labelServoWithId(key)}</span>
                 <strong>{formatServoPosition(currentPoint?.values[key])}</strong>
               </article>
             ))}
@@ -1512,6 +1435,11 @@ export default function App() {
   const [vexReplayMode, setVexReplayMode] = useState<VexReplayMode>("ecu");
   const [playbackTimeS, setPlaybackTimeS] = useState(0);
   const [playbackPlaying, setPlaybackPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [servoAdjustmentDrafts, setServoAdjustmentDrafts] = useState<Record<string, string>>({});
+  const [servoAdjustmentDirty, setServoAdjustmentDirty] = useState(false);
+  const [savingServoAdjustment, setSavingServoAdjustment] = useState(false);
+  const [replayTimelineActive, setReplayTimelineActive] = useState(false);
   const [selectedLogServiceLabel, setSelectedLogServiceLabel] = useState("");
   const toastTimer = useRef<number | null>(null);
   const torqueTimers = useRef<Record<string, number>>({});
@@ -1791,6 +1719,10 @@ export default function App() {
       setPlaybackPlaying(false);
       playbackAnchorRef.current = null;
       setPlaybackTimeS(0);
+      setPlaybackRate(1);
+      setReplayTimelineActive(false);
+      setServoAdjustmentDrafts({});
+      setServoAdjustmentDirty(false);
       return;
     }
 
@@ -1804,6 +1736,10 @@ export default function App() {
     setPlaybackPlaying(false);
     playbackAnchorRef.current = null;
     setPlaybackTimeS(0);
+    setPlaybackRate(1);
+    setReplayTimelineActive(false);
+    setServoAdjustmentDrafts({});
+    setServoAdjustmentDirty(false);
 
     void request<RecordingDetail>("/api/recordings/detail", {
       method: "POST",
@@ -1840,6 +1776,36 @@ export default function App() {
     setPlaybackTimeS((current) => clampPlaybackTime(current, recordingDetail.durationS));
   }, [recordingDetail]);
 
+  const recordingTimelinePoints = useMemo(
+    () =>
+      recordingDetail
+        ? recordingDetail.commandSamples.length
+          ? recordingDetail.commandSamples
+          : recordingDetail.samples
+        : [],
+    [recordingDetail],
+  );
+  const currentRecordingPoint = useMemo(
+    () => findRecordingPoint(recordingTimelinePoints, playbackTimeS),
+    [playbackTimeS, recordingTimelinePoints],
+  );
+  const replayActive = isReplayServiceActive(state?.services.replay);
+
+  useEffect(() => {
+    if (!currentRecordingPoint || playbackPlaying || replayActive || servoAdjustmentDirty) {
+      return;
+    }
+
+    setServoAdjustmentDrafts(
+      Object.fromEntries(
+        ARM_SERVO_POSITION_KEYS.map((key) => [
+          key,
+          formatServoInputValue(currentRecordingPoint.values[key]),
+        ]),
+      ),
+    );
+  }, [currentRecordingPoint, playbackPlaying, replayActive, servoAdjustmentDirty]);
+
   useEffect(() => {
     if (!playbackPlaying || !recordingDetail) {
       return;
@@ -1853,7 +1819,7 @@ export default function App() {
       }
 
       const nextTimeS = clampPlaybackTime(
-        anchor.baseTimeS + (now - anchor.startedAtMs) / 1000,
+        anchor.baseTimeS + ((now - anchor.startedAtMs) / 1000) * playbackRate,
         recordingDetail.durationS,
       );
       setPlaybackTimeS(nextTimeS);
@@ -1869,7 +1835,17 @@ export default function App() {
 
     frameId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frameId);
-  }, [playbackPlaying, recordingDetail]);
+  }, [playbackPlaying, playbackRate, recordingDetail]);
+
+  useEffect(() => {
+    if (replayActive || !replayTimelineActive) {
+      return;
+    }
+
+    playbackAnchorRef.current = null;
+    setPlaybackPlaying(false);
+    setReplayTimelineActive(false);
+  }, [replayActive, replayTimelineActive]);
 
   useEffect(() => {
     if (!selectedTrainingProfile) {
@@ -2141,6 +2117,27 @@ export default function App() {
         baseTimeS: clampedTimeS,
       };
     }
+    if (!playbackPlaying && !replayActive) {
+      setServoAdjustmentDirty(false);
+    }
+  };
+
+  const startRawPlayback = (rate = 1, baseTimeS = playbackTimeS) => {
+    if (!recordingDetail || recordingDetail.durationS <= 0) {
+      return;
+    }
+
+    const safeRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const nextBaseTimeS =
+      baseTimeS >= recordingDetail.durationS ? 0 : clampPlaybackTime(baseTimeS, recordingDetail.durationS);
+    setServoAdjustmentDirty(false);
+    setPlaybackRate(safeRate);
+    setPlaybackTimeS(nextBaseTimeS);
+    playbackAnchorRef.current = {
+      startedAtMs: performance.now(),
+      baseTimeS: nextBaseTimeS,
+    };
+    setPlaybackPlaying(true);
   };
 
   const handleTogglePlayback = () => {
@@ -2154,14 +2151,7 @@ export default function App() {
       return;
     }
 
-    const nextBaseTimeS =
-      playbackTimeS >= recordingDetail.durationS ? 0 : clampPlaybackTime(playbackTimeS, recordingDetail.durationS);
-    setPlaybackTimeS(nextBaseTimeS);
-    playbackAnchorRef.current = {
-      startedAtMs: performance.now(),
-      baseTimeS: nextBaseTimeS,
-    };
-    setPlaybackPlaying(true);
+    startRawPlayback(1);
   };
 
   const handleSetTrimStartFromPlayhead = () => {
@@ -2694,6 +2684,91 @@ export default function App() {
     }
   };
 
+  const handleServoAdjustmentDraftChange = (key: string, value: string) => {
+    setServoAdjustmentDrafts((current) => ({ ...current, [key]: value }));
+    setServoAdjustmentDirty(true);
+  };
+
+  const handleSaveServoAdjustment = async () => {
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const values = Object.fromEntries(
+      ARM_SERVO_POSITION_KEYS.map((key) => [key, Number(servoAdjustmentDrafts[key])]),
+    );
+    const invalidKey = ARM_SERVO_POSITION_KEYS.find((key) => !Number.isFinite(values[key]));
+    if (invalidKey) {
+      flashToast(`${labelServoWithId(invalidKey)} needs a numeric value.`);
+      return;
+    }
+
+    const payload: AdjustRecordingServoRequest = {
+      path: selectedRecordingEntry.path,
+      timeS: clampPlaybackTime(playbackTimeS, recordingDurationS),
+      values,
+    };
+
+    setSavingServoAdjustment(true);
+    try {
+      const next = await request<DashboardState>("/api/recordings/adjust-servo", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setBackendError("");
+      setState(next);
+      if (!settingsDirty) {
+        setSettingsDraft(next.settings);
+      }
+      setServoAdjustmentDirty(false);
+      setRecordingDetailReloadToken((current) => current + 1);
+      flashToast("Servo adjustment saved.");
+    } catch (error) {
+      flashToast(error instanceof Error ? error.message : "Could not save servo adjustment.");
+    } finally {
+      setSavingServoAdjustment(false);
+    }
+  };
+
+  const handleStartReplay = async () => {
+    if (!selectedRecording) {
+      flashToast("Select a recording first.");
+      return;
+    }
+
+    const next = await mutate("start-replay", "/api/replays/start", {
+      method: "POST",
+      body: JSON.stringify(selectedMovePayload),
+    });
+    if (next) {
+      setReplayTimelineActive(true);
+      startRawPlayback(selectedMovePayload.speed, 0);
+    }
+  };
+
+  const handlePauseReplay = async () => {
+    playbackAnchorRef.current = null;
+    setPlaybackPlaying(false);
+    const next = await mutate("pause-replay", "/api/replays/stop", { method: "POST" });
+    if (next) {
+      setReplayTimelineActive(false);
+      setServoAdjustmentDirty(false);
+      flashToast("Replay paused.");
+    }
+  };
+
+  const handleStopReplay = async () => {
+    playbackAnchorRef.current = null;
+    setPlaybackPlaying(false);
+    setReplayTimelineActive(false);
+    const next = await mutate("stop-replay", "/api/replays/stop", { method: "POST" });
+    if (next) {
+      seekPlayback(0);
+      flashToast("Replay stopped.");
+    }
+  };
+
   const saveSelectedRecordingReplayOptions = async (
     options: RecordingReplayOptions,
     successMessage?: string,
@@ -3146,6 +3221,15 @@ export default function App() {
     typeof state.services.piCalibration.meta.servoId === "string"
       ? state.services.piCalibration.meta.servoId
       : null;
+  const canSaveServoAdjustment = Boolean(
+    selectedRecordingEntry &&
+      recordingDetail &&
+      currentRecordingPoint &&
+      servoAdjustmentDirty &&
+      !playbackPlaying &&
+      !replayActive &&
+      ARM_SERVO_POSITION_KEYS.every((key) => Number.isFinite(Number(servoAdjustmentDrafts[key]))),
+  );
 
   return (
     <div className="app-frame">
@@ -3836,13 +3920,23 @@ export default function App() {
                     detail={recordingDetail}
                     loading={recordingDetailLoading}
                     error={recordingDetailError}
+                    controlsDisabled={disabled}
                     playheadS={playbackTimeS}
                     playing={playbackPlaying}
+                    replayActive={replayActive}
                     trimStartS={trimStartValueS}
                     trimEndS={trimEndValueS}
+                    servoDrafts={servoAdjustmentDrafts}
+                    savingServoAdjustment={savingServoAdjustment}
+                    canSaveServoAdjustment={canSaveServoAdjustment}
                     onScrub={seekPlayback}
                     onTogglePlayback={handleTogglePlayback}
                     onReset={() => seekPlayback(0)}
+                    onStartReplay={() => void handleStartReplay()}
+                    onPauseReplay={() => void handlePauseReplay()}
+                    onStopReplay={() => void handleStopReplay()}
+                    onServoDraftChange={handleServoAdjustmentDraftChange}
+                    onSaveServoAdjustment={() => void handleSaveServoAdjustment()}
                     onSetTrimStart={handleSetTrimStartFromPlayhead}
                     onSetTrimEnd={handleSetTrimEndFromPlayhead}
                   />
@@ -4175,19 +4269,14 @@ export default function App() {
                     <button
                       className="primary"
                       disabled={disabled || !selectedRecording}
-                      onClick={() =>
-                        void mutate("start-replay", "/api/replays/start", {
-                          method: "POST",
-                          body: JSON.stringify(selectedMovePayload),
-                        })
-                      }
+                      onClick={() => void handleStartReplay()}
                     >
-                      {replayTarget === "leader" ? "Replay on Leader" : "Replay Selected"}
+                      {replayTarget === "leader" ? "Replay on Leader" : "Replay"}
                     </button>
-                    <button
-                      disabled={disabled}
-                      onClick={() => void mutate("stop-replay", "/api/replays/stop", { method: "POST" })}
-                    >
+                    <button disabled={disabled || !replayActive} onClick={() => void handlePauseReplay()}>
+                      Pause Replay
+                    </button>
+                    <button disabled={disabled || !replayActive} onClick={() => void handleStopReplay()}>
                       Stop Replay
                     </button>
                   </div>

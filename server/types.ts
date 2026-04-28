@@ -261,6 +261,12 @@ export interface SetRecordingReplayOptionsRequest {
   options: RecordingReplayOptions;
 }
 
+export interface AdjustRecordingServoRequest {
+  path: string;
+  timeS: number;
+  values: Record<string, number>;
+}
+
 export type RecordingInputMode = "auto" | "leader" | "keyboard" | "free-teach";
 
 export interface StartRecordingRequest {
