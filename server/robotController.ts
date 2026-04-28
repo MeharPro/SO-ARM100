@@ -79,6 +79,7 @@ import type {
   TrainingProfile,
   TrimRecordingRequest,
   TorqueLimitsRequest,
+  UpdatePinnedMoveRequest,
   VexBrainStatus,
 } from "./types.js";
 
@@ -145,6 +146,30 @@ const ARM_MOTORS = [
   "arm_gripper",
 ] as const;
 const ARM_HOME_JOINT_KEYS = ARM_MOTORS.map((motor) => `${motor}.pos`);
+const DUMMY_RECORDING_PREFIX = "dummy://recordings/";
+const DUMMY_RECORDING_DEFINITIONS = [
+  {
+    slug: "offline-pick-place",
+    name: "Dummy: Offline pick and place",
+    fileName: "dummy-offline-pick-place.json",
+    durationS: 6.4,
+    modifiedAt: "2026-01-01T12:00:00.000Z",
+  },
+  {
+    slug: "offline-ecu-align",
+    name: "Dummy: ECU alignment check",
+    fileName: "dummy-ecu-alignment.json",
+    durationS: 4.8,
+    modifiedAt: "2026-01-01T12:05:00.000Z",
+  },
+  {
+    slug: "offline-servo-tune",
+    name: "Dummy: Servo tuning pass",
+    fileName: "dummy-servo-tune.json",
+    durationS: 8.2,
+    modifiedAt: "2026-01-01T12:10:00.000Z",
+  },
+] as const;
 const TORQUE_LIMIT_MIN = 0;
 const TORQUE_LIMIT_MAX = 1000;
 const LEKIWI_MOTOR_NAMES_BY_ID: Record<string, string> = {
@@ -348,6 +373,14 @@ function isFiniteHomePosition(homePosition: ArmHomePosition | null): homePositio
   );
 }
 
+function isDummyRecordingPath(recordingPath: string): boolean {
+  return recordingPath.startsWith(DUMMY_RECORDING_PREFIX);
+}
+
+function hasDummyRecordingPath<T extends { trajectoryPath: string }>(item: T): boolean {
+  return isDummyRecordingPath(item.trajectoryPath);
+}
+
 export class RobotController {
   private readonly configStore = new ConfigStore(defaultConfig, ROOT_DIR);
   private readonly hostRunner = new RemoteProcessRunner("Pi host");
@@ -425,6 +458,17 @@ export class RobotController {
       replaySnapshot,
       datasetCaptureSnapshot,
     );
+    const visiblePinnedMoves = piReachable
+      ? pinnedMoves.filter((move) => !hasDummyRecordingPath(move))
+      : pinnedMoves;
+    const visibleChainLinks = piReachable
+      ? chainLinks
+          .map((chain) => ({
+            ...chain,
+            items: chain.items.filter((item) => !hasDummyRecordingPath(item)),
+          }))
+          .filter((chain) => chain.items.length > 0)
+      : chainLinks;
 
     const selectedProfile =
       training.profiles.find((profile) => profile.id === training.selectedProfileId) ?? null;
@@ -433,8 +477,8 @@ export class RobotController {
 
     return {
       settings,
-      pinnedMoves,
-      chainLinks,
+      pinnedMoves: visiblePinnedMoves,
+      chainLinks: visibleChainLinks,
       homePosition,
       recordingReplayOptions,
       training: {
@@ -447,7 +491,7 @@ export class RobotController {
       leader,
       vexBrain,
       robotSensors,
-      recordings: this.cachedRecordings,
+      recordings: piReachable ? this.cachedRecordings : this.buildDummyRecordingEntries(),
       lastError: this.lastError,
       activityLog: [...this.activityLog],
       services: {
@@ -470,6 +514,111 @@ export class RobotController {
         policyBenchmark: this.policyBenchmarkRunner.getSnapshot(),
         policyEval: this.policyEvalRunner.getSnapshot(),
       },
+    };
+  }
+
+  private buildDummyRecordingEntries(): RecordingEntry[] {
+    return DUMMY_RECORDING_DEFINITIONS.map((definition, index) => ({
+      path: `${DUMMY_RECORDING_PREFIX}${definition.slug}.json`,
+      name: definition.name,
+      fileName: definition.fileName,
+      label: definition.name.replace(/^Dummy:\s*/i, ""),
+      size: 46000 + index * 8200,
+      modifiedAt: definition.modifiedAt,
+      durationS: definition.durationS,
+      dummy: true,
+    }));
+  }
+
+  private buildDummyRecordingDetail(recordingPath: string): RecordingDetail {
+    const definition =
+      DUMMY_RECORDING_DEFINITIONS.find(
+        (item) => `${DUMMY_RECORDING_PREFIX}${item.slug}.json` === recordingPath,
+      ) ?? DUMMY_RECORDING_DEFINITIONS[0];
+    const path = `${DUMMY_RECORDING_PREFIX}${definition.slug}.json`;
+    const baseKeys = [
+      "base_left_wheel.vel",
+      "base_back_wheel.vel",
+      "base_right_wheel.vel",
+      "base_x_velocity_mps",
+      "base_y_velocity_mps",
+      "base_turn_rate_radps",
+    ];
+    const sensorKeys = [
+      "ultrasonic_sensor_1.distance_m",
+      "ultrasonic_sensor_2.distance_m",
+      "ultrasonic_sensor_1.position_m",
+      "ultrasonic_sensor_2.position_m",
+    ];
+    const durationS = definition.durationS;
+    const sampleCount = 73;
+    const centers = [0, -48, 78, 28, 0, 35];
+    const spans = [16, 20, 26, 18, 32, 10];
+    const phaseOffset = definition.slug.includes("align")
+      ? 0.8
+      : definition.slug.includes("tune")
+        ? 1.5
+        : 0.15;
+
+    const samples: RecordingDetail["samples"] = Array.from({ length: sampleCount }, (_, index) => {
+      const progress = sampleCount <= 1 ? 0 : index / (sampleCount - 1);
+      const tS = Number((progress * durationS).toFixed(6));
+      const wave = progress * Math.PI * 2 + phaseOffset;
+      const armValues: Record<string, number> = Object.fromEntries(
+        ARM_HOME_JOINT_KEYS.map((key, servoIndex) => [
+          key,
+          Number(
+            (
+              centers[servoIndex] +
+              Math.sin(wave + servoIndex * 0.55) * spans[servoIndex] +
+              Math.cos(wave * 0.5 + servoIndex) * 2
+            ).toFixed(3),
+          ),
+        ]),
+      );
+      const baseValues = {
+        "base_left_wheel.vel": Number((Math.sin(wave) * 0.28).toFixed(4)),
+        "base_back_wheel.vel": Number((Math.cos(wave * 0.9) * 0.24).toFixed(4)),
+        "base_right_wheel.vel": Number((Math.sin(wave + 1.1) * 0.27).toFixed(4)),
+        "base_x_velocity_mps": Number((Math.sin(wave * 0.7) * 0.08).toFixed(4)),
+        "base_y_velocity_mps": Number((0.18 + Math.cos(wave * 0.6) * 0.05).toFixed(4)),
+        "base_turn_rate_radps": Number((Math.sin(wave * 0.4) * 0.05).toFixed(4)),
+      };
+      const sensorValues = {
+        "ultrasonic_sensor_1.distance_m": Number((0.32 + progress * 0.08).toFixed(4)),
+        "ultrasonic_sensor_2.distance_m": Number((0.76 - progress * 0.12).toFixed(4)),
+        "ultrasonic_sensor_1.position_m": Number((0.18 + progress * 0.14).toFixed(4)),
+        "ultrasonic_sensor_2.position_m": Number((0.48 + Math.sin(wave * 0.35) * 0.04).toFixed(4)),
+      };
+
+      return {
+        tS,
+        values: {
+          ...armValues,
+          ...baseValues,
+          ...sensorValues,
+        },
+      };
+    });
+
+    const commandSamples = samples.map((sample) => ({
+      tS: sample.tS,
+      values: Object.fromEntries(
+        [...ARM_HOME_JOINT_KEYS, ...baseKeys].map((key) => [key, sample.values[key] ?? 0]),
+      ),
+    }));
+
+    return {
+      path,
+      durationS,
+      sampleCount: samples.length,
+      commandSampleCount: commandSamples.length,
+      armKeys: [...ARM_HOME_JOINT_KEYS],
+      baseKeys,
+      sensorKeys,
+      timelineSource: "commands",
+      samples,
+      commandSamples,
     };
   }
 
@@ -1575,6 +1724,11 @@ export class RobotController {
       throw new Error("Choose a recording first.");
     }
 
+    if (isDummyRecordingPath(recordingPath)) {
+      this.logActivity(`Loading offline dummy recording detail for ${recordingPath}.`);
+      return this.buildDummyRecordingDetail(recordingPath);
+    }
+
     this.logActivity(`Loading recording detail for ${recordingPath}.`);
     const host = await this.preparePi(settings, "inspect recording");
     return this.readRecordingDetail(settings, host, recordingPath);
@@ -1732,6 +1886,12 @@ export class RobotController {
       this.logActivity(
         `Saving servo adjustments for ${recordingPath} at ${timeS.toFixed(2)}s.`,
       );
+      if (isDummyRecordingPath(recordingPath)) {
+        this.logActivity("Dummy recording servo adjustment accepted for offline UI testing.");
+        this.lastError = null;
+        return this.getState();
+      }
+
       const host = await this.preparePi(settings, "save servo recording adjustment");
       await this.writeRecordingServoAdjustment(settings, host, recordingPath, timeS, servoValues);
       this.cachedRecordings = await this.fetchRecordings(settings, host);
@@ -1851,6 +2011,9 @@ export class RobotController {
       if (!replay.trajectoryPath) {
         throw new Error("Choose a saved trajectory before starting replay.");
       }
+      if (isDummyRecordingPath(replay.trajectoryPath)) {
+        throw new Error("Dummy recordings are for offline UI testing only. Connect the Pi to replay real recordings.");
+      }
       if (replay.homeMode !== "none" && !isFiniteHomePosition(homePosition)) {
         throw new Error("Set an arm home position before replaying with Go Home enabled.");
       }
@@ -1962,6 +2125,41 @@ export class RobotController {
       ];
 
       this.configStore.savePinnedMoves(pinnedMoves);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async updatePinnedMove(id: string, payload: UpdatePinnedMoveRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const existing = config.pinnedMoves.find((move) => move.id === id);
+      if (!existing) {
+        throw new Error("Pinned move not found.");
+      }
+
+      const merged = {
+        ...existing,
+        ...payload,
+      };
+      const replay = normalizeReplayRequest(merged, config.settings.trajectories);
+      const updated: PinnedMove = {
+        id: existing.id,
+        name:
+          typeof payload.name === "string" && payload.name.trim()
+            ? payload.name.trim()
+            : existing.name,
+        keyBinding:
+          typeof payload.keyBinding === "string"
+            ? payload.keyBinding.trim()
+            : existing.keyBinding,
+        ...replay,
+      };
+
+      this.logActivity(`Updating pinned move ${updated.name}.`);
+      this.configStore.savePinnedMoves(
+        config.pinnedMoves.map((move) => (move.id === id ? updated : move)),
+      );
       this.lastError = null;
       return this.getState();
     });

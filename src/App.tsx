@@ -14,6 +14,7 @@ import type {
   RecordingDetail,
   RecordingDetailRequest,
   RecordingReplayOptions,
+  ReplayRequest,
   ReplayTarget,
   RecordingInputMode,
   RecordingEntry,
@@ -28,6 +29,7 @@ import type {
   TrainingArtifact,
   TrainingProfile,
   TrimRecordingRequest,
+  UpdatePinnedMoveRequest,
   VexReplayMode,
 } from "./types";
 
@@ -775,6 +777,309 @@ function recordingHasReplayableBaseReference(detail: RecordingDetail | null | un
   );
 }
 
+function isDummyRecordingPath(path: string | null | undefined): boolean {
+  return Boolean(path?.startsWith("dummy://recordings/"));
+}
+
+function mergeReplayRequest(
+  base: ReplayRequest,
+  patch: Partial<ReplayRequest>,
+): ReplayRequest {
+  const target = patch.target ?? base.target;
+  return {
+    trajectoryPath: patch.trajectoryPath ?? base.trajectoryPath,
+    target,
+    vexReplayMode: patch.vexReplayMode ?? base.vexReplayMode,
+    homeMode: target === "pi" ? (patch.homeMode ?? base.homeMode) : "none",
+    speed: patch.speed ?? base.speed,
+    autoVexPositioning: target === "pi" ? (patch.autoVexPositioning ?? base.autoVexPositioning) : false,
+    vexPositioningSpeed: patch.vexPositioningSpeed ?? base.vexPositioningSpeed,
+    vexPositioningTimeoutS: patch.vexPositioningTimeoutS ?? base.vexPositioningTimeoutS,
+    vexPositioningXyToleranceM:
+      patch.vexPositioningXyToleranceM ?? base.vexPositioningXyToleranceM,
+    vexPositioningHeadingToleranceDeg:
+      patch.vexPositioningHeadingToleranceDeg ?? base.vexPositioningHeadingToleranceDeg,
+    vexPositioningXyTrimToleranceM:
+      patch.vexPositioningXyTrimToleranceM ?? base.vexPositioningXyTrimToleranceM,
+    vexPositioningHeadingTrimToleranceDeg:
+      patch.vexPositioningHeadingTrimToleranceDeg ?? base.vexPositioningHeadingTrimToleranceDeg,
+    includeBase: target === "pi" ? (patch.includeBase ?? base.includeBase) : false,
+    holdFinalS: patch.holdFinalS ?? base.holdFinalS,
+  };
+}
+
+function ReplayOptionChecks({
+  options,
+  compact = false,
+}: {
+  options: ReplayRequest;
+  compact?: boolean;
+}) {
+  const piTarget = options.target === "pi";
+  return (
+    <div className={`replay-option-checks ${compact ? "compact" : ""}`}>
+      <span className={`config-check ${piTarget && options.autoVexPositioning ? "on" : "off"}`}>
+        {piTarget && options.autoVexPositioning ? "✓" : "-"} Auto VEX positioning
+      </span>
+      <span className={`config-check ${piTarget && options.includeBase ? "on" : "off"}`}>
+        {piTarget && options.includeBase ? "✓" : "-"} VEX base replay
+      </span>
+      <span className={`config-check ${options.homeMode !== "none" ? "on" : "off"}`}>
+        {options.homeMode !== "none" ? "✓" : "-"} {homeModeLabel(options.homeMode)}
+      </span>
+      <span className="config-check muted">
+        {vexReplayModeLabel(options.vexReplayMode)} · {options.speed}x
+      </span>
+    </div>
+  );
+}
+
+function ReplayOptionsEditor({
+  options,
+  disabled,
+  hasArmHomePosition,
+  onChange,
+}: {
+  options: ReplayRequest;
+  disabled: boolean;
+  hasArmHomePosition: boolean;
+  onChange: (patch: Partial<ReplayRequest>) => void;
+}) {
+  const targetIsPi = options.target === "pi";
+  const updatePositiveNumber = (
+    rawValue: string,
+    key: keyof Pick<
+      ReplayRequest,
+      | "speed"
+      | "vexPositioningSpeed"
+      | "vexPositioningTimeoutS"
+      | "vexPositioningXyToleranceM"
+      | "vexPositioningHeadingToleranceDeg"
+      | "vexPositioningXyTrimToleranceM"
+      | "vexPositioningHeadingTrimToleranceDeg"
+    >,
+    clampValue?: (value: number) => number,
+  ) => {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value <= 0) {
+      return;
+    }
+    onChange({ [key]: clampValue ? clampValue(value) : value } as Partial<ReplayRequest>);
+  };
+
+  const updateNonNegativeNumber = (
+    rawValue: string,
+    key: keyof Pick<ReplayRequest, "holdFinalS">,
+  ) => {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value < 0) {
+      return;
+    }
+    onChange({ [key]: value } as Partial<ReplayRequest>);
+  };
+
+  return (
+    <div className="move-options-editor">
+      <ReplayOptionChecks options={options} />
+      <div className="form-grid compact">
+        <label>
+          Replay target
+          <select
+            value={options.target}
+            disabled={disabled}
+            onChange={(event) =>
+              onChange({
+                target: event.target.value === "leader" ? "leader" : "pi",
+              })
+            }
+          >
+            <option value="pi">Pi follower</option>
+            <option value="leader">Leader arm</option>
+          </select>
+        </label>
+        <label>
+          Speed
+          <input
+            type="number"
+            min="0.1"
+            step="0.1"
+            value={formatSecondsInput(options.speed)}
+            disabled={disabled}
+            onChange={(event) => updatePositiveNumber(event.target.value, "speed")}
+          />
+        </label>
+        <label>
+          Hold Final (s)
+          <input
+            type="number"
+            min="0"
+            step="0.1"
+            value={formatSecondsInput(options.holdFinalS)}
+            disabled={disabled}
+            onChange={(event) => updateNonNegativeNumber(event.target.value, "holdFinalS")}
+          />
+        </label>
+        <label>
+          Go home
+          <select
+            value={options.homeMode}
+            disabled={disabled || !targetIsPi || !hasArmHomePosition}
+            onChange={(event) => onChange({ homeMode: event.target.value as ArmHomeMode })}
+          >
+            {HOME_MODE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={options.autoVexPositioning}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) => onChange({ autoVexPositioning: event.target.checked })}
+          />
+          <span>Auto VEX positioning</span>
+        </label>
+        <label>
+          Speed position fixing
+          <input
+            type="number"
+            min={MIN_VEX_POSITIONING_SPEED}
+            max={MAX_VEX_POSITIONING_SPEED}
+            step="0.1"
+            value={formatSecondsInput(options.vexPositioningSpeed)}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) =>
+              updatePositiveNumber(
+                event.target.value,
+                "vexPositioningSpeed",
+                clampVexPositioningSpeed,
+              )
+            }
+          />
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={options.includeBase}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) => onChange({ includeBase: event.target.checked })}
+          />
+          <span>Replay VEX base with this move</span>
+        </label>
+        <label>
+          VEX timeout (s)
+          <input
+            type="number"
+            min={MIN_VEX_POSITIONING_TIMEOUT_S}
+            max={MAX_VEX_POSITIONING_TIMEOUT_S}
+            step="0.5"
+            value={formatSecondsInput(options.vexPositioningTimeoutS)}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) =>
+              updatePositiveNumber(
+                event.target.value,
+                "vexPositioningTimeoutS",
+                clampVexPositioningTimeout,
+              )
+            }
+          />
+        </label>
+        <label>
+          X/Y tolerance (m)
+          <input
+            type="number"
+            min={MIN_VEX_POSITIONING_XY_TOLERANCE_M}
+            max={MAX_VEX_POSITIONING_XY_TOLERANCE_M}
+            step="0.01"
+            value={formatSecondsInput(options.vexPositioningXyToleranceM)}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) =>
+              updatePositiveNumber(
+                event.target.value,
+                "vexPositioningXyToleranceM",
+                clampVexPositioningXyTolerance,
+              )
+            }
+          />
+        </label>
+        <label>
+          Heading tolerance (deg)
+          <input
+            type="number"
+            min={MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+            max={MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+            step="0.1"
+            value={formatSecondsInput(options.vexPositioningHeadingToleranceDeg)}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) =>
+              updatePositiveNumber(
+                event.target.value,
+                "vexPositioningHeadingToleranceDeg",
+                clampVexPositioningHeadingTolerance,
+              )
+            }
+          />
+        </label>
+        <label>
+          X/Y trim tolerance (m)
+          <input
+            type="number"
+            min={MIN_VEX_POSITIONING_XY_TOLERANCE_M}
+            max={MAX_VEX_POSITIONING_XY_TOLERANCE_M}
+            step="0.01"
+            value={formatSecondsInput(options.vexPositioningXyTrimToleranceM)}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) =>
+              updatePositiveNumber(
+                event.target.value,
+                "vexPositioningXyTrimToleranceM",
+                clampVexPositioningXyTolerance,
+              )
+            }
+          />
+        </label>
+        <label>
+          Heading trim tolerance (deg)
+          <input
+            type="number"
+            min={MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+            max={MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG}
+            step="0.1"
+            value={formatSecondsInput(options.vexPositioningHeadingTrimToleranceDeg)}
+            disabled={disabled || !targetIsPi}
+            onChange={(event) =>
+              updatePositiveNumber(
+                event.target.value,
+                "vexPositioningHeadingTrimToleranceDeg",
+                clampVexPositioningHeadingTolerance,
+              )
+            }
+          />
+        </label>
+        <label>
+          VEX replay mode
+          <select
+            value={options.vexReplayMode}
+            disabled={disabled || !targetIsPi || !options.includeBase}
+            onChange={(event) =>
+              onChange({ vexReplayMode: event.target.value === "ecu" ? "ecu" : "drive" })
+            }
+          >
+            {VEX_REPLAY_MODE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function emptyTrainingArtifact(): TrainingArtifact {
   return {
     datasetEpisodeCount: null,
@@ -876,6 +1181,7 @@ function RecordingPreviewPanel({
   loading,
   error,
   controlsDisabled,
+  replayDisabled,
   playheadS,
   playing,
   replayActive,
@@ -899,6 +1205,7 @@ function RecordingPreviewPanel({
   loading: boolean;
   error: string;
   controlsDisabled: boolean;
+  replayDisabled: boolean;
   playheadS: number;
   playing: boolean;
   replayActive: boolean;
@@ -955,7 +1262,7 @@ function RecordingPreviewPanel({
           <button disabled={controlsDisabled || !detail || durationS <= 0} onClick={onTogglePlayback}>
             {playing ? "Pause" : "Play"}
           </button>
-          <button disabled={controlsDisabled || !detail || durationS <= 0 || replayActive} onClick={onStartReplay}>
+          <button disabled={controlsDisabled || replayDisabled || !detail || durationS <= 0 || replayActive} onClick={onStartReplay}>
             Replay
           </button>
           <button disabled={controlsDisabled || !replayActive} onClick={onPauseReplay}>
@@ -1407,6 +1714,8 @@ export default function App() {
   const [chainRecordingPath, setChainRecordingPath] = useState("");
   const [chainDragItemId, setChainDragItemId] = useState<string | null>(null);
   const [chainSpeedEditId, setChainSpeedEditId] = useState<string | null>(null);
+  const [openChainItemMenuId, setOpenChainItemMenuId] = useState<string | null>(null);
+  const [openPinnedMoveMenuId, setOpenPinnedMoveMenuId] = useState<string | null>(null);
   const [chainRunState, setChainRunState] = useState<ChainRunState | null>(null);
   const [replayTarget, setReplayTarget] = useState<ReplayTarget>("pi");
   const [torqueDraft, setTorqueDraft] = useState<Record<string, number>>({});
@@ -1450,8 +1759,11 @@ export default function App() {
   const chainConfirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
 
   const loadState = async () => {
+    if (stateRequestController.current) {
+      return;
+    }
+
     const controller = new AbortController();
-    stateRequestController.current?.abort();
     stateRequestController.current = controller;
     try {
       const next = await request<DashboardState>("/api/state", { signal: controller.signal });
@@ -1471,6 +1783,10 @@ export default function App() {
         return;
       }
       setBackendError(error instanceof Error ? error.message : "Backend state is unavailable.");
+    } finally {
+      if (stateRequestController.current === controller) {
+        stateRequestController.current = null;
+      }
     }
   };
 
@@ -1573,6 +1889,7 @@ export default function App() {
     () => state?.recordings.find((item) => item.path === selectedRecording),
     [selectedRecording, state?.recordings],
   );
+  const selectedRecordingIsDummy = Boolean(selectedRecordingEntry?.dummy || isDummyRecordingPath(selectedRecording));
   const selectedRecordingReplayOptions: RecordingReplayOptions = useMemo(() => {
     const savedOptions = state?.recordingReplayOptions[selectedRecording];
     return {
@@ -2519,6 +2836,11 @@ export default function App() {
   };
 
   const handleTriggerPinnedMove = async (move: PinnedMove) => {
+    if (isDummyRecordingPath(move.trajectoryPath)) {
+      flashToast("Dummy pinned moves are for offline UI testing. Connect the Pi to run real moves.");
+      return;
+    }
+
     const next = await mutate(
       `trigger-${move.id}`,
       `/api/pinned-moves/${move.id}/trigger`,
@@ -2736,6 +3058,10 @@ export default function App() {
       flashToast("Select a recording first.");
       return;
     }
+    if (selectedRecordingIsDummy) {
+      flashToast("Dummy recordings can be previewed and configured, but cannot move the robot.");
+      return;
+    }
 
     const next = await mutate("start-replay", "/api/replays/start", {
       method: "POST",
@@ -2940,6 +3266,29 @@ export default function App() {
     }
   };
 
+  const handleUpdatePinnedMove = async (
+    move: PinnedMove,
+    patch: Partial<PinnedMove & ReplayRequest>,
+  ) => {
+    const merged = {
+      ...move,
+      ...patch,
+    };
+    const payload: UpdatePinnedMoveRequest = {
+      name: merged.name,
+      keyBinding: normalizeHotkeyText(merged.keyBinding),
+      ...mergeReplayRequest(move, patch),
+    };
+    const next = await mutate(`update-pin-${move.id}`, `/api/pinned-moves/${move.id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+
+    if (next) {
+      flashToast("Pinned move settings saved.");
+    }
+  };
+
   const defaultChainItemForRecording = (recording: RecordingEntry): ChainLinkItem => {
     const savedOptions = state?.recordingReplayOptions[recording.path];
     const defaultSpeed = state?.settings.trajectories.defaultReplaySpeed ?? 1;
@@ -2977,6 +3326,7 @@ export default function App() {
     setChainConfirmAfterEach(true);
     setChainItems([]);
     setChainSpeedEditId(null);
+    setOpenChainItemMenuId(null);
   };
 
   const handleEditChainLink = (chain: ChainLink) => {
@@ -2985,6 +3335,7 @@ export default function App() {
     setChainConfirmAfterEach(chain.confirmAfterEach);
     setChainItems(structuredClone(chain.items));
     setChainSpeedEditId(null);
+    setOpenChainItemMenuId(null);
   };
 
   const handleAddRecordingToChain = () => {
@@ -3005,7 +3356,15 @@ export default function App() {
 
   const updateChainItem = (itemId: string, patch: Partial<ChainLinkItem>) => {
     setChainItems((current) =>
-      current.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
+      current.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              ...patch,
+              ...mergeReplayRequest(item, patch),
+            }
+          : item,
+      ),
     );
   };
 
@@ -3834,7 +4193,10 @@ export default function App() {
                         className={`recording-row ${recording.path === selectedRecording ? "active" : ""}`}
                         onClick={() => setSelectedRecording(recording.path)}
                       >
-                        <span className="recording-name">{recording.name}</span>
+                        <span className="recording-name">
+                          {recording.name}
+                          {recording.dummy ? <span className="dummy-chip">offline dummy</span> : null}
+                        </span>
                         <span className="recording-meta">{recording.fileName}</span>
                         <span>
                           {formatBytes(recording.size)}
@@ -3861,6 +4223,14 @@ export default function App() {
                         }`
                       : "Select a recording to replay or pin."}
                   </p>
+                  {selectedRecordingIsDummy ? (
+                    <div className="mode-strip compact">
+                      <span className="status-pill warn">offline dummy</span>
+                      <p className="card-note">
+                        Dummy recordings are local UI test data. They can be previewed, pinned, chained, and configured while the Pi is disconnected, but they will not appear when the Pi is reachable.
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="selected-recording-editor">
                     <label>
                       Recording name
@@ -3873,31 +4243,32 @@ export default function App() {
                     </label>
                     <div className="selected-recording-actions">
                       <button
-                        disabled={
-                          disabled ||
-                          !selectedRecordingEntry ||
-                          !recordingNameDraft.trim() ||
-                          recordingNameDraft.trim() === selectedRecordingEntry.name
-                        }
+	                        disabled={
+	                          disabled ||
+	                          !selectedRecordingEntry ||
+	                          selectedRecordingIsDummy ||
+	                          !recordingNameDraft.trim() ||
+	                          recordingNameDraft.trim() === selectedRecordingEntry.name
+	                        }
                         onClick={() => void handleRenameRecording()}
                       >
                         Save Name
                       </button>
                       <button
-                        disabled={disabled || !selectedRecordingEntry}
+	                        disabled={disabled || !selectedRecordingEntry || selectedRecordingIsDummy}
                         title="Copy this recording so it can get its own X/Y ultrasonic recapture."
                         onClick={() => void handleDuplicateRecording()}
                       >
                         Duplicate
                       </button>
                       <button
-                        disabled={disabled || !selectedRecordingEntry}
+	                        disabled={disabled || !selectedRecordingEntry || selectedRecordingIsDummy}
                         onClick={() => void handleMarkRecordingGyroZero()}
                       >
                         Mark Gyro Zero
                       </button>
                       <button
-                        disabled={disabled || !selectedRecordingEntry || !recordingUltrasonicResetReady}
+	                        disabled={disabled || !selectedRecordingEntry || selectedRecordingIsDummy || !recordingUltrasonicResetReady}
                         title={
                           recordingUltrasonicResetReady
                             ? "Replay the whole recording and overwrite its X/Y ultrasonic stream from live sensor readings."
@@ -3909,7 +4280,7 @@ export default function App() {
                       </button>
                       <button
                         className="danger"
-                        disabled={disabled || !selectedRecordingEntry}
+	                        disabled={disabled || !selectedRecordingEntry || selectedRecordingIsDummy}
                         onClick={() => void handleDeleteRecording()}
                       >
                         Delete
@@ -3919,9 +4290,10 @@ export default function App() {
                   <RecordingPreviewPanel
                     detail={recordingDetail}
                     loading={recordingDetailLoading}
-                    error={recordingDetailError}
-                    controlsDisabled={disabled}
-                    playheadS={playbackTimeS}
+	                    error={recordingDetailError}
+	                    controlsDisabled={disabled}
+	                    replayDisabled={selectedRecordingIsDummy}
+	                    playheadS={playbackTimeS}
                     playing={playbackPlaying}
                     replayActive={replayActive}
                     trimStartS={trimStartValueS}
@@ -3970,10 +4342,11 @@ export default function App() {
                         Scrub the preview, set trim start and end from the playhead, then keep only that action window.
                       </p>
                       <button
-                        disabled={
-                          disabled ||
-                          !selectedRecordingEntry ||
-                          !trimEndDraft.trim() ||
+	                        disabled={
+	                          disabled ||
+	                          !selectedRecordingEntry ||
+	                          selectedRecordingIsDummy ||
+	                          !trimEndDraft.trim() ||
                           !Number.isFinite(Number(trimStartDraft)) ||
                           !Number.isFinite(Number(trimEndDraft)) ||
                           Number(trimStartDraft) < 0 ||
@@ -4266,11 +4639,11 @@ export default function App() {
                     </div>
                   ) : null}
                   <div className="button-cluster inline">
-                    <button
-                      className="primary"
-                      disabled={disabled || !selectedRecording}
-                      onClick={() => void handleStartReplay()}
-                    >
+	                    <button
+	                      className="primary"
+	                      disabled={disabled || !selectedRecording || selectedRecordingIsDummy}
+	                      onClick={() => void handleStartReplay()}
+	                    >
                       {replayTarget === "leader" ? "Replay on Leader" : "Replay"}
                     </button>
                     <button disabled={disabled || !replayActive} onClick={() => void handlePauseReplay()}>
@@ -4466,12 +4839,13 @@ export default function App() {
                             }
                           />
                           <div className="chain-block-main">
-                            <div>
-                              <span className="chain-step">{index + 1}</span>
-                              <strong>{item.name}</strong>
-                              <small>{item.trajectoryPath}</small>
-                            </div>
-                            <div className="chain-block-controls">
+	                            <div>
+	                              <span className="chain-step">{index + 1}</span>
+	                              <strong>{item.name}</strong>
+	                              <small>{item.trajectoryPath}</small>
+	                              <ReplayOptionChecks options={item} compact />
+	                            </div>
+	                            <div className="chain-block-controls">
                               {chainSpeedEditId === item.id ? (
                                 <input
                                   aria-label={`Speed for ${item.name}`}
@@ -4516,12 +4890,25 @@ export default function App() {
                                   </option>
                                 ))}
                               </select>
-                              <button
-                                type="button"
-                                disabled={chainIsRunning}
-                                onClick={() => handleRemoveChainItem(item.id)}
-                              >
-                                Remove
+	                              <button
+	                                type="button"
+	                                className="menu-dot-button"
+	                                disabled={chainIsRunning}
+	                                title="Edit all replay options for this Chain-link block."
+	                                onClick={() =>
+	                                  setOpenChainItemMenuId((current) =>
+	                                    current === item.id ? null : item.id,
+	                                  )
+	                                }
+	                              >
+	                                ...
+	                              </button>
+	                              <button
+	                                type="button"
+	                                disabled={chainIsRunning}
+	                                onClick={() => handleRemoveChainItem(item.id)}
+	                              >
+	                                Remove
                               </button>
                             </div>
                           </div>
@@ -4532,11 +4919,36 @@ export default function App() {
                             title={
                               homeModeRunsAfter(item.homeMode)
                                 ? "Go home after this recording"
-                                : "No go-home after this recording"
-                            }
-                          />
-                        </article>
-                      ))
+	                              : "No go-home after this recording"
+	                            }
+	                          />
+	                          {openChainItemMenuId === item.id ? (
+	                            <div className="chain-block-editor">
+	                              <div className="form-grid compact">
+	                                <label>
+	                                  Block name
+	                                  <input
+	                                    value={item.name}
+	                                    disabled={chainIsRunning}
+	                                    onChange={(event) =>
+	                                      updateChainItem(item.id, { name: event.target.value })
+	                                    }
+	                                  />
+	                                </label>
+	                              </div>
+	                              <ReplayOptionsEditor
+	                                options={item}
+	                                disabled={chainIsRunning}
+	                                hasArmHomePosition={hasArmHomePosition}
+	                                onChange={(patch) => updateChainItem(item.id, patch)}
+	                              />
+	                              <p className="card-note">
+	                                Save Chain-link persists these block settings.
+	                              </p>
+	                            </div>
+	                          ) : null}
+	                        </article>
+	                      ))
                     ) : (
                       <div className="empty-state">
                         Add recordings to make a draggable Chain-link sequence.
@@ -4578,10 +4990,22 @@ export default function App() {
                                   className={`home-dot mini ${
                                     homeModeRunsBefore(item.homeMode) ? "on" : ""
                                   }`}
-                                />
-                                <span>{index + 1}. {item.name}</span>
-                                <span
-                                  className={`home-dot mini ${
+	                                />
+	                                <span>{index + 1}. {item.name}</span>
+	                                <span
+	                                  className={`mini-config-check ${
+	                                    item.target === "pi" && item.autoVexPositioning ? "on" : "off"
+	                                  }`}
+	                                  title={
+	                                    item.target === "pi" && item.autoVexPositioning
+	                                      ? "Auto VEX positioning enabled"
+	                                      : "Auto VEX positioning disabled"
+	                                  }
+	                                >
+	                                  {item.target === "pi" && item.autoVexPositioning ? "✓ VEX" : "- VEX"}
+	                                </span>
+	                                <span
+	                                  className={`home-dot mini ${
                                     homeModeRunsAfter(item.homeMode) ? "on" : ""
                                   }`}
                                 />
@@ -4619,16 +5043,32 @@ export default function App() {
               <div className="pin-grid">
                 {state?.pinnedMoves.length ? (
                   state.pinnedMoves.map((move) => (
-                    <article key={move.id} className="pin-card">
-                      <div className="pin-card-head">
-                        <div>
-                          <h3>{move.name}</h3>
-                          <p>{move.trajectoryPath}</p>
-                        </div>
-                        <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
-                      </div>
-                      <p className="pin-meta">
-                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} •{" "}
+	                    <article key={move.id} className="pin-card">
+	                      <div className="pin-card-head">
+	                        <div>
+	                          <h3>{move.name}</h3>
+	                          <p>{move.trajectoryPath}</p>
+	                        </div>
+	                        <div className="pin-card-actions">
+	                          <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
+	                          <button
+	                            type="button"
+	                            className="menu-dot-button"
+	                            disabled={disabled}
+	                            title="Edit this pinned move."
+	                            onClick={() =>
+	                              setOpenPinnedMoveMenuId((current) =>
+	                                current === move.id ? null : move.id,
+	                              )
+	                            }
+	                          >
+	                            ...
+	                          </button>
+	                        </div>
+	                      </div>
+	                      <ReplayOptionChecks options={move} />
+	                      <p className="pin-meta">
+	                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} •{" "}
                         {move.includeBase
                           ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})`
                           : "Arm only"}
@@ -4637,14 +5077,49 @@ export default function App() {
                           : ""}
                         {move.target === "pi" && move.autoVexPositioning
                           ? ` • VEX fix ${move.vexPositioningSpeed}x • VEX timeout ${formatSecondsInput(move.vexPositioningTimeoutS)}s • X/Y tol ${formatSecondsInput(move.vexPositioningXyToleranceM)}m • X/Y trim ${formatSecondsInput(move.vexPositioningXyTrimToleranceM)}m`
-                          : ""}
-                      </p>
-                      <div className="button-cluster inline">
-                        <button
-                          className="primary"
-                          disabled={disabled}
-                          onClick={() => void handleTriggerPinnedMove(move)}
-                        >
+	                          : ""}
+	                      </p>
+	                      {openPinnedMoveMenuId === move.id ? (
+	                        <div className="pin-move-editor">
+	                          <div className="form-grid compact">
+	                            <label>
+	                              Button label
+	                              <input
+	                                value={move.name}
+	                                disabled={disabled}
+	                                onChange={(event) =>
+	                                  void handleUpdatePinnedMove(move, { name: event.target.value })
+	                                }
+	                              />
+	                            </label>
+	                            <label>
+	                              Hotkey
+	                              <input
+	                                value={move.keyBinding}
+	                                disabled={disabled}
+	                                onChange={(event) =>
+	                                  void handleUpdatePinnedMove(move, {
+	                                    keyBinding: normalizeHotkeyText(event.target.value),
+	                                  })
+	                                }
+	                                placeholder="SHIFT+1"
+	                              />
+	                            </label>
+	                          </div>
+	                          <ReplayOptionsEditor
+	                            options={move}
+	                            disabled={disabled}
+	                            hasArmHomePosition={hasArmHomePosition}
+	                            onChange={(patch) => void handleUpdatePinnedMove(move, patch)}
+	                          />
+	                        </div>
+	                      ) : null}
+	                      <div className="button-cluster inline">
+	                        <button
+	                          className="primary"
+	                          disabled={disabled || isDummyRecordingPath(move.trajectoryPath)}
+	                          onClick={() => void handleTriggerPinnedMove(move)}
+	                        >
                           Run
                         </button>
                         <button

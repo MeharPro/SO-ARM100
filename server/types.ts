@@ -242,6 +242,7 @@ export interface RecordingEntry {
   size: number;
   modifiedAt: string;
   durationS: number | null;
+  dummy?: boolean;
 }
 
 export interface RecordingDetailRequest {
@@ -382,6 +383,11 @@ export interface ReplayRequest {
 export interface CreatePinnedMoveRequest extends ReplayRequest {
   name: string;
   keyBinding: string;
+}
+
+export interface UpdatePinnedMoveRequest extends Partial<ReplayRequest> {
+  name?: string;
+  keyBinding?: string;
 }
 
 export interface SaveChainLinkRequest {

@@ -855,6 +855,21 @@ code {
   overflow-wrap: anywhere;
 }
 
+.dummy-chip {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-left: 0.45rem;
+  padding: 0.12rem 0.38rem;
+  border: 1px solid var(--warning);
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .recording-meta {
   font-family: "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.84rem;
@@ -951,6 +966,65 @@ code {
   font-family: "SF Mono", Menlo, Consolas, monospace;
   font-size: 1rem;
   font-variant-numeric: tabular-nums;
+}
+
+.replay-option-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.replay-option-checks.compact {
+  margin-top: 0.45rem;
+}
+
+.config-check,
+.mini-config-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  width: fit-content;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 850;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.config-check {
+  padding: 0.32rem 0.5rem;
+}
+
+.mini-config-check {
+  padding: 0.18rem 0.34rem;
+  font-size: 0.72rem;
+}
+
+.config-check.on,
+.mini-config-check.on {
+  border-color: rgba(15, 159, 110, 0.42);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.config-check.off,
+.mini-config-check.off {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--ink-muted);
+}
+
+.config-check.muted {
+  background: var(--surface);
+  color: var(--ink-soft);
+}
+
+.move-options-editor {
+  display: grid;
+  gap: 0.75rem;
 }
 
 .recording-preview-chart svg {
@@ -1204,7 +1278,7 @@ code {
 
 .chain-block-controls {
   display: grid;
-  grid-template-columns: 76px minmax(180px, 1fr) auto;
+  grid-template-columns: 76px minmax(180px, 1fr) 44px auto;
   gap: 0.5rem;
   align-items: center;
 }
@@ -1222,6 +1296,15 @@ code {
   background: var(--accent-soft);
   color: var(--accent-ink);
   box-shadow: none;
+}
+
+.chain-block-editor {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+  cursor: default;
 }
 
 .chain-library-card {
@@ -1280,6 +1363,33 @@ code {
   color: var(--ink-soft);
   font-weight: 800;
   white-space: nowrap;
+}
+
+.pin-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: 0 0 auto;
+}
+
+.menu-dot-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  min-width: 38px;
+  min-height: 36px;
+  padding: 0;
+  letter-spacing: 0.08em;
+}
+
+.pin-move-editor {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
 }
 
 .settings-note {

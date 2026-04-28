@@ -35,6 +35,7 @@ import type {
   TrainingProfile,
   TrimRecordingRequest,
   TorqueLimitsRequest,
+  UpdatePinnedMoveRequest,
 } from "./types.js";
 
 const app = express();
@@ -318,6 +319,14 @@ app.delete(
   asyncRoute(async (req, res) => {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     res.json(await controller.deletePinnedMove(id));
+  }),
+);
+
+app.put(
+  "/api/pinned-moves/:id",
+  asyncRoute(async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    res.json(await controller.updatePinnedMove(id, req.body as UpdatePinnedMoveRequest));
   }),
 );
 

@@ -224,6 +224,7 @@ export interface RecordingEntry {
   size: number;
   modifiedAt: string;
   durationS: number | null;
+  dummy?: boolean;
 }
 
 export interface RecordingDetailRequest {
@@ -391,6 +392,11 @@ export interface ReplayRequest {
   vexPositioningHeadingTrimToleranceDeg: number;
   includeBase: boolean;
   holdFinalS: number;
+}
+
+export interface UpdatePinnedMoveRequest extends Partial<ReplayRequest> {
+  name?: string;
+  keyBinding?: string;
 }
 
 export interface SaveChainLinkRequest {
