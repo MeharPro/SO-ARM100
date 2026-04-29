@@ -1275,10 +1275,10 @@ function RecordingPreviewPanel({
           <button disabled={controlsDisabled || replayDisabled || !detail || durationS <= 0 || replayActive} onClick={onStartReplay}>
             Play Replay
           </button>
-          <button disabled={controlsDisabled || !replayActive} onClick={onPauseReplay}>
+          <button onClick={onPauseReplay}>
             Pause Replay
           </button>
-          <button disabled={controlsDisabled || !replayActive} onClick={onStopReplay}>
+          <button onClick={onStopReplay}>
             Stop Replay
           </button>
           <button
@@ -2203,27 +2203,6 @@ export default function App() {
     [recordingStartedLog],
   );
   const recordingHasCapturedMotion = Boolean(recordingStartedLog);
-  const serviceInMotionSensitiveState = (service: ServiceSnapshot): boolean =>
-    ["starting", "running", "stopping"].includes(service.state);
-  const hostCanAcceptVexGyroZero = (service: ServiceSnapshot): boolean =>
-    service.state === "running" &&
-    (service.mode === "control" || service.mode === "keyboard-control");
-  const hostBlocksVexGyroZero = Boolean(
-    state &&
-      serviceInMotionSensitiveState(state.services.host) &&
-      !hostCanAcceptVexGyroZero(state.services.host),
-  );
-  const vexGyroZeroBusy = Boolean(
-    state &&
-      (hostBlocksVexGyroZero ||
-        [
-          state.services.replay,
-          state.services.piCalibration,
-          state.services.datasetCapture,
-          state.services.policyEval,
-        ].some(serviceInMotionSensitiveState)),
-  );
-
   useEffect(() => {
     if (!isRecordingActive) {
       return;
@@ -4167,10 +4146,7 @@ export default function App() {
                   >
                     Stop Recording
                   </button>
-                  <button
-                    disabled={disabled || !state || vexGyroZeroBusy}
-                    onClick={() => void handleZeroVexGyro()}
-                  >
+                  <button onClick={() => void handleZeroVexGyro()}>
                     Zero VEX Gyro
                   </button>
                   <button
@@ -4687,10 +4663,10 @@ export default function App() {
 	                    >
                       {replayTarget === "leader" ? "Replay on Leader" : "Replay"}
                     </button>
-                    <button disabled={disabled || !replayActive} onClick={() => void handlePauseReplay()}>
+                    <button onClick={() => void handlePauseReplay()}>
                       Pause Replay
                     </button>
-                    <button disabled={disabled || !replayActive} onClick={() => void handleStopReplay()}>
+                    <button onClick={() => void handleStopReplay()}>
                       Stop Replay
                     </button>
                   </div>

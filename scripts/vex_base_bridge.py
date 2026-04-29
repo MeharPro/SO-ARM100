@@ -450,6 +450,7 @@ ECU_TURN_SPEED_DPS = {float(tuning["ecuTurnSpeedDps"]):.4f}
 VEX_MIXER_VERSION = {REQUIRED_VEX_MIXER_VERSION}
 DEADBAND_PERCENT = {int(tuning["deadbandPercent"])}
 TELEMETRY_INTERVAL_MS = 50
+SCREEN_KEEPALIVE_INTERVAL_MS = 1000
 REMOTE_COMMAND_MIN_TTL_MS = 50
 ECU_IDLE_TOLERANCE_DEG = 0.75
 ECU_COMMAND_TOLERANCE_DEG = 0.25
@@ -790,8 +791,26 @@ def print_motion(motion, source):
     )
 
 
+def display_keepalive(source):
+    try:
+        brain.screen.clear_screen()
+        brain.screen.set_cursor(1, 1)
+        brain.screen.print("Base Telemetry ON")
+        brain.screen.set_cursor(2, 1)
+        brain.screen.print("Mode: " + controller_control_mode)
+        brain.screen.set_cursor(3, 1)
+        brain.screen.print("Src: " + source)
+        brain.screen.set_cursor(4, 1)
+        brain.screen.print("Hold power button to shut down")
+        brain.screen.set_cursor(5, 1)
+        brain.screen.print("Uptime ms: " + str(brain.timer.system()))
+    except Exception:
+        pass
+
+
 def main():
     last_telemetry_ms = -TELEMETRY_INTERVAL_MS
+    last_screen_ms = -SCREEN_KEEPALIVE_INTERVAL_MS
     initialize_inertial()
     start_serial_command_reader()
     wait(30, MSEC)
@@ -837,6 +856,9 @@ def main():
         if now_ms - last_telemetry_ms >= TELEMETRY_INTERVAL_MS:
             print_motion(active_motion, source)
             last_telemetry_ms = now_ms
+        if now_ms - last_screen_ms >= SCREEN_KEEPALIVE_INTERVAL_MS:
+            display_keepalive(source)
+            last_screen_ms = now_ms
 
         wait(20, MSEC)
 

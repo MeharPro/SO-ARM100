@@ -988,6 +988,10 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn('"vex_mixer_version":%d', source)
         self.assertIn('if command == "!mode"', source)
         self.assertIn('"vex_control_mode":"%s"', source)
+        self.assertIn("SCREEN_KEEPALIVE_INTERVAL_MS = 1000", source)
+        self.assertIn("def display_keepalive(source):", source)
+        self.assertIn("display_keepalive(source)", source)
+        self.assertIn('brain.screen.print("Hold power button to shut down")', source)
         self.assertIn("remote_takeover = True", source)
         self.assertIn('remote_mode = "hold"', source)
 
