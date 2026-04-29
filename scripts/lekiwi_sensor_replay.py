@@ -711,7 +711,7 @@ class SensorAwareReplayState:
             "heading_error_deg": heading_error_deg,
             "available_axes": available_axes,
             "aligned_axes": aligned_axes,
-            "aligned": bool(available_axes) and heading_reference_block_reason is None and len(aligned_axes) == len(available_axes),
+            "aligned": bool(available_axes) and len(aligned_axes) == len(available_axes),
             "feedback_only": feedback_only,
             "heading_reference_block_reason": heading_reference_block_reason,
         }
@@ -1039,6 +1039,30 @@ def preposition_vex_base_to_recorded_state(
         except Exception:
             pass
 
+    skipped_heading_reasons: set[str] = set()
+
+    def note_skipped_heading(feedback: dict[str, Any]) -> str | None:
+        reason = feedback.get("heading_reference_block_reason") or _heading_reference_block_reason(feedback)
+        if reason is None or reason in skipped_heading_reasons:
+            return reason
+        skipped_heading_reasons.add(reason)
+        print(
+            f"{SENSOR_REPLAY_LOG_PREFIX} "
+            + json.dumps(
+                {
+                    "phase": "preposition",
+                    "event": "heading-skipped",
+                    "reason": reason,
+                    "detail": _heading_reference_block_detail(reason),
+                    "recorded_pose_epoch": feedback.get("recorded_pose_epoch"),
+                    "live_pose_epoch": feedback.get("live_pose_epoch"),
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return reason
+
     observation = vex_base_bridge.merge_observation(observation_reader.get_observation())
     emit_sensor_status(observation)
     distance_status = observation_reader.get_sensor_status_snapshot()
@@ -1051,31 +1075,7 @@ def preposition_vex_base_to_recorded_state(
         xy_tolerance_m=xy_tolerance,
         heading_tolerance_deg=heading_tolerance,
     )
-    heading_block_reason = _heading_reference_block_reason(feedback)
-    if heading_block_reason is not None:
-        vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
-        print(
-            f"{SENSOR_REPLAY_LOG_PREFIX} "
-            + json.dumps(
-                {
-                    "phase": "preposition",
-                    "event": "stopped",
-                    "reason": heading_block_reason,
-                    "axis": "heading",
-                    "recorded_pose_epoch": feedback.get("recorded_pose_epoch"),
-                    "live_pose_epoch": feedback.get("live_pose_epoch"),
-                },
-                separators=(",", ":"),
-            ),
-            flush=True,
-        )
-        return _preposition_result(
-            False,
-            reason=heading_block_reason,
-            axis="heading",
-            detail=_heading_reference_block_detail(heading_block_reason),
-            feedback=feedback,
-        )
+    note_skipped_heading(feedback)
     if not feedback["available_axes"]:
         vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
         print(
@@ -1179,31 +1179,7 @@ def preposition_vex_base_to_recorded_state(
             xy_tolerance_m=xy_tolerance,
             heading_tolerance_deg=heading_tolerance,
         )
-        heading_block_reason = _heading_reference_block_reason(feedback)
-        if heading_block_reason is not None:
-            vex_base_bridge.send_hold(ttl_ms=PREPOSITION_COMMAND_TTL_MS)
-            print(
-                f"{SENSOR_REPLAY_LOG_PREFIX} "
-                + json.dumps(
-                    {
-                        "phase": "preposition",
-                        "event": "stopped",
-                        "reason": heading_block_reason,
-                        "axis": "heading",
-                        "recorded_pose_epoch": feedback.get("recorded_pose_epoch"),
-                        "live_pose_epoch": feedback.get("live_pose_epoch"),
-                    },
-                    separators=(",", ":"),
-                ),
-                flush=True,
-            )
-            return _preposition_result(
-                False,
-                reason=heading_block_reason,
-                axis="heading",
-                detail=_heading_reference_block_detail(heading_block_reason),
-                feedback=feedback,
-            )
+        note_skipped_heading(feedback)
 
         active_axis: str | None = None
         active_raw_error: float | None = None

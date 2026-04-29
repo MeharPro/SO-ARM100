@@ -763,7 +763,7 @@ class SensorReplayTests(unittest.TestCase):
                 self.assertAlmostEqual(live_state["x"], 0.78, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
                 self.assertAlmostEqual(live_state["y"], 1.33, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
-    def test_preposition_requires_live_marked_gyro_origin_before_ultrasonic_axes(self) -> None:
+    def test_preposition_skips_unzeroed_live_gyro_and_uses_ultrasonic_axes(self) -> None:
         samples = [build_sample(heading_deg=-47.6121, pose_epoch=1)]
         replay_state = SensorAwareReplayState(
             samples,
@@ -785,17 +785,13 @@ class SensorReplayTests(unittest.TestCase):
                 settle_s=0.0,
             )
 
-        self.assertFalse(aligned)
-        self.assertEqual(aligned.reason, "live-pose-origin-unzeroed")
-        self.assertEqual(aligned.axis, "heading")
-        self.assertTrue(
-            all(abs(motion["theta.vel"]) <= 1e-6 for command_type, motion in vex_bridge.commands if command_type != "hold")
-        )
+        self.assertTrue(aligned)
+        self.assertEqual(self._command_axis_order(vex_bridge.commands), ["x", "y"])
         self.assertAlmostEqual(live_state["heading"], 0.0, delta=1e-6)
-        self.assertAlmostEqual(live_state["x"], 1.05, delta=1e-6)
-        self.assertAlmostEqual(live_state["y"], 2.10, delta=1e-6)
+        self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
+        self.assertAlmostEqual(live_state["y"], 2.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
-    def test_preposition_aborts_recorded_heading_without_pose_epoch(self) -> None:
+    def test_preposition_skips_recorded_heading_without_pose_epoch(self) -> None:
         sample = build_sample(heading_deg=12.0, pose_epoch=1)
         state = dict(sample["state"])  # type: ignore[arg-type]
         state.pop(sensor_replay.VEX_POSE_EPOCH_KEY, None)
@@ -820,10 +816,11 @@ class SensorReplayTests(unittest.TestCase):
                 settle_s=0.0,
             )
 
-        self.assertFalse(aligned)
-        self.assertEqual(aligned.reason, "recorded-pose-epoch-missing")
-        self.assertEqual(aligned.axis, "heading")
-        self.assertEqual(self._command_axis_order(vex_bridge.commands), [])
+        self.assertTrue(aligned)
+        self.assertEqual(self._command_axis_order(vex_bridge.commands), ["x", "y"])
+        self.assertAlmostEqual(live_state["heading"], 12.0, delta=1e-6)
+        self.assertAlmostEqual(live_state["x"], 1.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
+        self.assertAlmostEqual(live_state["y"], 2.0, delta=sensor_replay.XY_TRACK_TOLERANCE_M)
 
     def test_preposition_allows_different_positive_pose_epochs_after_rezero(self) -> None:
         samples = [build_sample(heading_deg=0.0, pose_epoch=1)]
