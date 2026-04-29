@@ -133,6 +133,7 @@ SERVO_OVERTEMP_CONFIRMATION_S = 0.4
 ARM_SAFETY_LOG_PREFIX = "[safety]"
 ACTION_COMMAND_SOURCE_KEY = "__command_source__"
 COMMAND_SOURCE_KEYBOARD = "keyboard"
+VEX_CONTROL_MODE_KEY = "__vex_control_mode__"
 
 
 def wrap_degrees(value: float) -> float:

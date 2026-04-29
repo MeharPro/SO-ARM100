@@ -25,8 +25,13 @@ VEX_COMM_SUFFIXES = ("if00", "if01")
 DEFAULT_COMMAND_TIMEOUT_S = 0.35
 DEFAULT_TELEMETRY_SLOT = 8
 DEFAULT_REPLAY_SLOT = 7
-REQUIRED_VEX_MIXER_VERSION = 7
+REQUIRED_VEX_MIXER_VERSION = 8
 VEX_IDLE_MOTION_EPSILON = 1e-4
+VEX_CONTROL_MODE_KEY = "__vex_control_mode__"
+VEX_DRIVE_CONTROL_MODE = "drive"
+VEX_ECU_CONTROL_MODE = "ecu"
+KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS = 0.06
+KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS = 18.0
 DEFAULT_PROGRAM_CACHE_DIR = "~/.lekiwi-vex/programs"
 DEFAULT_REPLAY_CACHE_DIR = "~/.lekiwi-vex/replays"
 DEFAULT_VEXCOM_PATH_GLOBS = (
@@ -103,6 +108,8 @@ DEFAULT_VEX_CONTROL_CONFIG = {
         "deadbandPercent": 5,
         "maxLinearSpeedMps": 0.35,
         "maxTurnSpeedDps": 90.0,
+        "ecuLinearSpeedMps": KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
+        "ecuTurnSpeedDps": KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
     },
 }
 
@@ -330,6 +337,20 @@ def normalize_vex_control_config(raw: dict[str, Any] | None) -> dict[str, Any]:
                 5.0,
                 360.0,
             ),
+            "ecuLinearSpeedMps": float_value(
+                tuning,
+                "ecuLinearSpeedMps",
+                defaults["tuning"]["ecuLinearSpeedMps"],
+                0.01,
+                2.0,
+            ),
+            "ecuTurnSpeedDps": float_value(
+                tuning,
+                "ecuTurnSpeedDps",
+                defaults["tuning"]["ecuTurnSpeedDps"],
+                1.0,
+                360.0,
+            ),
         },
     }
 
@@ -402,6 +423,8 @@ controller_1 = Controller(PRIMARY)
 
 MAX_LINEAR_SPEED_MPS = {float(tuning["maxLinearSpeedMps"]):.4f}
 MAX_TURN_SPEED_DPS = {float(tuning["maxTurnSpeedDps"]):.4f}
+ECU_LINEAR_SPEED_MPS = {float(tuning["ecuLinearSpeedMps"]):.4f}
+ECU_TURN_SPEED_DPS = {float(tuning["ecuTurnSpeedDps"]):.4f}
 VEX_MIXER_VERSION = {REQUIRED_VEX_MIXER_VERSION}
 DEADBAND_PERCENT = {int(tuning["deadbandPercent"])}
 TELEMETRY_INTERVAL_MS = 50
@@ -427,6 +450,7 @@ remote_dt_ms = 20
 remote_expires_ms = 0
 last_targets = {{}}
 pose_epoch = 0
+controller_control_mode = "{VEX_DRIVE_CONTROL_MODE}"
 serial_command_lines = []
 serial_reader_thread = None
 
@@ -454,13 +478,15 @@ def motion_is_active(motion):
 
 
 def controller_motion():
+    linear_speed = ECU_LINEAR_SPEED_MPS if controller_control_mode == "{VEX_ECU_CONTROL_MODE}" else MAX_LINEAR_SPEED_MPS
+    turn_speed = ECU_TURN_SPEED_DPS if controller_control_mode == "{VEX_ECU_CONTROL_MODE}" else MAX_TURN_SPEED_DPS
     forward_pct = apply_deadband({forward_expr})
     strafe_pct = apply_deadband({strafe_expr})
     turn_pct = apply_deadband({turn_expr})
     return {{
-        "x.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
-        "y.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS,
-        "theta.vel": (turn_pct / 100.0) * MAX_TURN_SPEED_DPS,
+        "x.vel": (strafe_pct / 100.0) * linear_speed,
+        "y.vel": (forward_pct / 100.0) * linear_speed,
+        "theta.vel": (turn_pct / 100.0) * turn_speed,
     }}
 
 
@@ -558,6 +584,7 @@ def handle_command_line(line):
     global remote_dt_ms
     global remote_expires_ms
     global last_targets
+    global controller_control_mode
 
     if not line:
         return
@@ -572,6 +599,12 @@ def handle_command_line(line):
 
     now_ms = brain.timer.system()
     command = parts[0]
+    if command == "!mode" and len(parts) >= 2:
+        requested_mode = parts[1].strip().lower()
+        if requested_mode in ("{VEX_DRIVE_CONTROL_MODE}", "{VEX_ECU_CONTROL_MODE}"):
+            controller_control_mode = requested_mode
+        return
+
     if command == "!release":
         clear_remote_command(release_controller=True)
         return
@@ -715,7 +748,7 @@ def print_motion(motion, source):
     inertial_state = read_inertial_state()
     theta_vel = inertial_state["vex_inertial_rate_z.dps"] if inertial_available() else motion["theta.vel"]
     print(
-        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"vex_front_right.pos":%.4f,"vex_front_left.pos":%.4f,"vex_rear_right.pos":%.4f,"vex_rear_left.pos":%.4f,"vex_inertial_rotation.deg":%.4f,"vex_inertial_heading.deg":%.4f,"vex_inertial_rate_z.dps":%.4f,"vex_pose_epoch":%d,"vex_mixer_version":%d,"source":"%s"}}'
+        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"vex_front_right.pos":%.4f,"vex_front_left.pos":%.4f,"vex_rear_right.pos":%.4f,"vex_rear_left.pos":%.4f,"vex_inertial_rotation.deg":%.4f,"vex_inertial_heading.deg":%.4f,"vex_inertial_rate_z.dps":%.4f,"vex_pose_epoch":%d,"vex_mixer_version":%d,"vex_control_mode":"%s","source":"%s"}}'
         % (
             motion["x.vel"],
             motion["y.vel"],
@@ -729,6 +762,7 @@ def print_motion(motion, source):
             inertial_state["vex_inertial_rate_z.dps"],
             pose_epoch,
             VEX_MIXER_VERSION,
+            controller_control_mode,
             source,
         )
     )
@@ -975,6 +1009,12 @@ class VexBaseBridge:
             ttl_ms,
         )
         return self._write_command_line(line)
+
+    def send_control_mode(self, mode: str) -> bool:
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {VEX_DRIVE_CONTROL_MODE, VEX_ECU_CONTROL_MODE}:
+            return False
+        return self._write_command_line(f"!mode {normalized}")
 
     def send_ecu_targets(
         self,

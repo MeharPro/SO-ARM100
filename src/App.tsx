@@ -3742,7 +3742,7 @@ export default function App() {
                   disabled={disabled}
                   onClick={() => void mutate("start-control", "/api/robot/start-control", { method: "POST" })}
                 >
-                  Start Control
+                  Start Keyboard + Leader
                 </button>
                 <button
                   disabled={disabled}
@@ -3768,7 +3768,7 @@ export default function App() {
                     })
                   }
                 >
-                  Start Keyboard Backup
+                  Start Keyboard + Leader Backup
                 </button>
                 <button
                   disabled={disabled || hotkeysArmed}
@@ -3798,10 +3798,10 @@ export default function App() {
               </div>
               <div className="mode-strip">
                 <span className={`status-pill ${keyboardBackupActive ? "good" : "muted"}`}>
-                  {keyboardBackupActive ? "keyboard backup live" : "keyboard backup off"}
+                  {keyboardBackupActive ? "keyboard + leader live" : "keyboard backup off"}
                 </span>
                 <p className="card-note">
-                  Keyboard backup runs without the leader arm. Arm: <code>Q/A</code> shoulder pan, <code>W/S</code> shoulder lift, <code>E/D</code> elbow, <code>R/F</code> wrist flex, <code>T/G</code> wrist roll, <code>Z/X</code> gripper. Base: <code>I/K</code> forward/back, <code>J/L</code> strafe, <code>U/O</code> turn. Press <code>Esc</code> in the keyboard teleop process or use Stop Control here.
+                  Keyboard and leader can run together. Arm: <code>Q/A</code> shoulder pan, <code>W/S</code> shoulder lift, <code>E/D</code> elbow, <code>R/F</code> wrist flex, <code>T/G</code> wrist roll, <code>Z/X</code> gripper. Base: <code>I/K</code> forward/back, <code>J/L</code> strafe, <code>U/O</code> turn. Press <code>0</code> to toggle Drive/ECU speed, <code>Esc</code> to stop keyboard capture, or use Stop Control here.
                 </p>
               </div>
               <div className="mode-strip">

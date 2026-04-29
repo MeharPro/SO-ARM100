@@ -154,6 +154,38 @@ class KeyboardTeleopTests(unittest.TestCase):
         )
         self.assertAlmostEqual(reset["y.vel"], linear_limit * initial_ratio)
 
+    def test_vex_mode_toggle_switches_keyboard_base_speed(self) -> None:
+        mode = keyboard_teleop.VexControlModeState("drive")
+        self.assertEqual(
+            mode.speed_pair(
+                drive_linear_speed=0.35,
+                drive_turn_speed=90.0,
+                ecu_linear_speed=0.06,
+                ecu_turn_speed=18.0,
+            ),
+            (0.35, 90.0),
+        )
+
+        self.assertTrue(mode.update({"0"}))
+        self.assertEqual(
+            mode.speed_pair(
+                drive_linear_speed=0.35,
+                drive_turn_speed=90.0,
+                ecu_linear_speed=0.06,
+                ecu_turn_speed=18.0,
+            ),
+            (0.06, 18.0),
+        )
+
+        drive_action = keyboard_teleop.build_base_action(
+            {"i", "o"},
+            linear_speed=0.35,
+            turn_speed=90.0,
+            linear_speed_limit=0.35,
+            turn_speed_limit=90.0,
+        )
+        self.assertEqual(drive_action, {"x.vel": 0.0, "y.vel": 0.35, "theta.vel": 90.0})
+
     def test_direction_lock_blocks_outward_motion_but_allows_reverse(self) -> None:
         joint = "arm_shoulder_lift.pos"
         limiter = keyboard_teleop.JointDirectionLimiter({})

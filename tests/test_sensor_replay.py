@@ -983,8 +983,10 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("inertial_1.reset_heading()", source)
         self.assertIn("pose_epoch += 1", source)
         self.assertIn('"vex_pose_epoch":%d', source)
-        self.assertIn("VEX_MIXER_VERSION = 7", source)
+        self.assertIn("VEX_MIXER_VERSION = 8", source)
         self.assertIn('"vex_mixer_version":%d', source)
+        self.assertIn('if command == "!mode"', source)
+        self.assertIn('"vex_control_mode":"%s"', source)
         self.assertIn("remote_takeover = True", source)
         self.assertIn('remote_mode = "hold"', source)
 
@@ -1040,8 +1042,16 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("forward_pct = apply_deadband(controller_1.axis3.position())", source)
         self.assertIn("strafe_pct = apply_deadband(controller_1.axis4.position())", source)
         self.assertIn("turn_pct = apply_deadband(controller_1.axis1.position())", source)
-        self.assertIn('"x.vel": (strafe_pct / 100.0) * MAX_LINEAR_SPEED_MPS', source)
-        self.assertIn('"y.vel": (forward_pct / 100.0) * MAX_LINEAR_SPEED_MPS', source)
+        self.assertIn(
+            'linear_speed = ECU_LINEAR_SPEED_MPS if controller_control_mode == "ecu" else MAX_LINEAR_SPEED_MPS',
+            source,
+        )
+        self.assertIn(
+            'turn_speed = ECU_TURN_SPEED_DPS if controller_control_mode == "ecu" else MAX_TURN_SPEED_DPS',
+            source,
+        )
+        self.assertIn('"x.vel": (strafe_pct / 100.0) * linear_speed', source)
+        self.assertIn('"y.vel": (forward_pct / 100.0) * linear_speed', source)
         self.assertIn(
             'return (\n'
             '        clamp((motion["y.vel"] / MAX_LINEAR_SPEED_MPS) * 100.0, -100.0, 100.0),\n'

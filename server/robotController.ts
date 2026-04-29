@@ -440,6 +440,14 @@ export class RobotController {
   private readonly remoteTorqueCache = new Map<string, string>();
   private readonly remotePowerLogCache = new Map<string, string>();
   private coupledTeleopCleanup: Promise<void> | null = null;
+  private replayControlRestore:
+    | {
+        requestedAtMs: number;
+        target: ReplayRequest["target"];
+        trajectoryPath: string;
+      }
+    | null = null;
+  private replayControlRestoreInFlight: Promise<void> | null = null;
   private cachedVexBrainStatus: VexBrainStatus = {
     connected: false,
     telemetryActive: false,
@@ -501,6 +509,12 @@ export class RobotController {
       training.profiles.find((profile) => profile.id === training.selectedProfileId) ?? null;
     this.maybeCleanupCoupledTeleopFailure(hostSnapshot, teleopSnapshot);
     const warmHostReplaySnapshot = this.deriveWarmHostReplaySnapshot(hostSnapshot);
+    this.maybeRestoreControlAfterReplay(
+      settings,
+      replaySnapshot,
+      this.localReplayRunner.getSnapshot(),
+      warmHostReplaySnapshot,
+    );
 
     return {
       settings,
@@ -1199,18 +1213,25 @@ export class RobotController {
   async startControl(): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
-      this.logActivity("Start control requested.");
-      const leader = await this.ensureLeaderConnected(settings);
+      this.logActivity("Keyboard + Leader control requested.");
+      const leader = await this.getLeaderStatus(settings);
+      if (leader.connected) {
+        this.logActivity(leader.message);
+      } else {
+        this.logActivity(`Leader unavailable; starting keyboard backup only. ${leader.message}`);
+      }
       const host = await this.preparePi(settings, "start control");
 
       assertHelperExists(HOST_SCRIPT);
       assertHelperExists(POWER_SCRIPT);
       assertHelperExists(RUNTIME_SCRIPT);
+      assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
       await this.ensureRemoteHelpers(settings, host);
       if (settings.vex.autoRunTelemetry) {
         await this.syncVexTelemetryProgramOnPi(settings, host, "start control", false);
       }
       await this.writeRemoteTorqueLimits(settings, host);
+      const keyboardJointLimitsJson = await this.loadKeyboardJointLimitsJson(settings, host);
 
       await this.replayRunner.stop("Stopping replay before live control.");
       await this.localReplayRunner.stop("Stopping replay before live control.");
@@ -1224,16 +1245,38 @@ export class RobotController {
       await this.clearRemoteHostCommand(settings, host);
 
       await this.hostRunner.start(
-        this.buildHostScript(settings, true),
+        this.buildHostScript(settings, true, {
+          vexLiveBaseControl: true,
+          requireVexLiveBaseControl: false,
+        }),
         this.toConnectConfig(settings, host),
         "control",
-        { host },
+        {
+          host,
+          input: leader.connected ? "keyboard+leader" : "keyboard",
+          keyboardBackup: true,
+          leaderPort: leader.connected ? leader.expectedPort : null,
+        },
       );
 
       try {
         await this.waitForHostReady(host, "Pi host");
-        await this.teleopRunner.start(this.buildTeleopScript(settings, host, leader), "control");
-        await this.waitForLocalProcessReady("Mac teleop", this.teleopRunner);
+        await this.teleopRunner.start(
+          this.buildKeyboardTeleopScript(
+            settings,
+            host,
+            keyboardJointLimitsJson,
+            leader.connected ? leader : null,
+          ),
+          "control",
+          {
+            host,
+            input: leader.connected ? "keyboard+leader" : "keyboard",
+            keyboardBackup: true,
+            leaderPort: leader.connected ? leader.expectedPort : null,
+          },
+        );
+        await this.waitForLocalProcessReady("Keyboard + Leader teleop", this.teleopRunner, 2500);
       } catch (error) {
         await this.hostRunner.stop("Teleop failed to launch, stopping the Pi host.");
         throw error;
@@ -1257,7 +1300,11 @@ export class RobotController {
   async startKeyboardControl(): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
-      this.logActivity("Keyboard backup control requested.");
+      this.logActivity("Keyboard + Leader backup control requested.");
+      const leader = await this.getLeaderStatus(settings);
+      if (leader.connected) {
+        this.logActivity(leader.message);
+      }
       const host = await this.preparePi(settings, "start keyboard backup control");
 
       assertHelperExists(HOST_SCRIPT);
@@ -1286,17 +1333,32 @@ export class RobotController {
         }),
         this.toConnectConfig(settings, host),
         "keyboard-control",
-        { host, hotkeysArmed: true, keyboardBackup: true },
+        {
+          host,
+          hotkeysArmed: true,
+          keyboardBackup: true,
+          input: leader.connected ? "keyboard+leader" : "keyboard",
+          leaderPort: leader.connected ? leader.expectedPort : null,
+        },
       );
 
       try {
         await this.waitForHostReady(host, "Keyboard backup host");
         await this.teleopRunner.start(
-          this.buildKeyboardTeleopScript(settings, host, keyboardJointLimitsJson),
+          this.buildKeyboardTeleopScript(
+            settings,
+            host,
+            keyboardJointLimitsJson,
+            leader.connected ? leader : null,
+          ),
           "keyboard-control",
-          { host, input: "keyboard" },
+          {
+            host,
+            input: leader.connected ? "keyboard+leader" : "keyboard",
+            leaderPort: leader.connected ? leader.expectedPort : null,
+          },
         );
-        await this.waitForLocalProcessReady("Keyboard backup teleop", this.teleopRunner, 2500);
+        await this.waitForLocalProcessReady("Keyboard + Leader backup teleop", this.teleopRunner, 2500);
       } catch (error) {
         await this.teleopRunner.stop("Keyboard backup control failed to launch.");
         await this.hostRunner.stop("Keyboard backup control failed to launch.");
@@ -2051,6 +2113,7 @@ export class RobotController {
           replay.homeMode !== "none" ? `, home ${replay.homeMode}` : ""
         }.`,
       );
+      this.clearReplayControlRestore();
 
       await this.replayRunner.stop("Restarting replay.");
       await this.localReplayRunner.stop("Restarting replay.");
@@ -2069,6 +2132,7 @@ export class RobotController {
         await this.localDatasetCaptureRunner.stop("Replay needs the robot exclusively.");
         await this.policyEvalRunner.stop("Replay needs the robot exclusively.");
         await this.sendWarmHostReplay(settings, host, replay, homePosition);
+        this.markReplayControlRestorePending(replay);
 
         this.lastError = null;
         return this.getState();
@@ -2117,6 +2181,7 @@ export class RobotController {
         );
       }
 
+      this.markReplayControlRestorePending(replay);
       this.lastError = null;
       return this.getState();
     });
@@ -2129,6 +2194,7 @@ export class RobotController {
       await this.replayRunner.stop("Stopping replay.");
       await this.localReplayRunner.stop("Stopping replay.");
       await this.stopWarmHostReplay(settings, "Stopping warm-host replay.");
+      this.clearReplayControlRestore();
       const host = await this.findReachablePiHost(settings);
       if (host && settings.vex.autoRunTelemetry) {
         await this.syncVexTelemetryProgramOnPi(settings, host, "restore controller telemetry after replay", false);
@@ -2475,6 +2541,10 @@ export class RobotController {
     }
     await this.writeRemoteTorqueLimits(settings, host);
     const keyboardJointLimitsJson = await this.loadKeyboardJointLimitsJson(settings, host);
+    const leader = await this.getLeaderStatus(settings);
+    if (leader.connected) {
+      this.logActivity(leader.message);
+    }
 
     await this.clearRemoteHostCommand(settings, host);
     await this.hostRunner.start(
@@ -2484,17 +2554,34 @@ export class RobotController {
       }),
       this.toConnectConfig(settings, host),
       "keyboard-control",
-      { host, hotkeysArmed: true, keyboardBackup: true, ...meta },
+      {
+        host,
+        hotkeysArmed: true,
+        keyboardBackup: true,
+        input: leader.connected ? "keyboard+leader" : "keyboard",
+        leaderPort: leader.connected ? leader.expectedPort : null,
+        ...meta,
+      },
     );
 
     try {
       await this.waitForHostReady(host, "Keyboard backup host");
       await this.teleopRunner.start(
-        this.buildKeyboardTeleopScript(settings, host, keyboardJointLimitsJson),
+        this.buildKeyboardTeleopScript(
+          settings,
+          host,
+          keyboardJointLimitsJson,
+          leader.connected ? leader : null,
+        ),
         "keyboard-control",
-        { host, input: "keyboard", ...meta },
+        {
+          host,
+          input: leader.connected ? "keyboard+leader" : "keyboard",
+          leaderPort: leader.connected ? leader.expectedPort : null,
+          ...meta,
+        },
       );
-      await this.waitForLocalProcessReady("Keyboard backup teleop", this.teleopRunner, 2500);
+      await this.waitForLocalProcessReady("Keyboard + Leader backup teleop", this.teleopRunner, 2500);
     } catch (error) {
       await this.teleopRunner.stop("Keyboard backup control failed to launch.");
       await this.hostRunner.stop("Keyboard backup control failed to launch.");
@@ -2605,6 +2692,76 @@ export class RobotController {
     };
   }
 
+  private markReplayControlRestorePending(replay: ReplayRequest): void {
+    this.replayControlRestore = {
+      requestedAtMs: Date.now(),
+      target: replay.target,
+      trajectoryPath: replay.trajectoryPath,
+    };
+  }
+
+  private clearReplayControlRestore(): void {
+    this.replayControlRestore = null;
+  }
+
+  private maybeRestoreControlAfterReplay(
+    settings: AppSettings,
+    replaySnapshot: ServiceSnapshot,
+    localReplaySnapshot: ServiceSnapshot,
+    warmHostReplaySnapshot: ServiceSnapshot,
+  ): void {
+    if (
+      !this.replayControlRestore ||
+      this.replayControlRestoreInFlight ||
+      this.exclusiveOperationInFlight
+    ) {
+      return;
+    }
+
+    const completed =
+      this.replayCompletedAfterRestoreRequest(replaySnapshot) ||
+      this.replayCompletedAfterRestoreRequest(localReplaySnapshot) ||
+      this.replayCompletedAfterRestoreRequest(warmHostReplaySnapshot);
+    if (!completed) {
+      return;
+    }
+
+    const restore = this.replayControlRestore;
+    this.replayControlRestore = null;
+    this.replayControlRestoreInFlight = this.runExclusive(async () => {
+      this.logActivity(`Replay finished; restoring Keyboard + Leader control for ${restore.trajectoryPath}.`);
+      const host = await this.preparePi(settings, "restore Keyboard + Leader after replay");
+      await this.startKeyboardControlSession(settings, host, {
+        restoredAfterReplay: true,
+        replayTarget: restore.target,
+        trajectoryPath: restore.trajectoryPath,
+      });
+      this.lastError = null;
+    })
+      .catch((error) => {
+        this.noteError(error);
+      })
+      .finally(() => {
+        this.replayControlRestoreInFlight = null;
+      });
+  }
+
+  private replayCompletedAfterRestoreRequest(snapshot: ServiceSnapshot): boolean {
+    if (!this.replayControlRestore) {
+      return false;
+    }
+    const isReplaySnapshot =
+      snapshot.mode === "replay" || snapshot.meta.transport === "warm-host";
+    if (!isReplaySnapshot || snapshot.state !== "idle" || !snapshot.stoppedAt) {
+      return false;
+    }
+    const stoppedAtMs = Date.parse(snapshot.stoppedAt);
+    if (!Number.isFinite(stoppedAtMs) || stoppedAtMs < this.replayControlRestore.requestedAtMs) {
+      return false;
+    }
+    return snapshot.exitCode === null || snapshot.exitCode === 0;
+  }
+
   private findLastLogIndex(lines: string[], pattern: RegExp): number {
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       if (pattern.test(lines[index])) {
@@ -2701,16 +2858,13 @@ export class RobotController {
     settings: AppSettings,
     host: string,
     jointLimitsJson: string,
+    leader?: LeaderStatus | null,
   ): string {
     assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
-    const keyboardLinearSpeed = Math.min(
-      settings.vex.tuning.maxLinearSpeedMps,
-      KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
-    );
-    const keyboardTurnSpeed = Math.min(
-      settings.vex.tuning.maxTurnSpeedDps,
-      KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
-    );
+    const ecuLinearSpeed = KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS;
+    const ecuTurnSpeed = KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS;
+    const driveLinearSpeed = settings.vex.tuning.maxLinearSpeedMps;
+    const driveTurnSpeed = settings.vex.tuning.maxTurnSpeedDps;
     return [
       this.buildMacActivation(settings),
       `python ${shellQuote(KEYBOARD_TELEOP_SCRIPT)} \\`,
@@ -2718,8 +2872,12 @@ export class RobotController {
       `  --robot-id ${shellQuote(settings.host.robotId)} \\`,
       `  --fps ${KEYBOARD_TELEOP_FPS} \\`,
       `  --print-every ${KEYBOARD_TELEOP_PRINT_EVERY} \\`,
-      `  --base-linear-speed ${keyboardLinearSpeed} \\`,
-      `  --base-turn-speed ${keyboardTurnSpeed} \\`,
+      `  --base-linear-speed ${ecuLinearSpeed} \\`,
+      `  --base-turn-speed ${ecuTurnSpeed} \\`,
+      `  --drive-base-linear-speed ${driveLinearSpeed} \\`,
+      `  --drive-base-turn-speed ${driveTurnSpeed} \\`,
+      `  --initial-vex-control-mode drive \\`,
+      `  --leader-port ${shellQuote(leader?.expectedPort ?? "off")} \\`,
       `  --joint-limits-json ${shellQuote(jointLimitsJson)}`,
     ].join("\n");
   }
@@ -2783,7 +2941,11 @@ export class RobotController {
       inertial: structuredClone(settings.vex.inertial),
       motors: structuredClone(settings.vex.motors),
       controls: structuredClone(settings.vex.controls),
-      tuning: structuredClone(settings.vex.tuning),
+      tuning: {
+        ...structuredClone(settings.vex.tuning),
+        ecuLinearSpeedMps: KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
+        ecuTurnSpeedDps: KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
+      },
     };
   }
 

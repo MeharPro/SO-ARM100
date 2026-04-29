@@ -11,10 +11,23 @@ from dataclasses import dataclass
 from lekiwi_runtime import (
     ACTION_COMMAND_SOURCE_KEY,
     COMMAND_SOURCE_KEYBOARD,
+    VEX_CONTROL_MODE_KEY,
+    align_degrees_near_reference,
     parse_position_limits_json,
+)
+from lekiwi_leader_support import (
+    connect_leader_noninteractive,
+    detect_leader_port,
+    disconnect_device_safely,
 )
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
 from lerobot.utils.robot_utils import precise_sleep
+
+try:
+    from lerobot.teleoperators.so_leader import SO100Leader, SO100LeaderConfig
+except Exception:  # pragma: no cover - available in the runtime lerobot env
+    SO100Leader = None
+    SO100LeaderConfig = None
 
 try:
     from pynput import keyboard as pynput_keyboard
@@ -30,6 +43,9 @@ FPS = 30
 OBSERVATION_POLL_INTERVAL_S = 1.0 / 30.0
 KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS = 0.06
 KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS = 18.0
+VEX_DRIVE_CONTROL_MODE = "drive"
+VEX_ECU_CONTROL_MODE = "ecu"
+VEX_CONTROL_MODES = (VEX_DRIVE_CONTROL_MODE, VEX_ECU_CONTROL_MODE)
 KEYBOARD_BASE_INITIAL_SPEED_RATIO = 0.25
 KEYBOARD_BASE_ACCELERATION_S = 2.5
 LIMIT_LOCK_ERROR_DEG = 2.0
@@ -56,6 +72,7 @@ MAC_VK_TO_KEY = {
     15: "r",
     16: "y",
     17: "t",
+    29: "0",
     31: "o",
     32: "u",
     34: "i",
@@ -91,6 +108,7 @@ BASE_BINDINGS = (
 )
 CONTROL_KEYS = {
     "esc",
+    "0",
     *(
         key
         for _joint, positive_keys, negative_keys, *_rest in ARM_BINDINGS
@@ -114,6 +132,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=int(os.getenv("LEKIWI_FPS", FPS)))
     parser.add_argument("--base-linear-speed", type=float, default=KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS)
     parser.add_argument("--base-turn-speed", type=float, default=KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS)
+    parser.add_argument("--drive-base-linear-speed", type=float, default=None)
+    parser.add_argument("--drive-base-turn-speed", type=float, default=None)
+    parser.add_argument("--initial-vex-control-mode", choices=VEX_CONTROL_MODES, default=VEX_DRIVE_CONTROL_MODE)
+    parser.add_argument("--leader-port", default=os.getenv("LEKIWI_LEADER_PORT", "off"))
+    parser.add_argument("--leader-id", default=os.getenv("LEKIWI_LEADER_ID", "leader"))
     parser.add_argument("--joint-limits-json", default="{}")
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--connect-timeout-s", type=int, default=10)
@@ -144,6 +167,43 @@ def clamp_unit_interval(value: float) -> float:
     if not math.isfinite(float(value)):
         return 0.0
     return max(0.0, min(float(value), 1.0))
+
+
+def finite_positive(value: float | None, fallback: float) -> float:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) > 0.0:
+        return float(value)
+    return float(fallback)
+
+
+def keyboard_arm_active(pressed: set[str]) -> bool:
+    return any(
+        key in pressed
+        for _joint, positive_keys, negative_keys, *_rest in ARM_BINDINGS
+        for key in (*positive_keys, *negative_keys)
+    )
+
+
+class VexControlModeState:
+    def __init__(self, initial_mode: str) -> None:
+        self.mode = initial_mode if initial_mode in VEX_CONTROL_MODES else VEX_DRIVE_CONTROL_MODE
+
+    def update(self, newly_pressed: set[str]) -> bool:
+        if "0" not in newly_pressed:
+            return False
+        self.mode = VEX_ECU_CONTROL_MODE if self.mode == VEX_DRIVE_CONTROL_MODE else VEX_DRIVE_CONTROL_MODE
+        return True
+
+    def speed_pair(
+        self,
+        *,
+        drive_linear_speed: float,
+        drive_turn_speed: float,
+        ecu_linear_speed: float,
+        ecu_turn_speed: float,
+    ) -> tuple[float, float]:
+        if self.mode == VEX_ECU_CONTROL_MODE:
+            return ecu_linear_speed, ecu_turn_speed
+        return drive_linear_speed, drive_turn_speed
 
 
 def _poll_quartz_pressed_keys() -> set[str]:
@@ -286,6 +346,27 @@ def read_arm_positions(
         elif fallback is not None and joint in fallback:
             positions[joint] = float(fallback[joint])
     return positions
+
+
+class LeaderActionMapper:
+    def __init__(self) -> None:
+        self.last_wrist_roll: float | None = None
+
+    def build_arm_action(self, leader_action: dict[str, float]) -> dict[str, float]:
+        arm_action = {f"arm_{key}": value for key, value in leader_action.items()}
+        wrist_key = "arm_wrist_roll.pos"
+        if wrist_key in arm_action:
+            wrist_value = float(arm_action[wrist_key])
+            if self.last_wrist_roll is not None:
+                wrist_value = align_degrees_near_reference(wrist_value, self.last_wrist_roll)
+            self.last_wrist_roll = wrist_value
+            arm_action[wrist_key] = wrist_value
+
+        return {
+            joint: float(arm_action[joint])
+            for joint, *_rest in ARM_BINDINGS
+            if joint in arm_action and isinstance(arm_action[joint], (int, float))
+        }
 
 
 @dataclass
@@ -436,14 +517,16 @@ def build_base_action(
     linear_speed: float,
     turn_speed: float,
     axis_speed_scales: dict[str, float] | None = None,
+    linear_speed_limit: float = KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
+    turn_speed_limit: float = KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
 ) -> dict[str, float]:
     limited_linear_speed = clamp_keyboard_base_speed(
         linear_speed,
-        KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
+        linear_speed_limit,
     )
     limited_turn_speed = clamp_keyboard_base_speed(
         turn_speed,
-        KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
+        turn_speed_limit,
     )
     return {
         axis: axis_from_keys(pressed, positive_keys, negative_keys)
@@ -465,6 +548,8 @@ class KeyboardBaseRamp:
         linear_speed: float,
         turn_speed: float,
         now_s: float,
+        linear_speed_limit: float = KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
+        turn_speed_limit: float = KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
     ) -> dict[str, float]:
         scales: dict[str, float] = {}
         active_axes: set[str] = set()
@@ -497,6 +582,8 @@ class KeyboardBaseRamp:
             linear_speed=linear_speed,
             turn_speed=turn_speed,
             axis_speed_scales=scales,
+            linear_speed_limit=linear_speed_limit,
+            turn_speed_limit=turn_speed_limit,
         )
 
 
@@ -545,14 +632,19 @@ def summarize_action(action: dict[str, float]) -> str:
     return f"{arm_summary} | {base_summary}"
 
 
-def print_controls() -> None:
-    print("Keyboard backup teleop is live.", flush=True)
+def print_controls(leader_enabled: bool, mode: str) -> None:
+    label = "Keyboard + Leader teleop" if leader_enabled else "Keyboard backup teleop"
+    print(f"{label} is live. VEX base mode: {mode.upper()}.", flush=True)
     print(
         "Arm: Q/A shoulder pan, W/S shoulder lift, E/D elbow, "
         "R/F wrist flex (also Y/H), T/G wrist roll, Z/X gripper (also C/V and B/N).",
         flush=True,
     )
-    print("Base: I/K forward-back (Y), J/L left-right (X), U/O turn. Press Esc to stop keyboard control.", flush=True)
+    print(
+        "Base: I/K forward-back (Y), J/L left-right (X), U/O turn. "
+        "Press 0 to toggle Drive/ECU speed, Esc to stop keyboard capture.",
+        flush=True,
+    )
 
 
 def main() -> None:
@@ -569,6 +661,16 @@ def main() -> None:
         )
     )
     keyboard = PressedKeyTracker()
+    leader = None
+    leader_connected = False
+    leader_mapper = LeaderActionMapper()
+    leader_requested = str(args.leader_port or "off").strip().lower() != "off"
+    keyboard_connected = False
+    ecu_linear_speed = finite_positive(args.base_linear_speed, KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS)
+    ecu_turn_speed = finite_positive(args.base_turn_speed, KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS)
+    drive_linear_speed = finite_positive(args.drive_base_linear_speed, ecu_linear_speed)
+    drive_turn_speed = finite_positive(args.drive_base_turn_speed, ecu_turn_speed)
+    mode_state = VexControlModeState(args.initial_vex_control_mode)
 
     loop_idx = 0
     last_loop_t = time.perf_counter()
@@ -581,10 +683,41 @@ def main() -> None:
     try:
         print(f"Connecting to LeKiwi host at {args.remote_host}", flush=True)
         robot.connect()
-        keyboard.connect()
-        if not keyboard.is_connected:
+        if leader_requested:
+            try:
+                if SO100Leader is None or SO100LeaderConfig is None:
+                    raise RuntimeError("SO100 leader support is unavailable in the active lerobot environment.")
+                leader_port = detect_leader_port(args.leader_port)
+                leader = SO100Leader(SO100LeaderConfig(port=leader_port, id=args.leader_id, use_degrees=True))
+                connect_leader_noninteractive(
+                    leader,
+                    calibrate_hint=(
+                        "Run the dashboard's Mac calibration, or run "
+                        "`lerobot-calibrate --teleop.type=so100_leader --teleop.port <port> "
+                        f"--teleop.id {args.leader_id}`."
+                    ),
+                )
+                leader_connected = True
+                print(f"Leader arm connected on {leader_port}.", flush=True)
+            except SystemExit as exc:
+                leader = None
+                print(f"[leader] unavailable, continuing with keyboard backup only: {exc}", flush=True)
+            except Exception as exc:
+                leader = None
+                print(f"[leader] unavailable, continuing with keyboard backup only: {exc}", flush=True)
+
+        try:
+            keyboard.connect()
+            keyboard_connected = keyboard.is_connected
+        except SystemExit:
+            keyboard_connected = False
+            if not leader_connected:
+                raise
+            print("[keyboard] capture unavailable; leader arm remains live.", flush=True)
+
+        if not keyboard_connected and not leader_connected:
             raise SystemExit(
-                "Keyboard capture did not start. On macOS, grant Input Monitoring/Accessibility access to the terminal or app running this process."
+                "Neither keyboard capture nor the leader arm started. On macOS, grant Input Monitoring/Accessibility access to the terminal/app running this process, or connect the leader arm."
             )
 
         arm_targets = seed_arm_targets(robot)
@@ -592,15 +725,17 @@ def main() -> None:
         direction_limiter = JointDirectionLimiter(position_limits)
         direction_limiter.seed(observed_arm_positions)
         next_observation_poll_t = time.perf_counter()
-        print_controls()
+        print_controls(leader_connected, mode_state.mode)
 
-        while keyboard.is_connected:
+        while keyboard.is_connected or leader_connected:
             loop_start_t = time.perf_counter()
-            pressed = keyboard.get_pressed()
+            pressed = keyboard.get_pressed() if keyboard.is_connected else set()
             newly_pressed = pressed - last_pressed
             last_pressed = pressed
             dt_s = max(loop_start_t - last_loop_t, 0.0)
             last_loop_t = loop_start_t
+            if mode_state.update(newly_pressed):
+                print(f"VEX base mode switched to {mode_state.mode.upper()} speed.", flush=True)
 
             if loop_start_t >= next_observation_poll_t:
                 try:
@@ -619,25 +754,48 @@ def main() -> None:
                     pass
                 next_observation_poll_t = loop_start_t + OBSERVATION_POLL_INTERVAL_S
 
-            arm_targets = update_arm_targets(
-                arm_targets,
-                observed_arm_positions,
-                pressed,
-                newly_pressed,
-                dt_s,
-                position_limits,
-                direction_limiter,
+            leader_arm_action: dict[str, float] | None = None
+            if leader_connected and leader is not None:
+                try:
+                    leader_arm_action = leader_mapper.build_arm_action(leader.get_action())
+                except Exception as exc:
+                    print(f"[leader] action failed; keyboard backup remains live: {exc}", flush=True)
+                    disconnect_device_safely(leader, "leader arm")
+                    leader = None
+                    leader_connected = False
+
+            if leader_arm_action is not None and not keyboard_arm_active(pressed):
+                arm_targets.update(leader_arm_action)
+            else:
+                arm_targets = update_arm_targets(
+                    arm_targets,
+                    observed_arm_positions,
+                    pressed,
+                    newly_pressed,
+                    dt_s,
+                    position_limits,
+                    direction_limiter,
+                )
+
+            linear_speed, turn_speed = mode_state.speed_pair(
+                drive_linear_speed=drive_linear_speed,
+                drive_turn_speed=drive_turn_speed,
+                ecu_linear_speed=ecu_linear_speed,
+                ecu_turn_speed=ecu_turn_speed,
             )
             base_action = base_ramp.update(
                 pressed,
-                linear_speed=args.base_linear_speed,
-                turn_speed=args.base_turn_speed,
+                linear_speed=linear_speed,
+                turn_speed=turn_speed,
+                linear_speed_limit=linear_speed,
+                turn_speed_limit=turn_speed,
                 now_s=loop_start_t,
             )
             action = {
                 **arm_targets,
                 **base_action,
                 ACTION_COMMAND_SOURCE_KEY: COMMAND_SOURCE_KEYBOARD,
+                VEX_CONTROL_MODE_KEY: mode_state.mode,
             }
             arm_targets = {
                 joint: float(action[joint])
@@ -646,7 +804,11 @@ def main() -> None:
 
             if loop_idx % args.print_every == 0:
                 active_keys = "".join(sorted(pressed)) or "-"
-                print(f"{summarize_action(action)} | keys={active_keys}", flush=True)
+                leader_state = "on" if leader_connected else "off"
+                print(
+                    f"{summarize_action(action)} | keys={active_keys} | vex={mode_state.mode} | leader={leader_state}",
+                    flush=True,
+                )
 
             robot.send_action(action)
             loop_idx += 1
@@ -667,6 +829,8 @@ def main() -> None:
             except Exception:
                 pass
         keyboard.disconnect()
+        if leader is not None:
+            disconnect_device_safely(leader, "leader arm")
         if robot.is_connected:
             robot.disconnect()
 

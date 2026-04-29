@@ -24,6 +24,7 @@ from lekiwi_runtime import (
     ResilientObservationReader,
     ServoProtectionSupervisor,
     TorqueLimitFileWatcher,
+    VEX_CONTROL_MODE_KEY,
     apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
@@ -573,12 +574,37 @@ def send_vex_live_base_motion(
     *,
     context: str,
 ) -> bool:
-    sent = vex_base_bridge.send_motion(
-        {
-            key: float(action.get(key, 0.0)) if isinstance(action.get(key, 0.0), (int, float)) else 0.0
-            for key in BASE_STATE_KEYS
-        }
-    )
+    requested_mode = str(action.get(VEX_CONTROL_MODE_KEY, "")).strip().lower()
+    if requested_mode in {"drive", "ecu"} and requested_mode != getattr(
+        vex_base_bridge,
+        "_last_live_control_mode",
+        None,
+    ):
+        if vex_base_bridge.send_control_mode(requested_mode):
+            setattr(vex_base_bridge, "_last_live_control_mode", requested_mode)
+        else:
+            logger.warning(
+                "VEX live base mode %s was not accepted during %s: %s",
+                requested_mode,
+                context,
+                vex_base_bridge.status_message,
+            )
+
+    motion = {
+        key: float(action.get(key, 0.0)) if isinstance(action.get(key, 0.0), (int, float)) else 0.0
+        for key in BASE_STATE_KEYS
+    }
+    active = any(abs(value) > 0.0001 for value in motion.values())
+    was_active = bool(getattr(vex_base_bridge, "_live_base_motion_active", False))
+    if active:
+        sent = vex_base_bridge.send_motion(motion)
+        setattr(vex_base_bridge, "_live_base_motion_active", sent)
+    elif was_active:
+        sent = vex_base_bridge.send_motion(motion, ttl_ms=120)
+        setattr(vex_base_bridge, "_live_base_motion_active", False)
+    else:
+        sent = True
+
     if not sent:
         logger.warning(
             "VEX live base command was not accepted during %s: %s",
