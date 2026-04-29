@@ -133,6 +133,7 @@ class VexBaseIdleHoldController:
         self.epsilon = max(float(epsilon), 0.0)
         self.hold_ttl_ms = max(int(hold_ttl_ms), 50)
         self._holding = False
+        self._last_control_mode: str | None = None
 
     def reset(self) -> None:
         self._holding = False
@@ -140,17 +141,38 @@ class VexBaseIdleHoldController:
     def mark_holding(self) -> None:
         self._holding = True
 
+    def _send_control_mode_if_requested(
+        self,
+        vex_base_bridge: "VexBaseBridge",
+        motion: dict[str, Any],
+    ) -> bool:
+        requested_mode = str(motion.get(VEX_CONTROL_MODE_KEY, "")).strip().lower()
+        if requested_mode not in {VEX_DRIVE_CONTROL_MODE, VEX_ECU_CONTROL_MODE}:
+            return True
+        if requested_mode == self._last_control_mode:
+            return True
+
+        send_control_mode = getattr(vex_base_bridge, "send_control_mode", None)
+        if not callable(send_control_mode):
+            return False
+
+        sent = bool(send_control_mode(requested_mode))
+        if sent:
+            self._last_control_mode = requested_mode
+        return sent
+
     def send(self, vex_base_bridge: "VexBaseBridge", motion: dict[str, Any], ttl_ms: int | None = None) -> bool:
+        mode_sent = self._send_control_mode_if_requested(vex_base_bridge, motion)
         if base_motion_is_idle(motion, epsilon=self.epsilon):
             if self._holding:
-                return True
+                return mode_sent
             sent = vex_base_bridge.send_hold(ttl_ms=self.hold_ttl_ms)
             if sent:
                 self.mark_holding()
-            return sent
+            return mode_sent and sent
 
         self.reset()
-        return vex_base_bridge.send_motion(motion, ttl_ms=ttl_ms)
+        return mode_sent and vex_base_bridge.send_motion(motion, ttl_ms=ttl_ms)
 
 
 def add_vex_base_args(parser: argparse.ArgumentParser) -> None:

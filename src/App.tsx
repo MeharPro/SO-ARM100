@@ -4143,8 +4143,8 @@ export default function App() {
                     disabled={disabled}
                   >
                     <option value="auto">Auto</option>
-                    <option value="leader">Leader arm</option>
-                    <option value="keyboard">Keyboard</option>
+                    <option value="leader">Leader + Keyboard</option>
+                    <option value="keyboard">Keyboard + Leader</option>
                     <option value="free-teach">Hand-guide</option>
                   </select>
                 </label>

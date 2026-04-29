@@ -1666,30 +1666,31 @@ export class RobotController {
   async startRecording(payload: StartRecordingRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
-      const hostSnapshot = this.hostRunner.getSnapshot();
-      const teleopSnapshot = this.teleopRunner.getSnapshot();
       const label = typeof payload?.label === "string" ? payload.label.trim() : "";
       const requestedInputMode = this.normalizeRecordingInputMode(payload?.inputMode);
       const useFreeTeachInput = requestedInputMode === "free-teach";
-      const useKeyboardInput =
-        requestedInputMode === "keyboard" ||
-        (requestedInputMode === "auto" && this.shouldUseKeyboardRecording(hostSnapshot, teleopSnapshot));
       this.logActivity(`Start recording requested${label ? ` (${label})` : ""}.`);
+      const leader = useFreeTeachInput ? null : await this.getLeaderStatus(settings);
+      const combinedInput = !useFreeTeachInput && leader?.connected ? "keyboard+leader" : "keyboard";
       this.logActivity(
         `Recording input source: ${
           useFreeTeachInput
             ? "hand-guided follower arm with torque disabled"
-            : useKeyboardInput
-              ? "keyboard controls"
-              : "leader arm teleop"
+            : leader?.connected
+              ? "Keyboard + Leader controls"
+              : "keyboard controls; leader arm unavailable"
         }.`,
       );
-      const leader = useKeyboardInput || useFreeTeachInput ? null : await this.ensureLeaderConnected(settings);
+      if (!useFreeTeachInput && leader?.connected) {
+        this.logActivity(leader.message);
+      } else if (!useFreeTeachInput && leader) {
+        this.logActivity(`Leader unavailable; recording with keyboard backup only. ${leader.message}`);
+      }
       const host = await this.preparePi(settings, "start recording");
 
       assertHelperExists(RECORD_SCRIPT);
       assertHelperExists(RUNTIME_SCRIPT);
-      if (useKeyboardInput) {
+      if (!useFreeTeachInput) {
         assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
       }
       await this.ensureRemoteHelpers(settings, host);
@@ -1697,7 +1698,7 @@ export class RobotController {
         await this.syncVexTelemetryProgramOnPi(settings, host, "start recording", false);
       }
       await this.writeRemoteTorqueLimits(settings, host);
-      const keyboardJointLimitsJson = useKeyboardInput
+      const keyboardJointLimitsJson = !useFreeTeachInput
         ? await this.loadKeyboardJointLimitsJson(settings, host)
         : "{}";
 
@@ -1713,7 +1714,7 @@ export class RobotController {
 
       const timestamp = formatFileTimestamp();
       const trajectoryPath = `${settings.trajectories.remoteDir}/trajectory-${timestamp}.json`;
-      const recordingInput = useFreeTeachInput ? "free-teach" : useKeyboardInput ? "keyboard" : "leader";
+      const recordingInput = useFreeTeachInput ? "free-teach" : "keyboard";
 
       await this.hostRunner.start(
         this.buildRecordScript(settings, trajectoryPath, label, recordingInput),
@@ -1723,7 +1724,9 @@ export class RobotController {
           host,
           trajectoryPath,
           label,
-          input: recordingInput,
+          input: useFreeTeachInput ? "free-teach" : combinedInput,
+          recordingInputMode: recordingInput,
+          leaderPort: leader?.connected ? leader.expectedPort : null,
         },
       );
 
@@ -1731,19 +1734,22 @@ export class RobotController {
         await this.waitForHostReady(host, "Recorder");
         if (useFreeTeachInput) {
           this.logActivity("Hand-guide recorder is live with follower arm torque disabled.");
-        } else if (useKeyboardInput) {
-          await this.teleopRunner.start(
-            this.buildKeyboardTeleopScript(settings, host, keyboardJointLimitsJson),
-            "recording",
-            { host, input: "keyboard" },
-          );
-          await this.waitForLocalProcessReady("Keyboard recording teleop", this.teleopRunner, 2500);
         } else {
-          if (!leader) {
-            throw new Error("Leader arm teleop is unavailable for recording.");
-          }
-          await this.teleopRunner.start(this.buildTeleopScript(settings, host, leader), "recording");
-          await this.waitForLocalProcessReady("Mac teleop", this.teleopRunner);
+          await this.teleopRunner.start(
+            this.buildKeyboardTeleopScript(
+              settings,
+              host,
+              keyboardJointLimitsJson,
+              leader?.connected ? leader : null,
+            ),
+            "recording",
+            {
+              host,
+              input: combinedInput,
+              leaderPort: leader?.connected ? leader.expectedPort : null,
+            },
+          );
+          await this.waitForLocalProcessReady("Keyboard + Leader recording teleop", this.teleopRunner, 2500);
         }
       } catch (error) {
         await this.hostRunner.stop("Teleop failed to launch, stopping the recorder.");
@@ -1762,10 +1768,12 @@ export class RobotController {
       const state = this.hostRunner.getSnapshot();
       const teleopState = this.teleopRunner.getSnapshot();
       const { settings } = this.configStore.getConfig();
+      const hostInput = typeof state.meta.input === "string" ? state.meta.input : "";
+      const teleopInput = typeof teleopState.meta.input === "string" ? teleopState.meta.input : "";
       const wasKeyboardRecording =
         state.mode === "recording" &&
-        (state.meta.input === "keyboard" ||
-          teleopState.meta.input === "keyboard" ||
+        (hostInput.includes("keyboard") ||
+          teleopInput.includes("keyboard") ||
           teleopState.mode === "keyboard-control");
       this.logActivity("Stop recording requested.");
 
@@ -2498,17 +2506,6 @@ export class RobotController {
 
   private isServiceActive(snapshot: ServiceSnapshot): boolean {
     return snapshot.state === "starting" || snapshot.state === "running" || snapshot.state === "stopping";
-  }
-
-  private shouldUseKeyboardRecording(
-    hostSnapshot: ServiceSnapshot,
-    teleopSnapshot: ServiceSnapshot,
-  ): boolean {
-    if (this.isServiceActive(teleopSnapshot) && teleopSnapshot.mode === "keyboard-control") {
-      return true;
-    }
-
-    return this.isServiceActive(hostSnapshot) && hostSnapshot.mode === "keyboard-control";
   }
 
   private normalizeRecordingInputMode(

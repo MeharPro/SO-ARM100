@@ -24,6 +24,7 @@ from lekiwi_sensor_replay import (
     recorded_state_has_sensor_reference,
 )
 from vex_base_bridge import VEX_MOTOR_STATE_KEYS
+from vex_base_bridge import VEX_CONTROL_MODE_KEY
 from vex_base_bridge import VexBaseIdleHoldController
 from vex_base_bridge import build_vex_telemetry_program_source
 from vex_base_bridge import base_motion_is_idle
@@ -1031,6 +1032,36 @@ class SensorReplayTests(unittest.TestCase):
 
         self.assertTrue(controller.send(bridge, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}))
         self.assertEqual(bridge.send_hold.call_count, 2)
+
+    def test_vex_idle_hold_controller_forwards_control_mode_changes(self) -> None:
+        bridge = mock.Mock()
+        bridge.send_control_mode.return_value = True
+        bridge.send_hold.return_value = True
+        bridge.send_motion.return_value = True
+        controller = VexBaseIdleHoldController()
+
+        self.assertTrue(
+            controller.send(
+                bridge,
+                {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0, VEX_CONTROL_MODE_KEY: "ecu"},
+            )
+        )
+        self.assertTrue(
+            controller.send(
+                bridge,
+                {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0, VEX_CONTROL_MODE_KEY: "ecu"},
+            )
+        )
+        bridge.send_control_mode.assert_called_once_with("ecu")
+
+        self.assertTrue(
+            controller.send(
+                bridge,
+                {"x.vel": 0.1, "y.vel": 0.0, "theta.vel": 0.0, VEX_CONTROL_MODE_KEY: "drive"},
+            )
+        )
+        self.assertEqual(bridge.send_control_mode.call_args_list[-1].args[0], "drive")
+        self.assertEqual(bridge.send_control_mode.call_count, 2)
 
     def test_base_motion_is_idle_ignores_tiny_numeric_noise(self) -> None:
         self.assertTrue(base_motion_is_idle({"x.vel": 0.00001, "y.vel": -0.00001, "theta.vel": 0.0}))

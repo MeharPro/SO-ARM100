@@ -16,6 +16,7 @@ import zmq
 
 from lekiwi_runtime import (
     ArmSafetyFilter,
+    COMMAND_SOURCE_KEYBOARD,
     LiveRobotSensorStatusEmitter,
     ULTRASONIC_MAX_DISTANCE_M,
     ULTRASONIC_MIN_DISTANCE_M,
@@ -336,6 +337,7 @@ def main() -> None:
         enabled=args.safer_servo_mode,
         map_wrist_to_follower_start=args.recording_mode != "free-teach",
         absolute_position_limits=absolute_position_limits,
+        skip_step_limit_sources=(COMMAND_SOURCE_KEYBOARD,),
     )
     is_free_teach = args.recording_mode == "free-teach"
     servo_protection = ServoProtectionSupervisor(
