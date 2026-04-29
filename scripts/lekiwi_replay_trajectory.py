@@ -189,6 +189,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hold-final-s", type=float, default=0.5, help="How long to hold the final arm target.")
     parser.add_argument(
+        "--start-time-s",
+        type=float,
+        default=0.0,
+        help="Recording timestamp to start replaying from. Values greater than 0 skip before-replay home and start-position alignment.",
+    )
+    parser.add_argument(
         "--home-mode",
         choices=("none", "start", "end", "both"),
         default="none",
@@ -239,6 +245,30 @@ def load_trajectory(path_str: str) -> tuple[Path, dict[str, object], list[dict[s
         raise SystemExit(f"No samples found in {path}")
 
     return path, payload, samples
+
+
+def replay_start_index(samples: list[dict[str, object]], start_time_s: float) -> int:
+    if start_time_s <= 0:
+        return 0
+
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            continue
+        raw_t_s = sample.get("t_s")
+        if not isinstance(raw_t_s, (int, float)):
+            continue
+        t_s = float(raw_t_s)
+        if math.isfinite(t_s) and t_s >= start_time_s:
+            return index
+    return max(len(samples) - 1, 0)
+
+
+def mid_replay_home_mode(home_mode: str) -> str:
+    if home_mode == "both":
+        return "end"
+    if home_mode == "start":
+        return "none"
+    return home_mode
 
 
 def finite_number(value: object) -> float | None:
@@ -567,9 +597,17 @@ def main() -> None:
         raise SystemExit("--vex-positioning-xy-trim-tolerance-m must be greater than 0.")
     if args.vex_positioning_heading_trim_tolerance_deg <= 0:
         raise SystemExit("--vex-positioning-heading-trim-tolerance-deg must be greater than 0.")
+    if not math.isfinite(float(args.start_time_s)) or args.start_time_s < 0:
+        raise SystemExit("--start-time-s must be 0 or greater.")
+    args.start_time_s = float(args.start_time_s)
+    if args.start_time_s > 0:
+        args.home_mode = mid_replay_home_mode(args.home_mode)
+        args.auto_vex_positioning = False
     home_position = load_home_position(args)
 
     trajectory_path, trajectory_payload, samples = load_trajectory(args.input)
+    start_index = replay_start_index(samples, args.start_time_s)
+    replay_samples = samples[start_index:]
     robot_config = build_robot_config(args)
     configure_cameras(robot_config, args.robot_cameras_json)
     robot = LeKiwi(robot_config)
@@ -657,7 +695,13 @@ def main() -> None:
                 auto_preposition_base = False
             prepare_vex_base = False
     print(vex_base_bridge.status_message, flush=True)
-    print(f"Replaying {len(samples)} samples from {trajectory_path}")
+    print(f"Replaying {len(replay_samples)} of {len(samples)} samples from {trajectory_path}")
+    if args.start_time_s > 0:
+        print(
+            f"Replay resume: starting at t={args.start_time_s:.3f}s "
+            f"(sample {start_index + 1}/{len(samples)}).",
+            flush=True,
+        )
     if args.include_base:
         print(f"Base replay: enabled ({args.vex_replay_mode} mode)")
     elif auto_preposition_base:
@@ -765,9 +809,10 @@ def main() -> None:
     recapture_missing_count = 0
     replay_completed = False
     try:
-        for idx, sample in enumerate(samples, start=1):
+        for idx, sample in enumerate(replay_samples, start=start_index + 1):
             state = sample["state"]
-            target_t = float(sample["t_s"]) / args.speed
+            raw_t_s = float(sample["t_s"])
+            target_t = max(raw_t_s - args.start_time_s, 0.0) / args.speed
             precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
 
             torque_watcher.poll(robot)
@@ -826,8 +871,8 @@ def main() -> None:
                 print("Replay stopped because the arm safety latch tripped.", flush=True)
                 break
 
-            if idx == 1 or idx % args.print_every == 0 or idx == len(samples):
-                print(f"[{idx:05d}/{len(samples):05d}] t={target_t:7.3f}s {summarize_arm_action(action)}")
+            if idx == start_index + 1 or idx % args.print_every == 0 or idx == len(samples):
+                print(f"[{idx:05d}/{len(samples):05d}] t={raw_t_s:7.3f}s {summarize_arm_action(action)}")
         else:
             replay_completed = True
 

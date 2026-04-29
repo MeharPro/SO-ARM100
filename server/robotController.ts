@@ -216,13 +216,21 @@ function normalizeReplayRequest(
   defaults: AppSettings["trajectories"],
 ): ReplayRequest {
   const target = payload.target === "leader" ? "leader" : "pi";
+  const startTimeS = normalizeReplayStartTime(payload.startTimeS);
+  const startsMidRecording = startTimeS > 0;
   return {
     trajectoryPath: payload.trajectoryPath.trim(),
     target,
     vexReplayMode: payload.vexReplayMode === "drive" ? "drive" : "ecu",
-    homeMode: target === "pi" ? normalizeHomeMode(payload.homeMode) : "none",
+    homeMode:
+      target === "pi"
+        ? startsMidRecording
+          ? normalizeMidReplayHomeMode(payload.homeMode)
+          : normalizeHomeMode(payload.homeMode)
+        : "none",
     speed: normalizeReplaySpeed(payload.speed, defaults),
-    autoVexPositioning: target === "pi" ? payload.autoVexPositioning !== false : false,
+    autoVexPositioning:
+      target === "pi" && !startsMidRecording ? payload.autoVexPositioning !== false : false,
     vexPositioningSpeed:
       target === "pi"
         ? normalizeVexPositioningSpeed(payload.vexPositioningSpeed)
@@ -250,7 +258,24 @@ function normalizeReplayRequest(
     includeBase: target === "leader" ? false : Boolean(payload.includeBase),
     holdFinalS:
       payload.holdFinalS >= 0 ? payload.holdFinalS : defaults.defaultHoldFinalS,
+    startTimeS,
   };
+}
+
+function normalizeReplayStartTime(value: unknown): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+function normalizeMidReplayHomeMode(value: unknown): ArmHomeMode {
+  const homeMode = normalizeHomeMode(value);
+  if (homeMode === "both") {
+    return "end";
+  }
+  if (homeMode === "start") {
+    return "none";
+  }
+  return homeMode;
 }
 
 function normalizeReplaySpeed(
@@ -2022,7 +2047,9 @@ export class RobotController {
       this.logActivity(
         `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}${
           replay.target === "pi" ? ` (${replay.includeBase ? "VEX base + arm" : "arm only"})` : ""
-        }${replay.homeMode !== "none" ? `, home ${replay.homeMode}` : ""}.`,
+        }${replay.startTimeS ? ` from ${replay.startTimeS.toFixed(2)}s` : ""}${
+          replay.homeMode !== "none" ? `, home ${replay.homeMode}` : ""
+        }.`,
       );
 
       await this.replayRunner.stop("Restarting replay.");
@@ -3749,6 +3776,9 @@ PY
     const recaptureUltrasonicFlag = options.recaptureUltrasonicStream
       ? " \\\n  --recapture-ultrasonic-stream"
       : "";
+    const startTimeFlag = replay.startTimeS
+      ? ` \\\n  --start-time-s ${replay.startTimeS}`
+      : "";
     const homeFlags =
       replay.homeMode !== "none" && isFiniteHomePosition(homePosition)
         ? ` \\\n  --home-mode ${shellQuote(replay.homeMode)} \\\n  --home-position-json ${shellQuote(JSON.stringify(homePosition.joints))}`
@@ -3771,7 +3801,7 @@ PY
       `  --input ${shellQuote(replay.trajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
       `  --vex-replay-mode ${shellQuote(replay.vexReplayMode)} \\`,
-      `  --hold-final-s ${replay.holdFinalS}${includeBaseFlag}${autoVexPositioningFlag}${vexPositioningTimeoutFlag}${vexPositioningTolerancesFlags}${recaptureUltrasonicFlag}${homeFlags}${saferServoModeFlag}`,
+      `  --hold-final-s ${replay.holdFinalS}${startTimeFlag}${includeBaseFlag}${autoVexPositioningFlag}${vexPositioningTimeoutFlag}${vexPositioningTolerancesFlags}${recaptureUltrasonicFlag}${homeFlags}${saferServoModeFlag}`,
     ].join("\n");
   }
 
@@ -3809,7 +3839,8 @@ PY
       `  --robot-port ${shellQuote(leader.expectedPort ?? "auto")} \\`,
       `  --input ${shellQuote(localTrajectoryPath)} \\`,
       `  --speed ${replay.speed} \\`,
-      `  --hold-final-s ${replay.holdFinalS}`,
+      `  --hold-final-s ${replay.holdFinalS} \\`,
+      `  --start-time-s ${replay.startTimeS ?? 0}`,
     ].join("\n");
   }
 
@@ -4089,6 +4120,7 @@ PY
       trajectoryPath: replay.trajectoryPath,
       speed: replay.speed,
       holdFinalS: replay.holdFinalS,
+      startTimeS: replay.startTimeS ?? 0,
       includeBase: replay.includeBase,
       autoVexPositioning: replay.autoVexPositioning,
       vexPositioningSpeed: replay.vexPositioningSpeed,
@@ -4133,6 +4165,7 @@ PY
           trajectoryPath: string;
           speed: number;
           holdFinalS: number;
+          startTimeS: number;
           includeBase: boolean;
           autoVexPositioning: boolean;
           vexPositioningSpeed: number;
@@ -4158,6 +4191,7 @@ PY
         trajectory_path: command.trajectoryPath,
         speed: command.speed,
         hold_final_s: command.holdFinalS,
+        start_time_s: command.startTimeS,
         include_base: command.includeBase,
         auto_vex_positioning: command.autoVexPositioning,
         vex_positioning_speed: command.vexPositioningSpeed,

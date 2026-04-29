@@ -26,6 +26,7 @@ DEFAULT_COMMAND_TIMEOUT_S = 0.35
 DEFAULT_TELEMETRY_SLOT = 8
 DEFAULT_REPLAY_SLOT = 7
 REQUIRED_VEX_MIXER_VERSION = 7
+VEX_IDLE_MOTION_EPSILON = 1e-4
 DEFAULT_PROGRAM_CACHE_DIR = "~/.lekiwi-vex/programs"
 DEFAULT_REPLAY_CACHE_DIR = "~/.lekiwi-vex/replays"
 DEFAULT_VEXCOM_PATH_GLOBS = (
@@ -104,6 +105,45 @@ DEFAULT_VEX_CONTROL_CONFIG = {
         "maxTurnSpeedDps": 90.0,
     },
 }
+
+
+def _numeric_base_motion_value(motion: dict[str, Any], key: str) -> float:
+    value = motion.get(key, 0.0)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def base_motion_is_idle(motion: dict[str, Any], *, epsilon: float = VEX_IDLE_MOTION_EPSILON) -> bool:
+    return all(abs(_numeric_base_motion_value(motion, key)) <= epsilon for key in BASE_STATE_KEYS)
+
+
+class VexBaseIdleHoldController:
+    def __init__(
+        self,
+        *,
+        epsilon: float = VEX_IDLE_MOTION_EPSILON,
+        hold_ttl_ms: int = 1200,
+    ) -> None:
+        self.epsilon = max(float(epsilon), 0.0)
+        self.hold_ttl_ms = max(int(hold_ttl_ms), 50)
+        self._holding = False
+
+    def reset(self) -> None:
+        self._holding = False
+
+    def mark_holding(self) -> None:
+        self._holding = True
+
+    def send(self, vex_base_bridge: "VexBaseBridge", motion: dict[str, Any], ttl_ms: int | None = None) -> bool:
+        if base_motion_is_idle(motion, epsilon=self.epsilon):
+            if self._holding:
+                return True
+            sent = vex_base_bridge.send_hold(ttl_ms=self.hold_ttl_ms)
+            if sent:
+                self.mark_holding()
+            return sent
+
+        self.reset()
+        return vex_base_bridge.send_motion(motion, ttl_ms=ttl_ms)
 
 
 def add_vex_base_args(parser: argparse.ArgumentParser) -> None:

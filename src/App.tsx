@@ -749,6 +749,16 @@ function homeModeLabel(mode: ArmHomeMode): string {
   return "No home";
 }
 
+function resumeHomeMode(mode: ArmHomeMode): ArmHomeMode {
+  if (mode === "both") {
+    return "end";
+  }
+  if (mode === "start") {
+    return "none";
+  }
+  return mode;
+}
+
 function vexReplayModeLabel(mode: VexReplayMode): string {
   return mode === "ecu" ? "ECU mode" : "Drive mode";
 }
@@ -1263,7 +1273,7 @@ function RecordingPreviewPanel({
             {playing ? "Pause" : "Play"}
           </button>
           <button disabled={controlsDisabled || replayDisabled || !detail || durationS <= 0 || replayActive} onClick={onStartReplay}>
-            Replay
+            Play Replay
           </button>
           <button disabled={controlsDisabled || !replayActive} onClick={onPauseReplay}>
             Pause Replay
@@ -2439,6 +2449,22 @@ export default function App() {
     }
   };
 
+  const getCurrentPlaybackTimeS = () => {
+    if (!recordingDetail || recordingDetail.durationS <= 0) {
+      return clampPlaybackTime(playbackTimeS, recordingDurationS);
+    }
+
+    const anchor = playbackAnchorRef.current;
+    if (!anchor) {
+      return clampPlaybackTime(playbackTimeS, recordingDetail.durationS);
+    }
+
+    return clampPlaybackTime(
+      anchor.baseTimeS + ((performance.now() - anchor.startedAtMs) / 1000) * playbackRate,
+      recordingDetail.durationS,
+    );
+  };
+
   const startRawPlayback = (rate = 1, baseTimeS = playbackTimeS) => {
     if (!recordingDetail || recordingDetail.durationS <= 0) {
       return;
@@ -3063,19 +3089,34 @@ export default function App() {
       return;
     }
 
+    const currentPlayheadS = getCurrentPlaybackTimeS();
+    const startTimeS =
+      currentPlayheadS > 0 && currentPlayheadS < recordingDurationS
+        ? currentPlayheadS
+        : 0;
+    const replayPayload: ReplayRequest = {
+      ...selectedMovePayload,
+      startTimeS,
+      homeMode: startTimeS > 0 ? resumeHomeMode(selectedMovePayload.homeMode) : selectedMovePayload.homeMode,
+      autoVexPositioning:
+        startTimeS > 0 ? false : selectedMovePayload.autoVexPositioning,
+    };
+
     const next = await mutate("start-replay", "/api/replays/start", {
       method: "POST",
-      body: JSON.stringify(selectedMovePayload),
+      body: JSON.stringify(replayPayload),
     });
     if (next) {
       setReplayTimelineActive(true);
-      startRawPlayback(selectedMovePayload.speed, 0);
+      startRawPlayback(replayPayload.speed, startTimeS);
     }
   };
 
   const handlePauseReplay = async () => {
+    const pausedAtS = getCurrentPlaybackTimeS();
     playbackAnchorRef.current = null;
     setPlaybackPlaying(false);
+    setPlaybackTimeS(pausedAtS);
     const next = await mutate("pause-replay", "/api/replays/stop", { method: "POST" });
     if (next) {
       setReplayTimelineActive(false);

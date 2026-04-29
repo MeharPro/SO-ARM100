@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 
 import zmq
@@ -15,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory-path", default="")
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--hold-final-s", type=float, default=0.5)
+    parser.add_argument("--start-time-s", type=float, default=0.0)
     parser.add_argument("--include-base", action="store_true")
     parser.add_argument("--vex-replay-mode", choices=("drive", "ecu"), default="ecu")
     return parser.parse_args()
@@ -26,6 +28,10 @@ def main() -> None:
         raise SystemExit("--remote-host or LEKIWI_PI_HOST is required.")
     if args.command == "replay" and not args.trajectory_path.strip():
         raise SystemExit("--trajectory-path is required for replay commands.")
+    if args.command == "replay" and (
+        not math.isfinite(float(args.start_time_s)) or args.start_time_s < 0
+    ):
+        raise SystemExit("--start-time-s must be 0 or greater.")
 
     payload: dict[str, object] = {"command": args.command}
     if args.command == "replay":
@@ -34,6 +40,7 @@ def main() -> None:
                 "trajectory_path": args.trajectory_path,
                 "speed": args.speed,
                 "hold_final_s": args.hold_final_s,
+                "start_time_s": args.start_time_s,
                 "include_base": args.include_base,
                 "vex_replay_mode": args.vex_replay_mode,
             }

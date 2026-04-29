@@ -63,10 +63,10 @@ GRIPPER_KEY = "arm_gripper.pos"
 WRIST_ROLL_MOTOR = "arm_wrist_roll"
 WRIST_ROLL_SINGLE_TURN_LIMITS = (0, 4095)
 WRIST_ROLL_CONTINUOUS_LIMITS = (0, 0)
-DEFAULT_GRIPPER_FORCE_CURRENT_LIMIT_MA = 900.0
+DEFAULT_GRIPPER_FORCE_CURRENT_LIMIT_MA = 700.0
 DEFAULT_GRIPPER_FORCE_HOLD_MARGIN = 0.8
 DEFAULT_GRIPPER_FORCE_RELEASE_MARGIN = 2.0
-DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION = 1.0
+DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION = -1.0
 DEFAULT_GRIPPER_FORCE_MIN_CLOSING_ERROR = 1.0
 
 DEFAULT_SAFER_ARM_MAX_STEP = {
@@ -119,6 +119,13 @@ SERVO_STALL_TIMEOUT_S = {
     "arm_wrist_flex": 0.45,
     "arm_wrist_roll": 0.45,
     "arm_gripper": 0.18,
+}
+SERVO_STALL_CURRENT_LIMIT_MA = {
+    "arm_shoulder_pan": 600.0,
+    "arm_shoulder_lift": 650.0,
+    "arm_elbow_flex": 600.0,
+    "arm_wrist_flex": 450.0,
+    "arm_wrist_roll": 350.0,
 }
 SERVO_HARD_TEMPERATURE_LIMIT_C = 50.0
 SERVO_OVERTEMP_CONFIRMATION_SAMPLES = 2
@@ -309,6 +316,13 @@ def add_servo_safety_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_GRIPPER_FORCE_RELEASE_MARGIN,
         help="Leader/opening motion required before the follower gripper leaves soft hold.",
     )
+    parser.add_argument(
+        "--gripper-force-close-direction",
+        type=float,
+        choices=(-1.0, 1.0),
+        default=DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION,
+        help="Follower gripper closing direction in normalized position units.",
+    )
 
 
 def servo_protection_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -322,6 +336,9 @@ def servo_protection_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any
         ),
         "gripper_release_margin": float(
             getattr(args, "gripper_force_release_margin", DEFAULT_GRIPPER_FORCE_RELEASE_MARGIN)
+        ),
+        "gripper_close_direction": float(
+            getattr(args, "gripper_force_close_direction", DEFAULT_GRIPPER_FORCE_CLOSE_DIRECTION)
         ),
     }
 
@@ -958,6 +975,32 @@ class ServoProtectionSupervisor:
     def _stall_timeout_s(motor: str) -> float:
         return float(SERVO_STALL_TIMEOUT_S.get(motor, 0.5))
 
+    @staticmethod
+    def _stall_current_limit_ma(motor: str) -> float | None:
+        value = SERVO_STALL_CURRENT_LIMIT_MA.get(motor)
+        if value is None:
+            return None
+        return float(value)
+
+    def _stall_has_load_evidence(
+        self,
+        motor: str,
+        power_sample: dict[str, Any] | None,
+    ) -> tuple[bool, float | None, float | None]:
+        limit_ma = (
+            self.gripper_current_limit_ma
+            if motor == GRIPPER_MOTOR
+            else self._stall_current_limit_ma(motor)
+        )
+        if limit_ma is None or limit_ma <= 0.0:
+            return True, None, limit_ma
+
+        current_ma = self._sample_float(power_sample, f"{motor}.current_ma_est")
+        if current_ma is None:
+            return True, None, limit_ma
+
+        return current_ma >= limit_ma, current_ma, limit_ma
+
     def _clamp_gripper_target(self, value: float) -> float:
         low, high = SAFE_ABSOLUTE_POSITION_LIMITS.get(GRIPPER_KEY, (0.0, 100.0))
         return min(max(float(value), low), high)
@@ -965,6 +1008,12 @@ class ServoProtectionSupervisor:
     def _is_gripper_closing(self, observed: float, command: float) -> bool:
         error_in_close_direction = (float(command) - float(observed)) * self.gripper_close_direction
         return error_in_close_direction > DEFAULT_GRIPPER_FORCE_MIN_CLOSING_ERROR
+
+    def _command_gripper_hold(self, hold_target: float) -> None:
+        try:
+            self.robot.bus.sync_write("Goal_Position", {GRIPPER_MOTOR: float(hold_target)})
+        except Exception as exc:
+            self.logger.warning("Failed to command gripper force-limit hold: %s", exc)
 
     def _activate_gripper_force_limit(
         self,
@@ -996,6 +1045,7 @@ class ServoProtectionSupervisor:
         state = self.states[GRIPPER_MOTOR]
         state.last_command = hold_target
         state.candidate_since = None
+        self._command_gripper_hold(hold_target)
 
         if not already_active:
             current_text = f", current {current_ma:.0f}mA" if current_ma is not None else ""
@@ -1206,21 +1256,39 @@ class ServoProtectionSupervisor:
 
             duration_s = now - state.candidate_since
             if duration_s >= self._stall_timeout_s(motor):
-                if motor == GRIPPER_MOTOR and self._activate_gripper_force_limit(
-                    observed=observed,
-                    command=command,
-                    reason=(
-                        f"{GRIPPER_MOTOR} met resistance with {error:.2f} position error "
-                        f"for {duration_s:.2f}s"
-                    ),
-                    current_ma=gripper_current_ma,
-                ):
+                has_load_evidence, current_ma, current_limit_ma = self._stall_has_load_evidence(
+                    motor,
+                    power_sample,
+                )
+                if not has_load_evidence:
+                    state.candidate_since = now
                     continue
+
+                if motor == GRIPPER_MOTOR:
+                    if current_ma is None:
+                        state.candidate_since = now
+                        continue
+                    if self._activate_gripper_force_limit(
+                        observed=observed,
+                        command=command,
+                        reason=(
+                            f"{GRIPPER_MOTOR} current reached {current_ma:.0f}mA "
+                            f"(soft limit {current_limit_ma:.0f}mA) after {duration_s:.2f}s stall"
+                        ),
+                        current_ma=current_ma,
+                    ):
+                        continue
+
+                current_text = ""
+                if current_ma is not None and current_limit_ma is not None:
+                    current_text = f", current {current_ma:.0f}mA >= {current_limit_ma:.0f}mA"
+                elif current_limit_ma is not None:
+                    current_text = ", no current sample available"
                 self._trip(
                     motor,
                     (
                         f"{motor} stalled with {error:.2f}deg position error and no meaningful motion "
-                        f"for {duration_s:.2f}s"
+                        f"for {duration_s:.2f}s{current_text}"
                     ),
                     observation,
                     power_sample,

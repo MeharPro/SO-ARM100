@@ -39,6 +39,7 @@ from vex_base_bridge import (
     VEX_MOTOR_STATE_KEYS,
     VEX_POSE_STATE_KEYS,
     VexBaseBridge,
+    VexBaseIdleHoldController,
     VexBaseTelemetryManager,
     add_vex_base_args,
     ensure_vex_command_stream,
@@ -371,7 +372,8 @@ def main() -> None:
         cache_dir=args.vex_program_cache_dir,
         logger=logger,
     )
-    if args.recording_mode != "free-teach" and vex_base_telemetry.enabled:
+    vex_idle_hold = VexBaseIdleHoldController()
+    if vex_base_telemetry.enabled:
         vex_base_telemetry.install_and_run(
             vex_control_config,
             program_name=args.vex_telemetry_program_name,
@@ -379,16 +381,21 @@ def main() -> None:
         )
         time.sleep(1.0)
         vex_base_bridge.connect()
-    vex_command_stream_ready = False
-    if args.recording_mode != "free-teach":
-        vex_command_stream_ready = ensure_vex_command_stream(
-            vex_base_bridge,
-            vex_base_telemetry,
-            vex_control_config,
-            program_name=args.vex_telemetry_program_name,
-            logger=logger,
+    vex_command_stream_ready = ensure_vex_command_stream(
+        vex_base_bridge,
+        vex_base_telemetry,
+        vex_control_config,
+        program_name=args.vex_telemetry_program_name,
+        logger=logger,
+    )
+    if vex_command_stream_ready:
+        vex_idle_hold.mark_holding()
+    elif args.recording_mode == "free-teach":
+        print(
+            "Warning: VEX USB command stream is unavailable; hand-guide recording will store arm poses but cannot hold the VEX base idle.",
+            flush=True,
         )
-    if args.recording_mode != "free-teach" and not vex_command_stream_ready:
+    else:
         print(
             "Warning: VEX USB command stream is unavailable; recording will store live sensors but cannot drive the VEX base or reset a stable inertial origin.",
             flush=True,
@@ -475,7 +482,7 @@ def main() -> None:
                         allow_legacy_base=args.enable_base,
                     )
                     if vex_command_stream_ready:
-                        vex_base_bridge.send_motion(sent_action)
+                        vex_idle_hold.send(vex_base_bridge, sent_action)
                     safety_filter.update(sent_action)
                     servo_protection.record_command(sent_action)
                     command_samples.append(
@@ -501,7 +508,8 @@ def main() -> None:
                 )
                 stop_robot_base(robot, allow_legacy_base=args.enable_base)
                 if vex_command_stream_ready:
-                    vex_base_bridge.send_hold()
+                    if vex_base_bridge.send_hold():
+                        vex_idle_hold.mark_holding()
                 watchdog_active = True
 
             if args.recording_mode != "free-teach":
@@ -533,7 +541,8 @@ def main() -> None:
             if servo_protection.observe(observation, power_logger.last_sample):
                 stop_robot_base(robot, allow_legacy_base=args.enable_base)
                 if vex_command_stream_ready:
-                    vex_base_bridge.send_hold()
+                    if vex_base_bridge.send_hold():
+                        vex_idle_hold.mark_holding()
                 print("Recording stopped because the arm safety latch tripped.", flush=True)
                 break
 

@@ -24,7 +24,9 @@ from lekiwi_sensor_replay import (
     recorded_state_has_sensor_reference,
 )
 from vex_base_bridge import VEX_MOTOR_STATE_KEYS
+from vex_base_bridge import VexBaseIdleHoldController
 from vex_base_bridge import build_vex_telemetry_program_source
+from vex_base_bridge import base_motion_is_idle
 from vex_base_bridge import VexBaseBridge
 
 
@@ -1010,6 +1012,27 @@ class SensorReplayTests(unittest.TestCase):
         self.assertEqual(bridge.wait_for_source.call_args.args[0], {"pi-drive"})
         self.assertEqual(bridge.wait_for_source.call_args.kwargs["timeout_s"], 1.25)
         bridge.send_hold.assert_called_once_with(ttl_ms=350)
+
+    def test_vex_idle_hold_controller_holds_zero_base_motion_once(self) -> None:
+        bridge = mock.Mock()
+        bridge.send_hold.return_value = True
+        bridge.send_motion.return_value = True
+        controller = VexBaseIdleHoldController()
+
+        self.assertTrue(controller.send(bridge, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}))
+        self.assertTrue(controller.send(bridge, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}))
+        bridge.send_hold.assert_called_once_with(ttl_ms=1200)
+        bridge.send_motion.assert_not_called()
+
+        self.assertTrue(controller.send(bridge, {"x.vel": 0.1, "y.vel": 0.0, "theta.vel": 0.0}))
+        bridge.send_motion.assert_called_once_with({"x.vel": 0.1, "y.vel": 0.0, "theta.vel": 0.0}, ttl_ms=None)
+
+        self.assertTrue(controller.send(bridge, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}))
+        self.assertEqual(bridge.send_hold.call_count, 2)
+
+    def test_base_motion_is_idle_ignores_tiny_numeric_noise(self) -> None:
+        self.assertTrue(base_motion_is_idle({"x.vel": 0.00001, "y.vel": -0.00001, "theta.vel": 0.0}))
+        self.assertFalse(base_motion_is_idle({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.001}))
 
     def test_generated_vex_program_uses_normal_vex_axis_defaults(self) -> None:
         source = build_vex_telemetry_program_source({})

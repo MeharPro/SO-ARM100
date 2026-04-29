@@ -34,6 +34,7 @@ ALL_MOTORS = list(ARM_MOTORS) + [
 class FakeBus:
     def __init__(self) -> None:
         self.disabled_calls: list[list[str]] = []
+        self.goal_writes: list[dict[str, float]] = []
         self.motors = {motor: object() for motor in ALL_MOTORS}
 
     def disable_torque(self, motors, num_retry: int = 10) -> None:  # noqa: ANN001
@@ -42,6 +43,10 @@ class FakeBus:
         else:
             payload = list(motors)
         self.disabled_calls.append(payload)
+
+    def sync_write(self, item: str, values: dict[str, float]) -> None:
+        if item == "Goal_Position":
+            self.goal_writes.append(dict(values))
 
 
 class FakeRobot:
@@ -164,30 +169,196 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(supervisor.fault["motor"], "arm_elbow_flex")
         self.assertEqual(robot.bus.disabled_calls[-1], ALL_MOTORS)
 
+    def test_shoulder_lift_low_current_position_lag_does_not_latch(self) -> None:
+        robot = FakeRobot()
+        supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
+        observation = build_observation()
+        observation["arm_shoulder_lift.pos"] = -47.56
+        supervisor.seed_from_observation(observation)
+
+        supervisor.record_command({"arm_shoulder_lift.pos": -41.23})
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
+            self.assertFalse(
+                supervisor.observe(
+                    observation,
+                    {
+                        "monotonic_s": 0.0,
+                        "arm_shoulder_lift.current_ma_est": 20.0,
+                    },
+                )
+            )
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.6):
+            tripped = supervisor.observe(
+                observation,
+                {
+                    "monotonic_s": 0.6,
+                    "arm_shoulder_lift.current_ma_est": 20.0,
+                },
+            )
+
+        self.assertFalse(tripped)
+        self.assertFalse(supervisor.latched)
+        self.assertEqual(robot.bus.disabled_calls, [])
+
+    def test_wrist_flex_low_current_position_lag_does_not_latch(self) -> None:
+        robot = FakeRobot()
+        supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
+        observation = build_observation()
+        observation["arm_wrist_flex.pos"] = -95.34
+        supervisor.seed_from_observation(observation)
+
+        supervisor.record_command({"arm_wrist_flex.pos": -89.89})
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
+            self.assertFalse(
+                supervisor.observe(
+                    observation,
+                    {
+                        "monotonic_s": 0.0,
+                        "arm_wrist_flex.current_ma_est": 290.0,
+                    },
+                )
+            )
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.5):
+            tripped = supervisor.observe(
+                observation,
+                {
+                    "monotonic_s": 0.5,
+                    "arm_wrist_flex.current_ma_est": 290.0,
+                },
+            )
+
+        self.assertFalse(tripped)
+        self.assertFalse(supervisor.latched)
+        self.assertEqual(robot.bus.disabled_calls, [])
+
+    def test_wrist_flex_high_current_stall_still_latches(self) -> None:
+        robot = FakeRobot()
+        supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
+        observation = build_observation()
+        observation["arm_wrist_flex.pos"] = -95.34
+        supervisor.seed_from_observation(observation)
+
+        supervisor.record_command({"arm_wrist_flex.pos": -89.89})
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
+            self.assertFalse(
+                supervisor.observe(
+                    observation,
+                    {
+                        "monotonic_s": 0.0,
+                        "arm_wrist_flex.current_ma_est": 700.0,
+                    },
+                )
+            )
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.5):
+            tripped = supervisor.observe(
+                observation,
+                {
+                    "monotonic_s": 0.5,
+                    "arm_wrist_flex.current_ma_est": 700.0,
+                },
+            )
+
+        self.assertTrue(tripped)
+        self.assertTrue(supervisor.latched)
+        self.assertEqual(supervisor.fault["motor"], "arm_wrist_flex")
+        self.assertIn("current 700mA >= 450mA", supervisor.fault["reason"])
+
     def test_gripper_closing_stall_enters_force_limited_hold(self) -> None:
         robot = FakeRobot()
         supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
         observation = build_observation()
         supervisor.seed_from_observation(observation)
 
-        supervisor.record_command({"arm_gripper.pos": 70.0})
+        supervisor.record_command({"arm_gripper.pos": 2.0})
         with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
-            self.assertFalse(supervisor.observe(observation))
+            self.assertFalse(
+                supervisor.observe(
+                    observation,
+                    {
+                        "monotonic_s": 0.0,
+                        "arm_gripper.current_ma_est": 950.0,
+                    },
+                )
+            )
         with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.25):
-            self.assertFalse(supervisor.observe(observation))
+            self.assertFalse(
+                supervisor.observe(
+                    observation,
+                    {
+                        "monotonic_s": 0.25,
+                        "arm_gripper.current_ma_est": 950.0,
+                    },
+                )
+            )
 
         self.assertFalse(supervisor.latched)
         self.assertEqual(robot.bus.disabled_calls, [])
         self.assertTrue(supervisor.gripper_force_limit.active)
         self.assertAlmostEqual(supervisor.gripper_force_limit.hold_position, 40.0)
-        self.assertAlmostEqual(supervisor.gripper_force_limit.hold_target, 40.8)
+        self.assertAlmostEqual(supervisor.gripper_force_limit.hold_target, 39.2)
+        self.assertEqual(robot.bus.goal_writes[-1], {"arm_gripper": 39.2})
 
-        limited = supervisor.limit_action({"arm_gripper.pos": 85.0})
-        self.assertEqual(limited["arm_gripper.pos"], 40.8)
+        limited = supervisor.limit_action({"arm_gripper.pos": 2.0})
+        self.assertEqual(limited["arm_gripper.pos"], 39.2)
 
-        released = supervisor.limit_action({"arm_gripper.pos": 20.0})
-        self.assertEqual(released["arm_gripper.pos"], 20.0)
+        released = supervisor.limit_action({"arm_gripper.pos": 45.0})
+        self.assertEqual(released["arm_gripper.pos"], 45.0)
         self.assertFalse(supervisor.gripper_force_limit.active)
+
+    def test_gripper_closing_low_current_stall_does_not_force_hold_or_latch(self) -> None:
+        robot = FakeRobot()
+        supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
+        observation = build_observation()
+        observation["arm_gripper.pos"] = 13.36
+        supervisor.seed_from_observation(observation)
+
+        supervisor.record_command({"arm_gripper.pos": 2.38})
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
+            self.assertFalse(
+                supervisor.observe(
+                    observation,
+                    {
+                        "monotonic_s": 0.0,
+                        "arm_gripper.current_ma_est": 650.0,
+                    },
+                )
+            )
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.25):
+            tripped = supervisor.observe(
+                observation,
+                {
+                    "monotonic_s": 0.25,
+                    "arm_gripper.current_ma_est": 650.0,
+                },
+            )
+
+        self.assertFalse(tripped)
+        self.assertFalse(supervisor.latched)
+        self.assertFalse(supervisor.gripper_force_limit.active)
+        self.assertEqual(robot.bus.disabled_calls, [])
+        self.assertEqual(robot.bus.goal_writes, [])
+
+    def test_gripper_logged_current_reaches_default_force_threshold(self) -> None:
+        robot = FakeRobot()
+        supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
+        observation = build_observation()
+        observation["arm_gripper.pos"] = 13.36
+        supervisor.seed_from_observation(observation)
+        supervisor.record_command({"arm_gripper.pos": 2.38})
+
+        with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
+            tripped = supervisor.observe(
+                observation,
+                {
+                    "monotonic_s": 0.0,
+                    "arm_gripper.current_ma_est": 734.0,
+                },
+            )
+
+        self.assertFalse(tripped)
+        self.assertFalse(supervisor.latched)
+        self.assertTrue(supervisor.gripper_force_limit.active)
+        self.assertIn("soft limit 700mA", supervisor.gripper_force_limit.reason)
 
     def test_gripper_current_threshold_enters_force_limited_hold(self) -> None:
         robot = FakeRobot()
@@ -198,7 +369,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         )
         observation = build_observation()
         supervisor.seed_from_observation(observation)
-        supervisor.record_command({"arm_gripper.pos": 65.0})
+        supervisor.record_command({"arm_gripper.pos": 5.0})
 
         with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
             tripped = supervisor.observe(
@@ -215,17 +386,31 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertTrue(supervisor.gripper_force_limit.active)
         self.assertIn("current reached 650mA", supervisor.gripper_force_limit.reason)
 
-    def test_gripper_opening_stall_still_latches(self) -> None:
+    def test_gripper_opening_high_current_stall_still_latches(self) -> None:
         robot = FakeRobot()
         supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
         observation = build_observation()
         supervisor.seed_from_observation(observation)
 
-        supervisor.record_command({"arm_gripper.pos": 5.0})
+        supervisor.record_command({"arm_gripper.pos": 75.0})
         with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.0):
-            self.assertFalse(supervisor.observe(observation))
+            self.assertFalse(
+                supervisor.observe(
+                    observation,
+                    {
+                        "monotonic_s": 0.0,
+                        "arm_gripper.current_ma_est": 950.0,
+                    },
+                )
+            )
         with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.25):
-            tripped = supervisor.observe(observation)
+            tripped = supervisor.observe(
+                observation,
+                {
+                    "monotonic_s": 0.25,
+                    "arm_gripper.current_ma_est": 950.0,
+                },
+            )
 
         self.assertTrue(tripped)
         self.assertTrue(supervisor.latched)

@@ -209,6 +209,16 @@ class UiCommandWatcher:
             return None
 
         try:
+            start_time_s = float(payload.get("start_time_s", 0.0))
+        except (TypeError, ValueError):
+            print(f"[replay] error start_time_s is invalid in {self.path}", flush=True)
+            return None
+        if not math.isfinite(start_time_s):
+            print(f"[replay] error start_time_s is invalid in {self.path}", flush=True)
+            return None
+        start_time_s = max(start_time_s, 0.0)
+
+        try:
             include_base = coerce_json_bool(payload.get("include_base"), default=False)
         except argparse.ArgumentTypeError as exc:
             print(f"[replay] error include_base is invalid in {self.path}: {exc}", flush=True)
@@ -324,6 +334,7 @@ class UiCommandWatcher:
             "trajectory_path": trajectory_path.strip(),
             "speed": speed,
             "hold_final_s": max(0.0, hold_final_s),
+            "start_time_s": start_time_s,
             "include_base": include_base,
             "auto_vex_positioning": auto_vex_positioning,
             "vex_positioning_speed": vex_positioning_speed,
@@ -362,6 +373,30 @@ def load_trajectory(path_str: str) -> tuple[Path, list[dict[str, Any]]]:
         raise ValueError(f"No samples found in {path}")
 
     return path, samples
+
+
+def replay_start_index(samples: list[dict[str, Any]], start_time_s: float) -> int:
+    if start_time_s <= 0:
+        return 0
+
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            continue
+        raw_t_s = sample.get("t_s")
+        if not isinstance(raw_t_s, (int, float)):
+            continue
+        t_s = float(raw_t_s)
+        if math.isfinite(t_s) and t_s >= start_time_s:
+            return index
+    return max(len(samples) - 1, 0)
+
+
+def mid_replay_home_mode(home_mode: str) -> str:
+    if home_mode == "both":
+        return "end"
+    if home_mode == "start":
+        return "none"
+    return home_mode
 
 
 def get_state_value(state: dict[str, Any], key: str) -> float:
@@ -809,6 +844,10 @@ def execute_replay(
 
     speed = float(command["speed"])
     hold_final_s = float(command["hold_final_s"])
+    start_time_s = float(command.get("start_time_s", 0.0))
+    if not math.isfinite(start_time_s) or start_time_s < 0:
+        print(f"[replay] error invalid start_time_s={start_time_s!r}", flush=True)
+        return None
     include_base = bool(command["include_base"])
     auto_vex_positioning = bool(command.get("auto_vex_positioning", True))
     vex_positioning_speed = float(command.get("vex_positioning_speed", 1.0))
@@ -828,6 +867,11 @@ def execute_replay(
     vex_replay_mode = command.get("vex_replay_mode", "ecu")
     home_mode = command.get("home_mode", "none")
     home_position = command.get("home_position")
+    if start_time_s > 0:
+        auto_vex_positioning = False
+        home_mode = mid_replay_home_mode(home_mode)
+    start_index = replay_start_index(samples, start_time_s)
+    replay_samples = samples[start_index:]
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
     replay_to_vex_base = include_base and not allow_legacy_base
     start_state = samples[0]["state"] if samples and isinstance(samples[0], dict) else None
@@ -885,7 +929,7 @@ def execute_replay(
 
     print(
         "[replay] start "
-        f"path={trajectory_path} samples={len(samples)} speed={speed:.3f} include_base={str(include_base).lower()} vex_mode={vex_replay_mode} auto_vex_positioning={str(auto_vex_positioning).lower()} start_align={str(auto_preposition_base).lower()} home_mode={home_mode}",
+        f"path={trajectory_path} samples={len(replay_samples)}/{len(samples)} speed={speed:.3f} start_time_s={start_time_s:.3f} include_base={str(include_base).lower()} vex_mode={vex_replay_mode} auto_vex_positioning={str(auto_vex_positioning).lower()} start_align={str(auto_preposition_base).lower()} home_mode={home_mode}",
         flush=True,
     )
     if auto_positioning_available and not auto_vex_positioning:
@@ -1004,7 +1048,7 @@ def execute_replay(
     start = time.perf_counter()
 
     try:
-        for index, sample in enumerate(samples, start=1):
+        for index, sample in enumerate(replay_samples, start=start_index + 1):
             next_command = ui_command_watcher.poll()
             if next_command is not None:
                 if next_command["command"] == "stop-replay":
@@ -1030,7 +1074,8 @@ def execute_replay(
             if not isinstance(state, dict) or not isinstance(raw_t_s, (int, float)):
                 raise ValueError(f"Sample {index} is missing state or t_s.")
 
-            target_t = float(raw_t_s) / speed
+            sample_t_s = float(raw_t_s)
+            target_t = max(sample_t_s - start_time_s, 0.0) / speed
             precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
             torque_watcher.poll(robot)
             action = replay_filter.normalize(build_replay_action(state, include_base=include_base))

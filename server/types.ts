@@ -378,6 +378,7 @@ export interface ReplayRequest {
   vexPositioningHeadingTrimToleranceDeg: number;
   includeBase: boolean;
   holdFinalS: number;
+  startTimeS?: number;
 }
 
 export interface CreatePinnedMoveRequest extends ReplayRequest {
