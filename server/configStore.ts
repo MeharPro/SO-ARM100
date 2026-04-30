@@ -190,6 +190,16 @@ export class ConfigStore {
         !Boolean(rawVexControls?.invertForward) &&
         !Boolean(rawVexControls?.invertStrafe) &&
         !Boolean(rawVexControls?.invertTurn);
+      const shouldUpgradeVexControllerStrafeDefault =
+        (!Number.isFinite(rawVexControlPresetVersion) || rawVexControlPresetVersion < 3) &&
+        ["axis2", "axis3"].includes(
+          rawVexControls?.forwardAxis ?? this.defaults.settings.vex.controls.forwardAxis,
+        ) &&
+        (rawVexControls?.strafeAxis ?? this.defaults.settings.vex.controls.strafeAxis) === "axis4" &&
+        (rawVexControls?.turnAxis ?? this.defaults.settings.vex.controls.turnAxis) === "axis1" &&
+        !Boolean(rawVexControls?.invertForward) &&
+        !Boolean(rawVexControls?.invertStrafe) &&
+        !Boolean(rawVexControls?.invertTurn);
       const settings = this.normalizeSettings({
         ...this.defaults.settings,
         ...raw.settings,
@@ -244,6 +254,7 @@ export class ConfigStore {
             ...this.defaults.settings.vex.controls,
             ...raw.settings?.vex?.controls,
             ...(shouldUpgradeLegacyVexAxisDefaults ? { forwardAxis: "axis3" as const } : {}),
+            ...(shouldUpgradeVexControllerStrafeDefault ? { invertStrafe: true } : {}),
           },
           tuning: {
             ...this.defaults.settings.vex.tuning,
@@ -578,7 +589,10 @@ export class ConfigStore {
       vex: {
         ...normalized.vex,
         controlPresetVersion: Number.isFinite(Number(normalized.vex.controlPresetVersion))
-          ? Math.max(2, Math.round(Number(normalized.vex.controlPresetVersion)))
+          ? Math.max(
+              this.defaults.settings.vex.controlPresetVersion,
+              Math.round(Number(normalized.vex.controlPresetVersion)),
+            )
           : this.defaults.settings.vex.controlPresetVersion,
         telemetrySlot: clampSlot(normalized.vex.telemetrySlot, this.defaults.settings.vex.telemetrySlot),
         replaySlot: clampSlot(normalized.vex.replaySlot, this.defaults.settings.vex.replaySlot),

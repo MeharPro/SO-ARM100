@@ -1068,11 +1068,11 @@ class SensorReplayTests(unittest.TestCase):
         self.assertTrue(base_motion_is_idle({"x.vel": 0.00001, "y.vel": -0.00001, "theta.vel": 0.0}))
         self.assertFalse(base_motion_is_idle({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.001}))
 
-    def test_generated_vex_program_uses_normal_vex_axis_defaults(self) -> None:
+    def test_generated_vex_program_uses_contest_vex_axis_defaults(self) -> None:
         source = build_vex_telemetry_program_source({})
 
         self.assertIn("forward_pct = apply_deadband(controller_1.axis3.position())", source)
-        self.assertIn("strafe_pct = apply_deadband(controller_1.axis4.position())", source)
+        self.assertIn("strafe_pct = apply_deadband(-(controller_1.axis4.position()))", source)
         self.assertIn("turn_pct = apply_deadband(controller_1.axis1.position())", source)
         self.assertIn(
             'linear_speed = ECU_LINEAR_SPEED_MPS if controller_control_mode == "ecu" else MAX_LINEAR_SPEED_MPS',

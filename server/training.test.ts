@@ -98,6 +98,7 @@ test("config store upgrades untouched legacy VEX forward axis default", () => {
             forwardAxis: "axis2",
             strafeAxis: "axis4",
             turnAxis: "axis1",
+            invertStrafe: false,
           },
         },
       },
@@ -109,10 +110,11 @@ test("config store upgrades untouched legacy VEX forward axis default", () => {
   const store = new ConfigStore(defaultConfig, tempRoot);
   const loaded = store.getConfig();
 
-  assert.equal(loaded.settings.vex.controlPresetVersion, 2);
+  assert.equal(loaded.settings.vex.controlPresetVersion, 3);
   assert.equal(loaded.settings.vex.controls.forwardAxis, "axis3");
   assert.equal(loaded.settings.vex.controls.strafeAxis, "axis4");
   assert.equal(loaded.settings.vex.controls.turnAxis, "axis1");
+  assert.equal(loaded.settings.vex.controls.invertStrafe, true);
   assert.deepEqual(loaded.settings.vex.keyboardCalibration, {
     xSign: 1,
     ySign: 1,
@@ -121,6 +123,39 @@ test("config store upgrades untouched legacy VEX forward axis default", () => {
     notes: "",
   });
   assert.equal(loaded.settings.vex.manualIdleStoppingMode, "hold");
+});
+
+test("config store upgrades v2 VEX controller strafe direction default", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
+  const configDir = path.join(tempRoot, ".lekiwi-ui");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      settings: {
+        ...defaultConfig.settings,
+        vex: {
+          ...defaultConfig.settings.vex,
+          controlPresetVersion: 2,
+          controls: {
+            ...defaultConfig.settings.vex.controls,
+            invertStrafe: false,
+          },
+        },
+      },
+      pinnedMoves: [],
+      training: defaultConfig.training,
+    }),
+  );
+
+  const store = new ConfigStore(defaultConfig, tempRoot);
+  const loaded = store.getConfig();
+
+  assert.equal(loaded.settings.vex.controlPresetVersion, 3);
+  assert.equal(loaded.settings.vex.controls.forwardAxis, "axis3");
+  assert.equal(loaded.settings.vex.controls.strafeAxis, "axis4");
+  assert.equal(loaded.settings.vex.controls.turnAxis, "axis1");
+  assert.equal(loaded.settings.vex.controls.invertStrafe, true);
 });
 
 test("config store preserves recording replay speed and auto VEX positioning", () => {

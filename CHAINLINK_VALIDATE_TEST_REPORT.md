@@ -273,6 +273,9 @@ Hardware-session follow-up on 2026-04-30:
 - Code inspection found that `scripts/lekiwi_keyboard_teleop.py` did toggle local mode and emitted `__vex_control_mode__`, but `scripts/lekiwi_runtime.py::apply_robot_action` returned only numeric arm/base command keys. That stripped the VEX mode metadata before `scripts/lekiwi_host.py::send_vex_live_base_motion` could send `!mode ecu` or `!mode drive` to the VEX Brain.
 - Fixed `apply_robot_action` to preserve validated VEX control mode metadata in the returned action while still keeping that metadata out of the physical robot `send_action`/`sync_write` payload.
 - Added regression tests proving `drive`/`ecu` metadata survives the sanitization path and invalid mode metadata is dropped.
+- User later reported the VEX handheld controller strafe left/right direction was swapped while keyboard base controls were correct.
+- Fixed the controller-only default by inverting VEX controller Axis4 for strafe in the generated VEX Brain program, leaving keyboard calibration, X/Y semantics, and motor reversed flags unchanged.
+- Migrated stored VEX control preset v2 configs to preset v3 so existing installations receive the corrected controller strafe default.
 
 Additional commands run and results:
 
@@ -280,6 +283,8 @@ Additional commands run and results:
 - `python3 -m unittest tests.test_keyboard_teleop` - passed, 11 tests.
 - `python3 -m unittest tests.test_sensor_replay` - passed, 37 tests.
 - `python3 -m py_compile scripts/lekiwi_keyboard_teleop.py scripts/vex_base_bridge.py scripts/lekiwi_runtime.py scripts/lekiwi_host.py` - passed.
+- `npm run test:server` - passed, 22 tests after the VEX controller strafe migration tests were added.
+- `python3 -m py_compile scripts/vex_base_bridge.py` - passed after the controller strafe fix.
 
 Physical robot validation checklist:
 

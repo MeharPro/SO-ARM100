@@ -101,7 +101,7 @@ DEFAULT_VEX_CONTROL_CONFIG = {
         "strafeAxis": "axis4",
         "turnAxis": "axis1",
         "invertForward": False,
-        "invertStrafe": False,
+        "invertStrafe": True,
         "invertTurn": False,
     },
     "tuning": {
