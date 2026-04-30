@@ -245,6 +245,37 @@ export interface MoveRecordingVersion {
   safetyStatus: MoveRecordingSafetyStatus;
 }
 
+export interface CreateMoveRecordingVersionRequest {
+  moveId: string;
+  trajectoryPath: string | null;
+  displayName?: string;
+  recordingType?: BetaRecordingType;
+  playbackSpeed?: number;
+  vexBaseSamplesPresent?: boolean;
+  distanceSensorSamplesPresent?: boolean;
+  inertialSamplesPresent?: boolean;
+  autoVexPositioningEnabled?: boolean;
+  notes?: string;
+  safetyStatus?: MoveRecordingSafetyStatus;
+  markFavorite?: boolean;
+}
+
+export interface UpdateMoveRecordingVersionRequest {
+  displayName?: string;
+  playbackSpeed?: number;
+  vexBaseSamplesPresent?: boolean;
+  distanceSensorSamplesPresent?: boolean;
+  inertialSamplesPresent?: boolean;
+  autoVexPositioningEnabled?: boolean;
+  notes?: string;
+  safetyStatus?: MoveRecordingSafetyStatus;
+}
+
+export interface SetMoveFavoriteVersionRequest {
+  moveId: string;
+  versionId: string;
+}
+
 export type GamePlanStepTransitionPolicy =
   | "requireStartPoseTolerance"
   | "returnToActiveHoldFirst"

@@ -12,6 +12,7 @@ import type {
   AppSettings,
   BenchmarkPolicyRequest,
   CalibrationInputRequest,
+  CreateMoveRecordingVersionRequest,
   CreatePinnedMoveRequest,
   DeleteRecordingRequest,
   DuplicateRecordingRequest,
@@ -26,6 +27,7 @@ import type {
   SaveChainLinkRequest,
   SelectTrainingProfileRequest,
   SetArmHomeFromRecordingRequest,
+  SetMoveFavoriteVersionRequest,
   SetRecordingReplayOptionsRequest,
   StartControlRequest,
   StartPolicyEvalRequest,
@@ -37,6 +39,7 @@ import type {
   TrainingProfile,
   TrimRecordingRequest,
   TorqueLimitsRequest,
+  UpdateMoveRecordingVersionRequest,
   UpdatePinnedMoveRequest,
 } from "./types.js";
 
@@ -299,6 +302,28 @@ app.post(
   "/api/recordings/trim",
   asyncRoute(async (req, res) => {
     res.json(await controller.trimRecording(req.body as TrimRecordingRequest));
+  }),
+);
+
+app.post(
+  "/api/beta/recording-versions",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.createMoveRecordingVersion(req.body as CreateMoveRecordingVersionRequest));
+  }),
+);
+
+app.put(
+  "/api/beta/recording-versions/:id",
+  asyncRoute(async (req, res) => {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    res.json(await controller.updateMoveRecordingVersion(id, req.body as UpdateMoveRecordingVersionRequest));
+  }),
+);
+
+app.post(
+  "/api/beta/favorite-version",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.setMoveFavoriteVersion(req.body as SetMoveFavoriteVersionRequest));
   }),
 );
 

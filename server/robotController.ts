@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 
 import { Client, type ConnectConfig, type SFTPWrapper } from "ssh2";
@@ -34,6 +35,10 @@ import {
   validateTrainingProfile,
 } from "./trainingUtils.js";
 import {
+  nextMoveVersionNumber,
+  withFavoriteVersion,
+} from "./betaMoves.js";
+import {
   errorMessage,
   isTransientRemoteTransportError,
 } from "./transportErrors.js";
@@ -46,6 +51,7 @@ import type {
   BenchmarkPolicyRequest,
   ChainLink,
   ControlAuthorityState,
+  CreateMoveRecordingVersionRequest,
   CreatePinnedMoveRequest,
   DashboardState,
   DeployTrainingCheckpointRequest,
@@ -69,6 +75,7 @@ import type {
   SaveChainLinkRequest,
   SelectTrainingProfileRequest,
   SetArmHomeFromRecordingRequest,
+  SetMoveFavoriteVersionRequest,
   SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
@@ -83,6 +90,7 @@ import type {
   TrainingProfile,
   TrimRecordingRequest,
   TorqueLimitsRequest,
+  UpdateMoveRecordingVersionRequest,
   UpdatePinnedMoveRequest,
   VexBrainStatus,
 } from "./types.js";
@@ -2241,6 +2249,132 @@ export class RobotController {
     });
   }
 
+  async createMoveRecordingVersion(
+    payload: CreateMoveRecordingVersionRequest,
+  ): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const move = config.moveDefinitions.find((item) => item.id === payload.moveId);
+      if (!move || move.archived) {
+        throw new Error("Choose an active beta move before saving a recording version.");
+      }
+
+      const versionNumber = nextMoveVersionNumber(config.moveRecordingVersions, move.id);
+      const trajectoryPath =
+        typeof payload.trajectoryPath === "string" && payload.trajectoryPath.trim()
+          ? payload.trajectoryPath.trim()
+          : null;
+      const version = {
+        id: crypto.randomUUID(),
+        moveId: move.id,
+        versionNumber,
+        trajectoryPath,
+        displayName:
+          typeof payload.displayName === "string" && payload.displayName.trim()
+            ? payload.displayName.trim()
+            : `${move.label} v${versionNumber}`,
+        recordedAtIso: new Date().toISOString(),
+        recordingType: this.normalizeBetaRecordingType(
+          payload.recordingType,
+          move.defaultRecordingType,
+        ),
+        playbackSpeed: normalizeBoundedNumber(payload.playbackSpeed, 1, 0.1, 3),
+        vexBaseSamplesPresent: payload.vexBaseSamplesPresent === true,
+        distanceSensorSamplesPresent: payload.distanceSensorSamplesPresent === true,
+        inertialSamplesPresent: payload.inertialSamplesPresent === true,
+        autoVexPositioningEnabled: payload.autoVexPositioningEnabled === true,
+        isFavorite: false,
+        notes: typeof payload.notes === "string" ? payload.notes : "",
+        safetyStatus: this.normalizeMoveRecordingSafetyStatus(payload.safetyStatus),
+      };
+      let moveDefinitions = config.moveDefinitions;
+      let moveRecordingVersions = [...config.moveRecordingVersions, version];
+      if (payload.markFavorite === true) {
+        const favorite = withFavoriteVersion(moveDefinitions, moveRecordingVersions, move.id, version.id);
+        moveDefinitions = favorite.moves;
+        moveRecordingVersions = favorite.versions;
+      }
+
+      this.configStore.saveMoveDefinitions(moveDefinitions);
+      this.configStore.saveMoveRecordingVersions(moveRecordingVersions);
+      this.logActivity(`Saved ${move.label} v${versionNumber} to the beta move library.`);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async updateMoveRecordingVersion(
+    versionId: string,
+    payload: UpdateMoveRecordingVersionRequest,
+  ): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const existing = config.moveRecordingVersions.find((version) => version.id === versionId);
+      if (!existing) {
+        throw new Error("Beta recording version not found.");
+      }
+
+      const updated = {
+        ...existing,
+        displayName:
+          typeof payload.displayName === "string" && payload.displayName.trim()
+            ? payload.displayName.trim()
+            : existing.displayName,
+        playbackSpeed:
+          payload.playbackSpeed === undefined
+            ? existing.playbackSpeed
+            : normalizeBoundedNumber(payload.playbackSpeed, existing.playbackSpeed, 0.1, 3),
+        vexBaseSamplesPresent:
+          typeof payload.vexBaseSamplesPresent === "boolean"
+            ? payload.vexBaseSamplesPresent
+            : existing.vexBaseSamplesPresent,
+        distanceSensorSamplesPresent:
+          typeof payload.distanceSensorSamplesPresent === "boolean"
+            ? payload.distanceSensorSamplesPresent
+            : existing.distanceSensorSamplesPresent,
+        inertialSamplesPresent:
+          typeof payload.inertialSamplesPresent === "boolean"
+            ? payload.inertialSamplesPresent
+            : existing.inertialSamplesPresent,
+        autoVexPositioningEnabled:
+          typeof payload.autoVexPositioningEnabled === "boolean"
+            ? payload.autoVexPositioningEnabled
+            : existing.autoVexPositioningEnabled,
+        notes: typeof payload.notes === "string" ? payload.notes : existing.notes,
+        safetyStatus:
+          payload.safetyStatus === undefined
+            ? existing.safetyStatus
+            : this.normalizeMoveRecordingSafetyStatus(payload.safetyStatus),
+      };
+
+      this.configStore.saveMoveRecordingVersions(
+        config.moveRecordingVersions.map((version) => (version.id === versionId ? updated : version)),
+      );
+      this.logActivity(`Updated beta recording version ${updated.displayName}.`);
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async setMoveFavoriteVersion(
+    payload: SetMoveFavoriteVersionRequest,
+  ): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const favorite = withFavoriteVersion(
+        config.moveDefinitions,
+        config.moveRecordingVersions,
+        payload.moveId,
+        payload.versionId,
+      );
+      this.configStore.saveMoveDefinitions(favorite.moves);
+      this.configStore.saveMoveRecordingVersions(favorite.versions);
+      this.logActivity("Updated beta move favorite version.");
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
   async adjustRecordingServos(payload: AdjustRecordingServoRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
@@ -2937,6 +3071,30 @@ export class RobotController {
       return value;
     }
     return "auto";
+  }
+
+  private normalizeBetaRecordingType(
+    value: unknown,
+    fallback: CreateMoveRecordingVersionRequest["recordingType"] = "keyboardControl",
+  ): NonNullable<CreateMoveRecordingVersionRequest["recordingType"]> {
+    if (
+      value === "leaderArm" ||
+      value === "followerHandGuide" ||
+      value === "keyboardFromActiveHold" ||
+      value === "leaderFromSyncedHold"
+    ) {
+      return value;
+    }
+    return fallback ?? "keyboardControl";
+  }
+
+  private normalizeMoveRecordingSafetyStatus(
+    value: unknown,
+  ): NonNullable<CreateMoveRecordingVersionRequest["safetyStatus"]> {
+    if (value === "clear" || value === "latched") {
+      return value;
+    }
+    return "unknown";
   }
 
   private async startKeyboardControlSession(

@@ -61,3 +61,24 @@ Requires physical robot validation:
 
 - Favorite/broken trajectory checks currently validate data paths only; a real Pi recording refresh is still needed to prove file presence during match setup.
 - Sensor sample presence is metadata until recordings are captured from the real robot and VEX telemetry stream.
+
+## Phase 3: Pro Recording (beta)
+
+Commands run:
+
+- `npm run build` - passed, Vite client build and server TypeScript compile.
+- `npm run test:server` - passed, 16 tests.
+
+Failures fixed:
+
+- None in the focused Phase 3 validation run.
+
+Failures remaining:
+
+- None known from Phase 3 code-level validation.
+
+Requires physical robot validation:
+
+- Starting and stopping Pro Recording beta sessions must be exercised with the Pi connected.
+- Return-to-hold after Pro Recording stop requires real follower servo validation.
+- Replay selected beta versions uses existing replay code paths but still needs robot validation for motion, hold, and VEX behavior.

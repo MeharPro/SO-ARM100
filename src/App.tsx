@@ -4,13 +4,18 @@ import type {
   AdjustRecordingServoRequest,
   ArmHomeMode,
   AppSettings,
+  BetaRecordingType,
   ChainLink,
   ChainLinkItem,
+  CreateMoveRecordingVersionRequest,
   DashboardState,
   DeleteRecordingRequest,
   DuplicateRecordingRequest,
   LiveArmSource,
   MarkRecordingGyroZeroRequest,
+  MoveCategory,
+  MoveDefinition,
+  MoveRecordingVersion,
   PinnedMove,
   RecordingDetail,
   RecordingDetailRequest,
@@ -25,6 +30,7 @@ import type {
   ResetRecordingUltrasonicPositionRequest,
   SaveChainLinkRequest,
   SetArmHomeFromRecordingRequest,
+  SetMoveFavoriteVersionRequest,
   SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
@@ -32,6 +38,7 @@ import type {
   TrainingArtifact,
   TrainingProfile,
   TrimRecordingRequest,
+  UpdateMoveRecordingVersionRequest,
   UpdatePinnedMoveRequest,
   VexDirectionSign,
   VexManualIdleStoppingMode,
@@ -42,6 +49,7 @@ const POLL_MS = 2500;
 const SECTIONS = [
   { key: "overview", label: "Overview" },
   { key: "recordings", label: "Recordings" },
+  { key: "pro-recording", label: "Pro Recording (beta)" },
   { key: "pins", label: "Pinned Moves" },
   { key: "training", label: "Training" },
   { key: "settings", label: "Settings" },
@@ -95,6 +103,28 @@ const VEX_REPLAY_MODE_OPTIONS = [
   { value: "ecu", label: "ECU mode" },
   { value: "drive", label: "Drive mode" },
 ] as const;
+const MOVE_CATEGORY_OPTIONS: Array<{ value: MoveCategory | "all"; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "general", label: "General" },
+  { value: "fuseCollection", label: "Fuse collection" },
+  { value: "fuseTransfer", label: "Fuse removal/insertion" },
+  { value: "boardCollection", label: "Circuit Board collection" },
+  { value: "boardTransfer", label: "Circuit Board removal/insertion" },
+];
+const MOVE_CATEGORY_LABELS: Record<MoveCategory, string> = {
+  general: "General",
+  fuseCollection: "Fuse collection",
+  fuseTransfer: "Fuse removal/insertion",
+  boardCollection: "Circuit Board collection",
+  boardTransfer: "Circuit Board removal/insertion",
+};
+const BETA_RECORDING_TYPE_LABELS: Record<BetaRecordingType, string> = {
+  keyboardControl: "Keyboard control",
+  leaderArm: "Leader arm",
+  followerHandGuide: "Follower hand-guide",
+  keyboardFromActiveHold: "Keyboard from active hold",
+  leaderFromSyncedHold: "Leader from synced hold",
+};
 const HOME_MODE_OPTIONS: Array<{ value: ArmHomeMode; label: string }> = [
   { value: "none", label: "Do not go home" },
   { value: "start", label: "Go home before replay" },
@@ -824,6 +854,47 @@ function baseAuthorityLabel(authority: DashboardState["controlAuthority"]["base"
 
 function signLabel(sign: VexDirectionSign): string {
   return sign === -1 ? "Invert" : "Neutral";
+}
+
+function betaRecordingTypeToInputMode(recordingType: BetaRecordingType): RecordingInputMode {
+  if (recordingType === "leaderArm" || recordingType === "leaderFromSyncedHold") {
+    return "leader";
+  }
+  if (recordingType === "followerHandGuide") {
+    return "free-teach";
+  }
+  return "keyboard";
+}
+
+function moveIconGlyph(move: Pick<MoveDefinition, "iconKind">): string {
+  switch (move.iconKind) {
+    case "doorLeft":
+      return "L";
+    case "doorRight":
+      return "R";
+    case "circleBlue":
+      return "B";
+    case "circleYellow":
+      return "Y";
+    case "circleGreen":
+      return "G";
+    case "heightLow":
+      return "Lo";
+    case "heightHigh":
+      return "Hi";
+    case "board4":
+      return "4";
+    case "board6":
+      return "6";
+    case "board8":
+      return "8";
+    default:
+      return "";
+  }
+}
+
+function versionLabel(version: MoveRecordingVersion): string {
+  return `v${version.versionNumber}`;
 }
 
 function recordingHasReplayableBaseReference(detail: RecordingDetail | null | undefined): boolean {
@@ -1763,6 +1834,17 @@ export default function App() {
   const [recordLabel, setRecordLabel] = useState("");
   const [recordInputMode, setRecordInputMode] = useState<RecordingInputMode>("auto");
   const [liveArmSource, setLiveArmSource] = useState<LiveArmSource>("leader");
+  const [proMoveCategory, setProMoveCategory] = useState<MoveCategory | "all">("all");
+  const [selectedProMoveId, setSelectedProMoveId] = useState("");
+  const [selectedProVersionId, setSelectedProVersionId] = useState("");
+  const [proRecordingType, setProRecordingType] = useState<BetaRecordingType>("keyboardControl");
+  const [proRecordDistanceSensors, setProRecordDistanceSensors] = useState(true);
+  const [proRecordInertialSensor, setProRecordInertialSensor] = useState(true);
+  const [proIncludeVexBaseSamples, setProIncludeVexBaseSamples] = useState(false);
+  const [proAutoVexPositioning, setProAutoVexPositioning] = useState(false);
+  const [proReturnToHold, setProReturnToHold] = useState(true);
+  const [proPlaybackSpeed, setProPlaybackSpeed] = useState(1);
+  const [proAdvancedOpen, setProAdvancedOpen] = useState(false);
   const [selectedRecording, setSelectedRecording] = useState<string>("");
   const [recordingNameDraft, setRecordingNameDraft] = useState("");
   const [trimStartDraft, setTrimStartDraft] = useState("0");
@@ -1907,6 +1989,50 @@ export default function App() {
   }, [chainRecordingPath, selectedRecording, state?.recordings]);
 
   useEffect(() => {
+    if (!state?.moveDefinitions.length) {
+      if (selectedProMoveId) {
+        setSelectedProMoveId("");
+        setSelectedProVersionId("");
+      }
+      return;
+    }
+
+    const activeMoves = state.moveDefinitions.filter((move) => !move.archived);
+    const stillExists = activeMoves.some((move) => move.id === selectedProMoveId);
+    if (!selectedProMoveId || !stillExists) {
+      setSelectedProMoveId(activeMoves[0]?.id ?? "");
+    }
+  }, [selectedProMoveId, state?.moveDefinitions]);
+
+  useEffect(() => {
+    if (!state || !selectedProMoveId) {
+      setSelectedProVersionId("");
+      return;
+    }
+    const versions = state.moveRecordingVersions
+      .filter((version) => version.moveId === selectedProMoveId)
+      .sort((left, right) => right.versionNumber - left.versionNumber);
+    const stillExists = versions.some((version) => version.id === selectedProVersionId);
+    if (!selectedProVersionId || !stillExists) {
+      setSelectedProVersionId(versions[0]?.id ?? "");
+    }
+  }, [selectedProMoveId, selectedProVersionId, state]);
+
+  useEffect(() => {
+    const move = state?.moveDefinitions.find((item) => item.id === selectedProMoveId);
+    if (!move) {
+      return;
+    }
+    setProRecordingType(move.defaultRecordingType);
+    setProRecordDistanceSensors(move.defaultSensorRecordingSettings.distanceSensors);
+    setProRecordInertialSensor(move.defaultSensorRecordingSettings.inertialSensor);
+    setProIncludeVexBaseSamples(move.defaultSensorRecordingSettings.includeVexBaseSamples);
+    setProAutoVexPositioning(move.defaultVexPositioningEnabled);
+    setProPlaybackSpeed(state?.settings.trajectories.defaultReplaySpeed ?? 1);
+    setProReturnToHold(Boolean(state?.activeArmHold));
+  }, [selectedProMoveId]);
+
+  useEffect(() => {
     if (!state) {
       return;
     }
@@ -1953,6 +2079,39 @@ export default function App() {
   const selectedRecordingEntry = useMemo<RecordingEntry | undefined>(
     () => state?.recordings.find((item) => item.path === selectedRecording),
     [selectedRecording, state?.recordings],
+  );
+  const proMoves = useMemo(
+    () =>
+      (state?.moveDefinitions ?? [])
+        .filter((move) => !move.archived)
+        .filter((move) => proMoveCategory === "all" || move.category === proMoveCategory),
+    [proMoveCategory, state?.moveDefinitions],
+  );
+  const selectedProMove = useMemo(
+    () => state?.moveDefinitions.find((move) => move.id === selectedProMoveId) ?? null,
+    [selectedProMoveId, state?.moveDefinitions],
+  );
+  const selectedProVersions = useMemo(
+    () =>
+      (state?.moveRecordingVersions ?? [])
+        .filter((version) => version.moveId === selectedProMoveId)
+        .sort((left, right) => right.versionNumber - left.versionNumber),
+    [selectedProMoveId, state?.moveRecordingVersions],
+  );
+  const selectedProVersion = useMemo(
+    () => selectedProVersions.find((version) => version.id === selectedProVersionId) ?? null,
+    [selectedProVersionId, selectedProVersions],
+  );
+  const proFavoriteVersion = useMemo(
+    () =>
+      selectedProMove?.favoriteVersionId
+        ? selectedProVersions.find((version) => version.id === selectedProMove.favoriteVersionId) ?? null
+        : null,
+    [selectedProMove, selectedProVersions],
+  );
+  const knownRecordingPaths = useMemo(
+    () => new Set((state?.recordings ?? []).map((recording) => recording.path)),
+    [state?.recordings],
   );
   const selectedRecordingIsDummy = Boolean(selectedRecordingEntry?.dummy || isDummyRecordingPath(selectedRecording));
   const selectedRecordingReplayOptions: RecordingReplayOptions = useMemo(() => {
@@ -2751,6 +2910,119 @@ export default function App() {
     if (next) {
       flashToast("Leader stale state resolved.");
     }
+  };
+
+  const handleStartProRecording = async () => {
+    if (!selectedProMove) {
+      flashToast("Select a move first.");
+      return;
+    }
+    const next = await mutate("start-pro-recording", "/api/recordings/start", {
+      method: "POST",
+      body: JSON.stringify({
+        label: selectedProMove.label,
+        inputMode: betaRecordingTypeToInputMode(proRecordingType),
+      }),
+    });
+    if (next) {
+      flashToast(`Recording ${selectedProMove.label}.`);
+    }
+  };
+
+  const handleStopProRecording = async () => {
+    const next = await mutate("stop-pro-recording", "/api/recordings/stop", {
+      method: "POST",
+    });
+    if (next) {
+      flashToast(proReturnToHold && state?.activeArmHold ? "Recording stopped; returning to hold." : "Recording stopped.");
+    }
+  };
+
+  const handleCreateProVersionFromSelectedRecording = async (markFavorite = false) => {
+    if (!selectedProMove) {
+      flashToast("Select a move first.");
+      return;
+    }
+    if (!selectedRecordingEntry) {
+      flashToast("Select a recording file to attach as a version.");
+      return;
+    }
+    const payload: CreateMoveRecordingVersionRequest = {
+      moveId: selectedProMove.id,
+      trajectoryPath: selectedRecordingEntry.path,
+      displayName: selectedRecordingEntry.name,
+      recordingType: proRecordingType,
+      playbackSpeed: proPlaybackSpeed,
+      vexBaseSamplesPresent: proIncludeVexBaseSamples,
+      distanceSensorSamplesPresent: proRecordDistanceSensors,
+      inertialSamplesPresent: proRecordInertialSensor,
+      autoVexPositioningEnabled: proAutoVexPositioning,
+      notes: "",
+      safetyStatus: controlAuthority?.safetyLatched ? "latched" : "unknown",
+      markFavorite,
+    };
+    const next = await mutate("create-pro-version", "/api/beta/recording-versions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast(markFavorite ? "Version saved and marked final." : "Version saved.");
+    }
+  };
+
+  const handleUpdateProVersion = async (
+    version: MoveRecordingVersion,
+    patch: UpdateMoveRecordingVersionRequest,
+  ) => {
+    const payload: UpdateMoveRecordingVersionRequest = patch;
+    const next = await mutate(`update-pro-version-${version.id}`, `/api/beta/recording-versions/${version.id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast("Version metadata saved.");
+    }
+  };
+
+  const handleMarkProFavorite = async (version: MoveRecordingVersion) => {
+    const payload: SetMoveFavoriteVersionRequest = {
+      moveId: version.moveId,
+      versionId: version.id,
+    };
+    const next = await mutate("mark-pro-favorite", "/api/beta/favorite-version", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast("Favorite version updated.");
+    }
+  };
+
+  const handleReplayProVersion = async (move: MoveDefinition, version: MoveRecordingVersion) => {
+    if (!version.trajectoryPath) {
+      flashToast("This version has no trajectory path.");
+      return;
+    }
+    const replay: ReplayRequest = {
+      trajectoryPath: version.trajectoryPath,
+      target: "pi",
+      vexReplayMode: move.defaultVexReplaySetting.replayMode,
+      homeMode: state?.activeArmHold ? "end" : "none",
+      speed: version.playbackSpeed,
+      autoVexPositioning: version.autoVexPositioningEnabled,
+      vexPositioningSpeed: DEFAULT_VEX_POSITIONING_SPEED,
+      vexPositioningTimeoutS: DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+      vexPositioningXyToleranceM: DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+      vexPositioningHeadingToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      vexPositioningXyTrimToleranceM: DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+      vexPositioningHeadingTrimToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
+      includeBase: move.defaultVexReplaySetting.includeBaseReplay && version.vexBaseSamplesPresent,
+      holdFinalS: state?.settings.trajectories.defaultHoldFinalS ?? 0.5,
+    };
+    await mutate("replay-pro-version", "/api/replays/start", {
+      method: "POST",
+      body: JSON.stringify(replay),
+    });
   };
 
   const handleSetArmHomeFromRecordingStart = async () => {
@@ -3787,6 +4059,8 @@ export default function App() {
               "Start or stop control, watch live output, and confirm the robot and leader are both ready."}
             {activeSection === "recordings" &&
               "Record follower motion on the Pi, replay saved trajectories, and pin them for reuse."}
+            {activeSection === "pro-recording" &&
+              "Record competition move versions, test them quickly, and mark one final version per move."}
             {activeSection === "pins" &&
               "Launch saved movements instantly from the dashboard or with keyboard shortcuts."}
             {activeSection === "training" &&
@@ -5382,6 +5656,285 @@ export default function App() {
                     Pin your frequent motions here so you can replay them with one click or a hotkey.
                   </div>
                 )}
+              </div>
+            </section>
+          )}
+
+          {activeSection === "pro-recording" && (
+            <section className="card stage-panel">
+              <div className="card-head">
+                <div>
+                  <p className="card-kicker">Pro Recording (beta)</p>
+                  <h2>Competition Move Versions</h2>
+                </div>
+                <p className="card-note">
+                  Pick a match move once, record or attach versions, test replay, then mark the current final version.
+                </p>
+              </div>
+
+              <div className="category-filter" role="tablist" aria-label="Move category filter">
+                {MOVE_CATEGORY_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    className={proMoveCategory === option.value ? "filter-button active" : "filter-button"}
+                    onClick={() => setProMoveCategory(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="pro-recording-layout">
+                <div className="pro-move-grid">
+                  {proMoves.map((move) => {
+                    const versions = (state?.moveRecordingVersions ?? []).filter((version) => version.moveId === move.id);
+                    const favorite = move.favoriteVersionId
+                      ? versions.find((version) => version.id === move.favoriteVersionId) ?? null
+                      : null;
+                    const favoriteBroken = Boolean(
+                      move.favoriteVersionId &&
+                        (!favorite?.trajectoryPath || !knownRecordingPaths.has(favorite.trajectoryPath)),
+                    );
+                    return (
+                      <button
+                        key={move.id}
+                        className={`move-tile ${selectedProMoveId === move.id ? "active" : ""} ${favoriteBroken ? "warn" : ""}`}
+                        onClick={() => setSelectedProMoveId(move.id)}
+                      >
+                        <span className={`move-icon ${move.colorToken}`}>{moveIconGlyph(move)}</span>
+                        <span className="move-tile-label">{move.label}</span>
+                        <span className="move-tile-meta">
+                          {MOVE_CATEGORY_LABELS[move.category]} • {versions.length} version{versions.length === 1 ? "" : "s"}
+                        </span>
+                        <span className="move-tile-state">
+                          {favorite ? "Final" : "No final"}
+                          {favoriteBroken ? " • Missing trajectory" : ""}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="replay-panel pro-recording-panel">
+                  {selectedProMove ? (
+                    <>
+                      <div className="card-head">
+                        <div>
+                          <p className="card-kicker">{MOVE_CATEGORY_LABELS[selectedProMove.category]}</p>
+                          <h3>{selectedProMove.label}</h3>
+                        </div>
+                        <span className={`status-pill ${proFavoriteVersion ? "good" : "muted"}`}>
+                          {proFavoriteVersion ? `final ${versionLabel(proFavoriteVersion)}` : "no final"}
+                        </span>
+                      </div>
+                      <p className="card-note">{selectedProMove.description}</p>
+
+                      <div className="mode-strip compact">
+                        <span className={`status-pill ${controlAuthority?.leaderPoseStale ? "warn" : "good"}`}>
+                          {controlAuthority?.leaderPoseStale ? "leader out of sync" : "leader sync clear"}
+                        </span>
+                        <p className="card-note">
+                          Active hold: {state?.activeArmHold?.name ?? "none"} • Pi: {state?.piReachable ? "ready" : "offline"} • VEX: {vexStatusLabel(state?.vexBrain)} • Arm: {armAuthorityLabel(controlAuthority?.arm)}
+                        </p>
+                      </div>
+
+                      <div className="version-list">
+                        {selectedProVersions.length ? (
+                          selectedProVersions.map((version) => {
+                            const missingPath = !version.trajectoryPath || !knownRecordingPaths.has(version.trajectoryPath);
+                            return (
+                              <button
+                                key={version.id}
+                                className={`version-row ${selectedProVersionId === version.id ? "active" : ""} ${missingPath ? "warn" : ""}`}
+                                onClick={() => setSelectedProVersionId(version.id)}
+                              >
+                                <span>{versionLabel(version)}</span>
+                                <strong>{version.displayName}</strong>
+                                <span>{BETA_RECORDING_TYPE_LABELS[version.recordingType]}</span>
+                                <span>{version.playbackSpeed.toFixed(2)}x</span>
+                                <span>{version.isFavorite ? "Final" : missingPath ? "Missing" : "Ready"}</span>
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <div className="empty-state">
+                            No versions yet. Record or attach the selected raw recording as the first version.
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="form-grid compact">
+                        <label>
+                          Recording type
+                          <select
+                            value={proRecordingType}
+                            onChange={(event) => setProRecordingType(event.target.value as BetaRecordingType)}
+                          >
+                            {selectedProMove.allowedRecordingTypes.map((type) => (
+                              <option key={type} value={type}>
+                                {BETA_RECORDING_TYPE_LABELS[type]}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Playback speed
+                          <input
+                            type="number"
+                            min="0.1"
+                            max="3"
+                            step="0.05"
+                            value={proPlaybackSpeed}
+                            onChange={(event) => setProPlaybackSpeed(Number(event.target.value))}
+                          />
+                        </label>
+                        <label>
+                          Attach raw recording
+                          <select
+                            value={selectedRecording}
+                            onChange={(event) => setSelectedRecording(event.target.value)}
+                          >
+                            {(state?.recordings ?? []).map((recording) => (
+                              <option key={recording.path} value={recording.path}>
+                                {recording.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="checkbox-row settings-toggle">
+                          <input
+                            type="checkbox"
+                            checked={proReturnToHold}
+                            onChange={(event) => setProReturnToHold(event.target.checked)}
+                          />
+                          <span>Return to active hold after stop</span>
+                        </label>
+                      </div>
+
+                      <details
+                        className="advanced-settings"
+                        open={proAdvancedOpen}
+                        onToggle={(event) => setProAdvancedOpen(event.currentTarget.open)}
+                      >
+                        <summary>Advanced recording metadata</summary>
+                        <div className="form-grid compact">
+                          <label className="checkbox-row settings-toggle">
+                            <input
+                              type="checkbox"
+                              checked={proRecordDistanceSensors}
+                              onChange={(event) => setProRecordDistanceSensors(event.target.checked)}
+                            />
+                            <span>Record distance sensors</span>
+                          </label>
+                          <label className="checkbox-row settings-toggle">
+                            <input
+                              type="checkbox"
+                              checked={proRecordInertialSensor}
+                              onChange={(event) => setProRecordInertialSensor(event.target.checked)}
+                            />
+                            <span>Record inertial sensor</span>
+                          </label>
+                          <label className="checkbox-row settings-toggle">
+                            <input
+                              type="checkbox"
+                              checked={proIncludeVexBaseSamples}
+                              onChange={(event) => setProIncludeVexBaseSamples(event.target.checked)}
+                            />
+                            <span>Include VEX base samples</span>
+                          </label>
+                          <label className="checkbox-row settings-toggle">
+                            <input
+                              type="checkbox"
+                              checked={proAutoVexPositioning}
+                              onChange={(event) => setProAutoVexPositioning(event.target.checked)}
+                            />
+                            <span>Auto VEX positioning on replay</span>
+                          </label>
+                        </div>
+                      </details>
+
+                      <div className="button-cluster inline">
+                        <button className="primary" disabled={disabled} onClick={() => void handleStartProRecording()}>
+                          Start Recording
+                        </button>
+                        <button disabled={pendingAction === "stop-pro-recording"} onClick={() => void handleStopProRecording()}>
+                          Stop Recording
+                        </button>
+                        <button disabled={pendingAction === "stop-pro-recording"} onClick={() => void handleStopProRecording()}>
+                          Stop and Return to Hold
+                        </button>
+                        <button disabled={disabled || !selectedRecordingEntry} onClick={() => void handleCreateProVersionFromSelectedRecording(false)}>
+                          Save as New Version
+                        </button>
+                        <button disabled={disabled || !selectedRecordingEntry} onClick={() => void handleCreateProVersionFromSelectedRecording(true)}>
+                          Save and Mark Final
+                        </button>
+                      </div>
+
+                      {selectedProVersion ? (
+                        <div className="selected-version-editor">
+                          <div className="form-grid compact">
+                            <label>
+                              Selected version name
+                              <input
+                                key={`${selectedProVersion.id}-name`}
+                                defaultValue={selectedProVersion.displayName}
+                                onBlur={(event) =>
+                                  void handleUpdateProVersion(selectedProVersion, {
+                                    displayName: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              Selected playback speed
+                              <input
+                                key={`${selectedProVersion.id}-speed`}
+                                type="number"
+                                min="0.1"
+                                max="3"
+                                step="0.05"
+                                defaultValue={selectedProVersion.playbackSpeed}
+                                onBlur={(event) =>
+                                  void handleUpdateProVersion(selectedProVersion, {
+                                    playbackSpeed: Number(event.target.value),
+                                  })
+                                }
+                              />
+                            </label>
+                            <label className="form-grid-wide">
+                              Notes
+                              <textarea
+                                key={`${selectedProVersion.id}-notes`}
+                                defaultValue={selectedProVersion.notes}
+                                rows={2}
+                                onBlur={(event) =>
+                                  void handleUpdateProVersion(selectedProVersion, {
+                                    notes: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                          </div>
+                          <div className="button-cluster inline">
+                            <button
+                              className="primary"
+                              disabled={disabled || !selectedProVersion.trajectoryPath}
+                              onClick={() => void handleReplayProVersion(selectedProMove, selectedProVersion)}
+                            >
+                              Replay Selected Version
+                            </button>
+                            <button disabled={disabled} onClick={() => void handleMarkProFavorite(selectedProVersion)}>
+                              Mark Favorite/Final
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="empty-state">Select a move tile to start recording versions.</div>
+                  )}
+                </div>
               </div>
             </section>
           )}
