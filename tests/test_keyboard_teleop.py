@@ -61,24 +61,33 @@ def build_targets(**overrides: float) -> dict[str, float]:
 class KeyboardTeleopTests(unittest.TestCase):
     def test_base_keyboard_mapping_matches_documented_vex_controls(self) -> None:
         forward_left_turn_left = keyboard_teleop.build_base_action(
-            {"i", "j", "u"},
+            {"arrow_up", "arrow_left", "o"},
             linear_speed=0.04,
             turn_speed=12.0,
         )
 
-        self.assertEqual(forward_left_turn_left["x.vel"], -0.04)
+        self.assertEqual(forward_left_turn_left["x.vel"], 0.04)
         self.assertEqual(forward_left_turn_left["y.vel"], 0.04)
         self.assertEqual(forward_left_turn_left["theta.vel"], -12.0)
 
         back_right_turn_right = keyboard_teleop.build_base_action(
-            {"k", "l", "o"},
+            {"arrow_down", "arrow_right", "p"},
             linear_speed=0.04,
             turn_speed=12.0,
         )
 
-        self.assertEqual(back_right_turn_right["x.vel"], 0.04)
+        self.assertEqual(back_right_turn_right["x.vel"], -0.04)
         self.assertEqual(back_right_turn_right["y.vel"], -0.04)
         self.assertEqual(back_right_turn_right["theta.vel"], 12.0)
+
+    def test_legacy_letter_base_keys_remain_fallback_not_primary(self) -> None:
+        legacy = keyboard_teleop.build_base_action(
+            {"i", "l", "u"},
+            linear_speed=0.04,
+            turn_speed=12.0,
+        )
+
+        self.assertEqual(legacy, {"x.vel": 0.04, "y.vel": 0.04, "theta.vel": -12.0})
 
     def test_base_keyboard_single_keys_are_axis_isolated_and_speed_limited(self) -> None:
         requested_linear_speed = 0.35
@@ -87,28 +96,28 @@ class KeyboardTeleopTests(unittest.TestCase):
         turn_limit = keyboard_teleop.KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS
 
         forward = keyboard_teleop.build_base_action(
-            {"i"},
+            {"arrow_up"},
             linear_speed=requested_linear_speed,
             turn_speed=requested_turn_speed,
         )
         self.assertEqual(forward, {"x.vel": 0.0, "y.vel": linear_limit, "theta.vel": 0.0})
 
         back = keyboard_teleop.build_base_action(
-            {"k"},
+            {"arrow_down"},
             linear_speed=requested_linear_speed,
             turn_speed=requested_turn_speed,
         )
         self.assertEqual(back, {"x.vel": 0.0, "y.vel": -linear_limit, "theta.vel": 0.0})
 
         turn_left = keyboard_teleop.build_base_action(
-            {"u"},
+            {"o"},
             linear_speed=requested_linear_speed,
             turn_speed=requested_turn_speed,
         )
         self.assertEqual(turn_left, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": -turn_limit})
 
         turn_right = keyboard_teleop.build_base_action(
-            {"o"},
+            {"p"},
             linear_speed=requested_linear_speed,
             turn_speed=requested_turn_speed,
         )
@@ -120,19 +129,19 @@ class KeyboardTeleopTests(unittest.TestCase):
         initial_ratio = keyboard_teleop.KEYBOARD_BASE_INITIAL_SPEED_RATIO
 
         first = ramp.update(
-            {"i"},
+            {"arrow_up"},
             linear_speed=0.35,
             turn_speed=90.0,
             now_s=10.0,
         )
         halfway = ramp.update(
-            {"i"},
+            {"arrow_up"},
             linear_speed=0.35,
             turn_speed=90.0,
             now_s=10.0 + keyboard_teleop.KEYBOARD_BASE_ACCELERATION_S / 2.0,
         )
         fully_ramped = ramp.update(
-            {"i"},
+            {"arrow_up"},
             linear_speed=0.35,
             turn_speed=90.0,
             now_s=10.0 + keyboard_teleop.KEYBOARD_BASE_ACCELERATION_S,
@@ -147,7 +156,7 @@ class KeyboardTeleopTests(unittest.TestCase):
 
         ramp.update(set(), linear_speed=0.35, turn_speed=90.0, now_s=13.0)
         reset = ramp.update(
-            {"i"},
+            {"arrow_up"},
             linear_speed=0.35,
             turn_speed=90.0,
             now_s=14.0,
@@ -158,8 +167,8 @@ class KeyboardTeleopTests(unittest.TestCase):
         mode = keyboard_teleop.VexControlModeState("drive")
         self.assertEqual(
             mode.speed_pair(
-                drive_linear_speed=0.35,
-                drive_turn_speed=90.0,
+            drive_linear_speed=0.35,
+            drive_turn_speed=90.0,
                 ecu_linear_speed=0.06,
                 ecu_turn_speed=18.0,
             ),
@@ -189,13 +198,101 @@ class KeyboardTeleopTests(unittest.TestCase):
         )
 
         drive_action = keyboard_teleop.build_base_action(
-            {"i", "o"},
+            {"arrow_up", "p"},
             linear_speed=0.35,
             turn_speed=90.0,
             linear_speed_limit=0.35,
             turn_speed_limit=90.0,
         )
         self.assertEqual(drive_action, {"x.vel": 0.0, "y.vel": 0.35, "theta.vel": 90.0})
+
+    def test_direction_calibration_signs_transform_keyboard_base_only(self) -> None:
+        signs = keyboard_teleop.normalize_keyboard_direction_calibration(
+            '{"xSign": -1, "ySign": -1, "thetaSign": -1}'
+        )
+
+        calibrated = keyboard_teleop.build_base_action(
+            {"arrow_left", "arrow_up", "p"},
+            linear_speed=0.04,
+            turn_speed=12.0,
+            direction_signs=signs,
+        )
+
+        self.assertEqual(calibrated, {"x.vel": -0.04, "y.vel": -0.04, "theta.vel": -12.0})
+
+    def test_default_direction_calibration_is_neutral(self) -> None:
+        signs = keyboard_teleop.normalize_keyboard_direction_calibration("{}")
+        neutral = keyboard_teleop.build_base_action(
+            {"arrow_left", "arrow_up", "p"},
+            linear_speed=0.04,
+            turn_speed=12.0,
+            direction_signs=signs,
+        )
+
+        self.assertEqual(neutral, {"x.vel": 0.04, "y.vel": 0.04, "theta.vel": 12.0})
+
+    def test_leader_mode_ignores_keyboard_arm_input(self) -> None:
+        joint = "arm_shoulder_pan.pos"
+        limiter = keyboard_teleop.JointDirectionLimiter({})
+        targets = build_targets(**{joint: 0.0})
+        observed = build_targets(**{joint: 0.0})
+        limiter.seed(observed)
+
+        next_targets = keyboard_teleop.apply_arm_authority(
+            targets,
+            observed,
+            {"q"},
+            {"q"},
+            0.5,
+            {},
+            limiter,
+            keyboard_arm_input_enabled=False,
+            leader_arm_action={joint: 22.0},
+        )
+
+        self.assertEqual(next_targets[joint], 22.0)
+
+    def test_keyboard_mode_ignores_leader_when_leader_authority_absent(self) -> None:
+        joint = "arm_shoulder_pan.pos"
+        limiter = keyboard_teleop.JointDirectionLimiter({})
+        targets = build_targets(**{joint: 0.0})
+        observed = build_targets(**{joint: 0.0})
+        limiter.seed(observed)
+
+        next_targets = keyboard_teleop.apply_arm_authority(
+            targets,
+            observed,
+            {"q"},
+            {"q"},
+            0.5,
+            {},
+            limiter,
+            keyboard_arm_input_enabled=True,
+            leader_arm_action=None,
+        )
+
+        self.assertGreater(next_targets[joint], targets[joint])
+
+    def test_hold_or_base_only_mode_blocks_keyboard_arm_input(self) -> None:
+        joint = "arm_shoulder_pan.pos"
+        limiter = keyboard_teleop.JointDirectionLimiter({})
+        targets = build_targets(**{joint: 7.0})
+        observed = build_targets(**{joint: 7.0})
+        limiter.seed(observed)
+
+        next_targets = keyboard_teleop.apply_arm_authority(
+            targets,
+            observed,
+            {"q"},
+            {"q"},
+            0.5,
+            {},
+            limiter,
+            keyboard_arm_input_enabled=False,
+            leader_arm_action=None,
+        )
+
+        self.assertEqual(next_targets[joint], 7.0)
 
     def test_direction_lock_blocks_outward_motion_but_allows_reverse(self) -> None:
         joint = "arm_shoulder_lift.pos"

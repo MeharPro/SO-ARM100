@@ -10,6 +10,8 @@ import type {
   RecordingReplayOptions,
   StoredConfig,
   TrainingConfig,
+  VexDirectionSign,
+  VexManualIdleStoppingMode,
 } from "./types.js";
 import { normalizeTrainingConfig } from "./trainingUtils.js";
 
@@ -186,6 +188,13 @@ export class ConfigStore {
             ...this.defaults.settings.vex.tuning,
             ...raw.settings?.vex?.tuning,
           },
+          keyboardCalibration: {
+            ...this.defaults.settings.vex.keyboardCalibration,
+            ...raw.settings?.vex?.keyboardCalibration,
+          },
+          manualIdleStoppingMode:
+            raw.settings?.vex?.manualIdleStoppingMode ??
+            this.defaults.settings.vex.manualIdleStoppingMode,
         },
       });
       return {
@@ -217,7 +226,7 @@ export class ConfigStore {
       vexReplayMode: raw?.vexReplayMode === "drive" ? "drive" : "ecu",
       homeMode: this.normalizeHomeMode(raw?.homeMode),
       speed: this.normalizeReplaySpeed(raw?.speed),
-      autoVexPositioning: raw?.autoVexPositioning === false ? false : true,
+      autoVexPositioning: raw?.autoVexPositioning === true,
       vexPositioningSpeed: this.normalizeVexPositioningSpeed(raw?.vexPositioningSpeed),
       vexPositioningTimeoutS: this.normalizeVexPositioningTimeout(raw?.vexPositioningTimeoutS),
       vexPositioningXyToleranceM: this.normalizeVexPositioningXyTolerance(
@@ -266,7 +275,7 @@ export class ConfigStore {
       vexReplayMode: raw?.vexReplayMode === "drive" ? "drive" : "ecu",
       homeMode: target === "pi" ? this.normalizeHomeMode(raw?.homeMode) : "none",
       speed: this.normalizeReplaySpeed(raw?.speed),
-      autoVexPositioning: target === "pi" ? raw?.autoVexPositioning !== false : false,
+      autoVexPositioning: target === "pi" ? raw?.autoVexPositioning === true : false,
       vexPositioningSpeed:
         target === "pi"
           ? this.normalizeVexPositioningSpeed(raw?.vexPositioningSpeed)
@@ -361,6 +370,14 @@ export class ConfigStore {
     );
   }
 
+  private normalizeVexDirectionSign(value: unknown): VexDirectionSign {
+    return Number(value) === -1 ? -1 : 1;
+  }
+
+  private normalizeManualIdleStoppingMode(value: unknown): VexManualIdleStoppingMode {
+    return value === "brake" || value === "coast" ? value : "hold";
+  }
+
   private normalizeBoundedNumber(
     value: unknown,
     fallback: number,
@@ -417,7 +434,7 @@ export class ConfigStore {
       normalized[path] = {
         homeMode: this.normalizeHomeMode(candidate.homeMode),
         speed: this.normalizeReplaySpeed(candidate.speed, defaultReplaySpeed),
-        autoVexPositioning: candidate.autoVexPositioning === false ? false : true,
+        autoVexPositioning: candidate.autoVexPositioning === true,
         vexPositioningSpeed: this.normalizeVexPositioningSpeed(candidate.vexPositioningSpeed),
         vexPositioningTimeoutS: this.normalizeVexPositioningTimeout(candidate.vexPositioningTimeoutS),
         vexPositioningXyToleranceM: this.normalizeVexPositioningXyTolerance(
@@ -514,6 +531,23 @@ export class ConfigStore {
           maxLinearSpeedMps: Math.min(2, Math.max(0.05, Number(normalized.vex.tuning.maxLinearSpeedMps) || 0.35)),
           maxTurnSpeedDps: Math.min(360, Math.max(5, Number(normalized.vex.tuning.maxTurnSpeedDps) || 90)),
         },
+        keyboardCalibration: {
+          xSign: this.normalizeVexDirectionSign(normalized.vex.keyboardCalibration?.xSign),
+          ySign: this.normalizeVexDirectionSign(normalized.vex.keyboardCalibration?.ySign),
+          thetaSign: this.normalizeVexDirectionSign(normalized.vex.keyboardCalibration?.thetaSign),
+          calibratedAtIso:
+            typeof normalized.vex.keyboardCalibration?.calibratedAtIso === "string" &&
+            normalized.vex.keyboardCalibration.calibratedAtIso.trim()
+              ? normalized.vex.keyboardCalibration.calibratedAtIso.trim()
+              : null,
+          notes:
+            typeof normalized.vex.keyboardCalibration?.notes === "string"
+              ? normalized.vex.keyboardCalibration.notes.slice(0, 500)
+              : "",
+        },
+        manualIdleStoppingMode: this.normalizeManualIdleStoppingMode(
+          normalized.vex.manualIdleStoppingMode,
+        ),
       },
     };
   }

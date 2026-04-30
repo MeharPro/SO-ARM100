@@ -45,6 +45,7 @@ import type {
   AppSettings,
   BenchmarkPolicyRequest,
   ChainLink,
+  ControlAuthorityState,
   CreatePinnedMoveRequest,
   DashboardState,
   DeployTrainingCheckpointRequest,
@@ -59,6 +60,7 @@ import type {
   RenameRecordingRequest,
   RecordingEntry,
   RecordingReplayOptions,
+  ResolveLeaderStaleRequest,
   ResetRecordingUltrasonicPositionRequest,
   ReplayRequest,
   RobotSensorState,
@@ -70,6 +72,7 @@ import type {
   SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
+  StartControlRequest,
   StartPolicyEvalRequest,
   StartRecordingRequest,
   StartTrainingCaptureRequest,
@@ -231,7 +234,7 @@ function normalizeReplayRequest(
         : "none",
     speed: normalizeReplaySpeed(payload.speed, defaults),
     autoVexPositioning:
-      target === "pi" && !startsMidRecording ? payload.autoVexPositioning !== false : false,
+      target === "pi" && !startsMidRecording ? payload.autoVexPositioning === true : false,
     vexPositioningSpeed:
       target === "pi"
         ? normalizeVexPositioningSpeed(payload.vexPositioningSpeed)
@@ -302,7 +305,7 @@ function normalizeRecordingReplayOptions(
   return {
     homeMode: normalizeHomeMode(value?.homeMode),
     speed: normalizeReplaySpeed(value?.speed, defaults),
-    autoVexPositioning: value?.autoVexPositioning === false ? false : true,
+    autoVexPositioning: value?.autoVexPositioning === true,
     vexPositioningSpeed: normalizeVexPositioningSpeed(value?.vexPositioningSpeed),
     vexPositioningTimeoutS: normalizeVexPositioningTimeout(value?.vexPositioningTimeoutS),
     vexPositioningXyToleranceM: normalizeVexPositioningXyTolerance(
@@ -327,7 +330,7 @@ function recordingReplayOptionsAreDefault(
   return (
     value.homeMode === "none" &&
     Math.abs(value.speed - defaults.defaultReplaySpeed) < 0.000001 &&
-    value.autoVexPositioning &&
+    !value.autoVexPositioning &&
     Math.abs(value.vexPositioningSpeed - DEFAULT_VEX_POSITIONING_SPEED) < 0.000001 &&
     Math.abs(value.vexPositioningTimeoutS - DEFAULT_VEX_POSITIONING_TIMEOUT_S) < 0.000001 &&
     Math.abs(value.vexPositioningXyToleranceM - DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M) < 0.000001 &&
@@ -450,6 +453,8 @@ export class RobotController {
     | null = null;
   private replayControlRestoreInFlight: Promise<void> | null = null;
   private activeArmHold: ActiveArmHold | null = null;
+  private leaderPoseStale = false;
+  private leaderPoseStaleReason: string | null = null;
   private cachedVexBrainStatus: VexBrainStatus = {
     connected: false,
     telemetryActive: false,
@@ -525,6 +530,15 @@ export class RobotController {
       this.localReplayRunner.getSnapshot(),
       warmHostReplaySnapshot,
     );
+    const effectiveReplaySnapshot = this.pickServiceSnapshot(
+      replaySnapshot,
+      this.localReplayRunner.getSnapshot(),
+      warmHostReplaySnapshot,
+    );
+    const effectiveDatasetCaptureSnapshot = this.pickServiceSnapshot(
+      datasetCaptureSnapshot,
+      this.localDatasetCaptureRunner.getSnapshot(),
+    );
 
     return {
       settings,
@@ -532,6 +546,15 @@ export class RobotController {
       chainLinks: visibleChainLinks,
       homePosition,
       activeArmHold: this.activeArmHold,
+      controlAuthority: this.buildControlAuthorityState(
+        leader,
+        vexBrain,
+        hostSnapshot,
+        teleopSnapshot,
+        effectiveReplaySnapshot,
+        this.piCalibrationRunner.getSnapshot(),
+        this.macCalibrationRunner.getSnapshot(),
+      ),
       recordingReplayOptions,
       training: {
         ...training,
@@ -549,17 +572,10 @@ export class RobotController {
       services: {
         host: hostSnapshot,
         teleop: teleopSnapshot,
-        replay: this.pickServiceSnapshot(
-          replaySnapshot,
-          this.localReplayRunner.getSnapshot(),
-          warmHostReplaySnapshot,
-        ),
+        replay: effectiveReplaySnapshot,
         piCalibration: this.piCalibrationRunner.getSnapshot(),
         macCalibration: this.macCalibrationRunner.getSnapshot(),
-        datasetCapture: this.pickServiceSnapshot(
-          datasetCaptureSnapshot,
-          this.localDatasetCaptureRunner.getSnapshot(),
-        ),
+        datasetCapture: effectiveDatasetCaptureSnapshot,
         datasetSync: this.datasetSyncRunner.getSnapshot(),
         training: this.trainingRunner.getSnapshot(),
         deployment: this.deploymentRunner.getSnapshot(),
@@ -567,6 +583,137 @@ export class RobotController {
         policyEval: this.policyEvalRunner.getSnapshot(),
       },
     };
+  }
+
+  private buildControlAuthorityState(
+    leader: LeaderStatus,
+    vexBrain: VexBrainStatus,
+    hostSnapshot: ServiceSnapshot,
+    teleopSnapshot: ServiceSnapshot,
+    replaySnapshot: ServiceSnapshot,
+    piCalibrationSnapshot: ServiceSnapshot,
+    macCalibrationSnapshot: ServiceSnapshot,
+  ): ControlAuthorityState {
+    const hostMode = hostSnapshot.mode;
+    const teleopMode = teleopSnapshot.mode;
+    const replayRunning = replaySnapshot.state === "running" || replaySnapshot.state === "starting";
+    const keyboardCaptureActive =
+      teleopSnapshot.state === "running" || teleopSnapshot.state === "starting";
+    const safetyLatched = false;
+    let arm: ControlAuthorityState["arm"] = "none";
+    let base: ControlAuthorityState["base"] = "none";
+
+    if (piCalibrationSnapshot.state === "running" || macCalibrationSnapshot.state === "running") {
+      arm = "calibration";
+    } else if (replayRunning) {
+      arm = "replay";
+    } else if (hostMode === "recording") {
+      arm = hostSnapshot.meta.recordingInputMode === "free-teach" ? "handGuide" : "recording";
+    } else if (this.activeArmHold && teleopSnapshot.meta.armInput === "disabled") {
+      arm = "holdPose";
+    } else if (hostSnapshot.meta.armSource === "leader" || teleopSnapshot.meta.armSource === "leader") {
+      arm = "leader";
+    } else if (hostSnapshot.meta.armSource === "keyboard" || teleopSnapshot.meta.armSource === "keyboard") {
+      arm = "keyboard";
+    } else if (this.activeArmHold) {
+      arm = "holdPose";
+    }
+
+    if (replayRunning && replaySnapshot.meta.autoVexPositioning === true) {
+      base = "vexPreposition";
+    } else if (replayRunning && replaySnapshot.meta.includeBase === true) {
+      base = "vexReplay";
+    } else if (keyboardCaptureActive) {
+      base = "keyboard";
+    } else if (hostSnapshot.meta.vexLiveBaseControl === true || vexBrain.telemetryActive) {
+      base = "vexController";
+    } else if (this.activeArmHold) {
+      base = "hold";
+    }
+
+    return {
+      arm,
+      base,
+      activeHoldId: this.activeArmHold?.pinnedMoveId ?? null,
+      activeHoldName: this.activeArmHold?.name ?? null,
+      leaderConnected: leader.connected,
+      keyboardCaptureActive,
+      vexTelemetryActive: vexBrain.telemetryActive,
+      safetyLatched,
+      leaderPoseStale: this.leaderPoseStale,
+      leaderPoseStaleReason: this.leaderPoseStaleReason,
+      speedPreset:
+        teleopSnapshot.meta.vexControlMode === "ecu" || hostSnapshot.meta.vexControlMode === "ecu"
+          ? "ecu"
+          : "drive",
+    };
+  }
+
+  private markLeaderPoseStale(reason: string): void {
+    this.leaderPoseStale = true;
+    this.leaderPoseStaleReason = reason;
+    this.logActivity(`Leader pose marked stale: ${reason}`);
+  }
+
+  private clearLeaderPoseStale(reason: string): void {
+    if (this.leaderPoseStale) {
+      this.logActivity(`Leader stale state cleared: ${reason}`);
+    }
+    this.leaderPoseStale = false;
+    this.leaderPoseStaleReason = null;
+  }
+
+  private assertLeaderPoseFresh(action: string): void {
+    if (!this.leaderPoseStale) {
+      return;
+    }
+    throw new Error(
+      `${action} is blocked because the leader pose is stale (${this.leaderPoseStaleReason ?? "follower moved outside leader authority"}). Choose a safe leader transition first: sync leader to follower, move follower to leader, or stay in keyboard/follower mode and discard leader authority.`,
+    );
+  }
+
+  private normalizePinnedReplay(replay: ReplayRequest, holdArmPose: boolean): ReplayRequest {
+    if (!holdArmPose) {
+      return replay;
+    }
+    if (replay.target !== "pi") {
+      throw new Error("Arm hold pins must target the Pi follower.");
+    }
+    return {
+      ...replay,
+      target: "pi",
+      homeMode: "none",
+      includeBase: false,
+      autoVexPositioning: false,
+      vexReplayMode: "ecu",
+    };
+  }
+
+  private normalizeLiveArmSource(
+    requested: unknown,
+    leaderConnected: boolean,
+  ): "leader" | "keyboard" | "none" {
+    if (this.activeArmHold) {
+      return "none";
+    }
+    if (requested === "leader") {
+      if (!leaderConnected) {
+        throw new Error("Leader arm source was requested, but the leader arm is not connected.");
+      }
+      this.assertLeaderPoseFresh("Leader arm control");
+      return "leader";
+    }
+    if (requested === "keyboard") {
+      return "keyboard";
+    }
+    if (requested === "none") {
+      return "none";
+    }
+    if (leaderConnected) {
+      this.assertLeaderPoseFresh("Leader arm control");
+      return "leader";
+    }
+    return "keyboard";
   }
 
   private buildDummyRecordingEntries(): RecordingEntry[] {
@@ -1221,15 +1368,24 @@ export class RobotController {
     });
   }
 
-  async startControl(): Promise<DashboardState> {
+  async startControl(payload: StartControlRequest = {}): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
-      this.logActivity("Keyboard + Leader control requested.");
+      this.logActivity("Live control requested.");
       const leader = await this.getLeaderStatus(settings);
+      const armSource = this.normalizeLiveArmSource(payload?.armSource, leader.connected);
+      const leaderArmActive = armSource === "leader";
+      const keyboardArmActive = armSource === "keyboard";
+      if (keyboardArmActive) {
+        this.markLeaderPoseStale("keyboard arm authority selected for live control");
+      }
       if (leader.connected) {
         this.logActivity(leader.message);
       } else {
-        this.logActivity(`Leader unavailable; starting keyboard backup only. ${leader.message}`);
+        this.logActivity(`Leader unavailable; starting keyboard arm/base control. ${leader.message}`);
+      }
+      if (this.activeArmHold && armSource === "none") {
+        this.logActivity(`Live control will keep arm input disabled while holding ${this.activeArmHold.name}.`);
       }
       const host = await this.preparePi(settings, "start control");
 
@@ -1264,9 +1420,12 @@ export class RobotController {
         "control",
         {
           host,
-          input: leader.connected ? "keyboard+leader" : "keyboard",
+          input: leaderArmActive ? "leader+keyboard-base" : keyboardArmActive ? "keyboard" : "base-only",
           keyboardBackup: true,
-          leaderPort: leader.connected ? leader.expectedPort : null,
+          leaderPort: leaderArmActive ? leader.expectedPort : null,
+          armSource,
+          armInput: armSource === "none" ? "disabled" : "enabled",
+          vexLiveBaseControl: true,
         },
       );
 
@@ -1277,17 +1436,25 @@ export class RobotController {
             settings,
             host,
             keyboardJointLimitsJson,
-            leader.connected ? leader : null,
+            leaderArmActive ? leader : null,
+            { armSource },
           ),
           "control",
           {
             host,
-            input: leader.connected ? "keyboard+leader" : "keyboard",
+            input: leaderArmActive ? "leader+keyboard-base" : keyboardArmActive ? "keyboard" : "base-only",
             keyboardBackup: true,
-            leaderPort: leader.connected ? leader.expectedPort : null,
+            leaderPort: leaderArmActive ? leader.expectedPort : null,
+            armSource,
+            armInput: armSource === "none" ? "disabled" : "enabled",
+            vexControlMode: "drive",
           },
         );
-        await this.waitForLocalProcessReady("Keyboard + Leader teleop", this.teleopRunner, 2500);
+        await this.waitForLocalProcessReady(
+          leaderArmActive ? "Leader arm + keyboard base teleop" : "Keyboard/base teleop",
+          this.teleopRunner,
+          2500,
+        );
       } catch (error) {
         await this.hostRunner.stop("Teleop failed to launch, stopping the Pi host.");
         throw error;
@@ -1308,11 +1475,17 @@ export class RobotController {
     });
   }
 
-  async startKeyboardControl(): Promise<DashboardState> {
+  async startKeyboardControl(payload: StartControlRequest = {}): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
-      this.logActivity("Keyboard + Leader backup control requested.");
+      this.logActivity("Keyboard/base control requested.");
       const leader = await this.getLeaderStatus(settings);
+      const armSource = this.normalizeLiveArmSource(payload?.armSource ?? "keyboard", leader.connected);
+      const leaderArmActive = armSource === "leader";
+      const keyboardArmActive = armSource === "keyboard";
+      if (keyboardArmActive) {
+        this.markLeaderPoseStale("keyboard arm authority selected for keyboard/base control");
+      }
       if (leader.connected) {
         this.logActivity(leader.message);
       }
@@ -1348,8 +1521,11 @@ export class RobotController {
           host,
           hotkeysArmed: true,
           keyboardBackup: true,
-          input: leader.connected ? "keyboard+leader" : "keyboard",
-          leaderPort: leader.connected ? leader.expectedPort : null,
+          input: leaderArmActive ? "leader+keyboard-base" : keyboardArmActive ? "keyboard" : "base-only",
+          leaderPort: leaderArmActive ? leader.expectedPort : null,
+          armSource,
+          armInput: armSource === "none" ? "disabled" : "enabled",
+          vexLiveBaseControl: true,
         },
       );
 
@@ -1360,16 +1536,24 @@ export class RobotController {
             settings,
             host,
             keyboardJointLimitsJson,
-            leader.connected ? leader : null,
+            leaderArmActive ? leader : null,
+            { armSource },
           ),
           "keyboard-control",
           {
             host,
-            input: leader.connected ? "keyboard+leader" : "keyboard",
-            leaderPort: leader.connected ? leader.expectedPort : null,
+            input: leaderArmActive ? "leader+keyboard-base" : keyboardArmActive ? "keyboard" : "base-only",
+            leaderPort: leaderArmActive ? leader.expectedPort : null,
+            armSource,
+            armInput: armSource === "none" ? "disabled" : "enabled",
+            vexControlMode: "drive",
           },
         );
-        await this.waitForLocalProcessReady("Keyboard + Leader backup teleop", this.teleopRunner, 2500);
+        await this.waitForLocalProcessReady(
+          leaderArmActive ? "Leader arm + keyboard base teleop" : "Keyboard/base teleop",
+          this.teleopRunner,
+          2500,
+        );
       } catch (error) {
         await this.teleopRunner.stop("Keyboard backup control failed to launch.");
         await this.hostRunner.stop("Keyboard backup control failed to launch.");
@@ -1422,6 +1606,23 @@ export class RobotController {
       `Pi connection reset complete. Closed ${closedRemoteClients} auxiliary SSH/SFTP ${closedRemoteClients === 1 ? "session" : "sessions"}.`,
     );
     return this.getState();
+  }
+
+  async resolveLeaderStale(payload: ResolveLeaderStaleRequest): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      if (payload.action === "discardLeaderAuthority") {
+        this.clearLeaderPoseStale("operator chose keyboard/follower mode and discarded leader authority");
+        this.lastError = null;
+        return this.getState();
+      }
+      if (payload.action === "syncLeaderToFollowerPose") {
+        throw new Error("Sync Leader to Follower Pose requires implementation and physical robot validation.");
+      }
+      if (payload.action === "moveFollowerToLeaderPose") {
+        throw new Error("Move Follower to Leader Pose requires implementation and physical robot validation.");
+      }
+      throw new Error("Choose a valid stale-leader transition.");
+    });
   }
 
   async emergencyStop(): Promise<DashboardState> {
@@ -1505,6 +1706,7 @@ export class RobotController {
       }
 
       this.logActivity("Go home requested.");
+      this.markLeaderPoseStale("follower moved with Go Home command");
       const host = await this.ensureCommandReadyHost(settings, "go home");
       await this.teleopRunner.stop(
         "Stopping live command stream before Go Home so the saved home pose holds.",
@@ -1689,7 +1891,20 @@ export class RobotController {
       const useKeyboardOnlyInput = requestedInputMode === "keyboard";
       this.logActivity(`Start recording requested${label ? ` (${label})` : ""}.`);
       const leader = useFreeTeachInput || useKeyboardOnlyInput ? null : await this.getLeaderStatus(settings);
-      const combinedInput = !useFreeTeachInput && leader?.connected ? "keyboard+leader" : "keyboard";
+      const combinedInput = !useFreeTeachInput && leader?.connected ? "leader+keyboard-base" : "keyboard";
+      const recordingArmSource =
+        useFreeTeachInput
+          ? "none"
+          : !useKeyboardOnlyInput && leader?.connected
+            ? "leader"
+            : "keyboard";
+      if (recordingArmSource === "leader") {
+        this.assertLeaderPoseFresh("Leader arm recording");
+      } else if (useFreeTeachInput) {
+        this.markLeaderPoseStale("follower hand-guide recording selected");
+      } else {
+        this.markLeaderPoseStale("keyboard arm recording selected");
+      }
       this.logActivity(
         `Recording input source: ${
           useFreeTeachInput
@@ -1697,7 +1912,7 @@ export class RobotController {
             : useKeyboardOnlyInput
               ? "keyboard controls only"
               : leader?.connected
-              ? "Keyboard + Leader controls"
+              ? "leader arm with keyboard base controls"
               : "keyboard controls; leader arm unavailable"
         }.`,
       );
@@ -1745,15 +1960,16 @@ export class RobotController {
         this.buildRecordScript(settings, trajectoryPath, label, recordingInput),
         this.toConnectConfig(settings, host),
         "recording",
-        {
-          host,
-          trajectoryPath,
-          label,
-          input: useFreeTeachInput ? "free-teach" : combinedInput,
-          recordingInputMode: recordingInput,
-          leaderPort: leader?.connected ? leader.expectedPort : null,
-        },
-      );
+          {
+            host,
+            trajectoryPath,
+            label,
+            input: useFreeTeachInput ? "free-teach" : combinedInput,
+            recordingInputMode: recordingInput,
+            armSource: recordingArmSource,
+            leaderPort: leader?.connected ? leader.expectedPort : null,
+          },
+        );
 
       try {
         await this.waitForHostReady(host, "Recorder");
@@ -1766,18 +1982,21 @@ export class RobotController {
               host,
               keyboardJointLimitsJson,
               !useKeyboardOnlyInput && leader?.connected ? leader : null,
+              { armSource: recordingArmSource === "leader" ? "leader" : "keyboard" },
             ),
             "recording",
             {
               host,
               input: useKeyboardOnlyInput ? "keyboard" : combinedInput,
               leaderPort: !useKeyboardOnlyInput && leader?.connected ? leader.expectedPort : null,
+              armSource: recordingArmSource,
+              vexControlMode: "drive",
             },
           );
           await this.waitForLocalProcessReady(
             useKeyboardOnlyInput || !leader?.connected
               ? "Keyboard-only recording teleop"
-              : "Keyboard + Leader recording teleop",
+              : "Leader arm + keyboard base recording teleop",
             this.teleopRunner,
             2500,
           );
@@ -1819,7 +2038,29 @@ export class RobotController {
         this.lastRecordingRefresh = Date.now();
       }
 
-      if (wasKeyboardRecording) {
+      if (this.activeArmHold && isFiniteHomePosition(this.activeArmHold.homePosition)) {
+        const holdReplay: ReplayRequest = {
+          trajectoryPath: this.activeArmHold.trajectoryPath,
+          target: "pi",
+          vexReplayMode: "ecu",
+          homeMode: "none",
+          speed: 1,
+          autoVexPositioning: false,
+          vexPositioningSpeed: DEFAULT_VEX_POSITIONING_SPEED,
+          vexPositioningTimeoutS: DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+          vexPositioningXyToleranceM: DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+          vexPositioningHeadingToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+          vexPositioningXyTrimToleranceM: DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+          vexPositioningHeadingTrimToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
+          includeBase: false,
+          holdFinalS: settings.trajectories.defaultHoldFinalS,
+        };
+        this.logActivity(`Returning to held arm pose ${this.activeArmHold.name} after recording.`);
+        await this.ensureCommandReadyHost(settings, "return to held arm pose after recording");
+        await this.startReplayLocked(holdReplay, this.activeArmHold.homePosition, {
+          returnToActiveHold: false,
+        });
+      } else if (wasKeyboardRecording) {
         const keyboardHost =
           host ?? (await this.preparePi(settings, "restore keyboard control after recording"));
         this.logActivity("Restoring keyboard backup control after keyboard recording.");
@@ -2176,6 +2417,9 @@ export class RobotController {
     if (replay.homeMode !== "none" && !isFiniteHomePosition(replayHomePosition)) {
       throw new Error("Set an arm home position before replaying with Go Home enabled.");
     }
+    if (replay.target === "pi") {
+      this.markLeaderPoseStale("Pi follower replay/preposition selected");
+    }
     this.logActivity(
       `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}${
         replay.target === "pi" ? ` (${replay.includeBase ? "VEX base + arm" : "arm only"})` : ""
@@ -2280,7 +2524,11 @@ export class RobotController {
   async createPinnedMove(payload: CreatePinnedMoveRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
       const config = this.configStore.getConfig();
-      const replay = normalizeReplayRequest(payload, config.settings.trajectories);
+      const holdArmPose = payload.holdArmPose === true;
+      const replay = this.normalizePinnedReplay(
+        normalizeReplayRequest(payload, config.settings.trajectories),
+        holdArmPose,
+      );
       this.logActivity(`Saving pinned move ${payload.name.trim() || replay.trajectoryPath}.`);
       const pinnedMoves = [
         ...config.pinnedMoves,
@@ -2288,7 +2536,7 @@ export class RobotController {
           id: crypto.randomUUID(),
           name: payload.name.trim(),
           keyBinding: payload.keyBinding.trim(),
-          holdArmPose: payload.holdArmPose === true,
+          holdArmPose,
           ...replay,
         },
       ];
@@ -2311,7 +2559,14 @@ export class RobotController {
         ...existing,
         ...payload,
       };
-      const replay = normalizeReplayRequest(merged, config.settings.trajectories);
+      const holdArmPose =
+        typeof payload.holdArmPose === "boolean"
+          ? payload.holdArmPose
+          : existing.holdArmPose;
+      const replay = this.normalizePinnedReplay(
+        normalizeReplayRequest(merged, config.settings.trajectories),
+        holdArmPose,
+      );
       const updated: PinnedMove = {
         id: existing.id,
         name:
@@ -2322,10 +2577,7 @@ export class RobotController {
           typeof payload.keyBinding === "string"
             ? payload.keyBinding.trim()
             : existing.keyBinding,
-        holdArmPose:
-          typeof payload.holdArmPose === "boolean"
-            ? payload.holdArmPose
-            : existing.holdArmPose,
+        holdArmPose,
         ...replay,
       };
 
@@ -2700,9 +2952,14 @@ export class RobotController {
     const allowLeader = options.allowLeader !== false;
     const leader = allowLeader ? await this.getLeaderStatus(settings) : null;
     if (leader?.connected) {
+      this.assertLeaderPoseFresh("Leader arm control restore");
       this.logActivity(leader.message);
     }
     const leaderConnected = Boolean(leader?.connected);
+    const armSource = options.disableArmInput ? "none" : leaderConnected ? "leader" : "keyboard";
+    if (armSource === "keyboard") {
+      this.markLeaderPoseStale("keyboard arm authority selected for restored control");
+    }
 
     await this.clearRemoteHostCommand(settings, host);
     await this.hostRunner.start(
@@ -2716,9 +2973,11 @@ export class RobotController {
         host,
         hotkeysArmed: true,
         keyboardBackup: true,
-        input: leaderConnected ? "keyboard+leader" : "keyboard",
+        input: leaderConnected ? "leader+keyboard-base" : armSource === "keyboard" ? "keyboard" : "base-only",
         leaderPort: leaderConnected ? leader?.expectedPort : null,
+        armSource,
         armInput: options.disableArmInput ? "disabled" : "enabled",
+        vexLiveBaseControl: true,
         ...meta,
       },
     );
@@ -2731,19 +2990,21 @@ export class RobotController {
           host,
           keyboardJointLimitsJson,
           leaderConnected ? leader : null,
-          { disableArmInput: Boolean(options.disableArmInput) },
+          { disableArmInput: Boolean(options.disableArmInput), armSource },
         ),
         "keyboard-control",
         {
           host,
-          input: leaderConnected ? "keyboard+leader" : "keyboard",
+          input: leaderConnected ? "leader+keyboard-base" : armSource === "keyboard" ? "keyboard" : "base-only",
           leaderPort: leaderConnected ? leader?.expectedPort : null,
+          armSource,
           armInput: options.disableArmInput ? "disabled" : "enabled",
+          vexControlMode: "drive",
           ...meta,
         },
       );
       await this.waitForLocalProcessReady(
-        leaderConnected ? "Keyboard + Leader backup teleop" : "Keyboard backup teleop",
+        leaderConnected ? "Leader arm + keyboard base teleop" : "Keyboard/base teleop",
         this.teleopRunner,
         2500,
       );
@@ -2898,7 +3159,7 @@ export class RobotController {
       this.logActivity(
         restoreKeyboardOnly
           ? `Replay finished; restoring keyboard-only base control while holding ${this.activeArmHold?.name}.`
-          : `Replay finished; restoring Keyboard + Leader control for ${restore.trajectoryPath}.`,
+          : `Replay finished; restoring explicit control for ${restore.trajectoryPath}.`,
       );
       const host = await this.preparePi(settings, "restore keyboard base after replay");
       await this.startKeyboardControlSession(
@@ -3039,7 +3300,7 @@ export class RobotController {
     host: string,
     jointLimitsJson: string,
     leader?: LeaderStatus | null,
-    options: { disableArmInput?: boolean } = {},
+    options: { disableArmInput?: boolean; armSource?: "leader" | "keyboard" | "none" } = {},
   ): string {
     assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
     const ecuLinearSpeed = KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS;
@@ -3059,6 +3320,8 @@ export class RobotController {
       `  --drive-base-turn-speed ${driveTurnSpeed} \\`,
       `  --initial-vex-control-mode drive \\`,
       `  --leader-port ${shellQuote(leader?.expectedPort ?? "off")} \\`,
+      `  --arm-source ${shellQuote(options.armSource ?? (leader ? "leader" : "keyboard"))} \\`,
+      `  --vex-keyboard-calibration-json ${shellQuote(JSON.stringify(settings.vex.keyboardCalibration))} \\`,
       `  --joint-limits-json ${shellQuote(jointLimitsJson)}${options.disableArmInput ? " \\\n  --disable-arm-input" : ""}`,
     ].join("\n");
   }
@@ -3122,6 +3385,8 @@ export class RobotController {
       inertial: structuredClone(settings.vex.inertial),
       motors: structuredClone(settings.vex.motors),
       controls: structuredClone(settings.vex.controls),
+      keyboardCalibration: structuredClone(settings.vex.keyboardCalibration),
+      manualIdleStoppingMode: settings.vex.manualIdleStoppingMode,
       tuning: {
         ...structuredClone(settings.vex.tuning),
         ecuLinearSpeedMps: KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,

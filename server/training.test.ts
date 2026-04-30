@@ -76,6 +76,7 @@ test("config store defaults legacy pinned moves to Pi replay", () => {
 
   assert.equal(loaded.pinnedMoves[0]?.target, "pi");
   assert.equal(loaded.pinnedMoves[0]?.vexReplayMode, "ecu");
+  assert.equal(loaded.pinnedMoves[0]?.autoVexPositioning, false);
   assert.equal(loaded.pinnedMoves[0]?.holdArmPose, false);
   assert.equal(loaded.pinnedMoves[1]?.holdArmPose, true);
 });
@@ -112,6 +113,14 @@ test("config store upgrades untouched legacy VEX forward axis default", () => {
   assert.equal(loaded.settings.vex.controls.forwardAxis, "axis3");
   assert.equal(loaded.settings.vex.controls.strafeAxis, "axis4");
   assert.equal(loaded.settings.vex.controls.turnAxis, "axis1");
+  assert.deepEqual(loaded.settings.vex.keyboardCalibration, {
+    xSign: 1,
+    ySign: 1,
+    thetaSign: 1,
+    calibratedAtIso: null,
+    notes: "",
+  });
+  assert.equal(loaded.settings.vex.manualIdleStoppingMode, "hold");
 });
 
 test("config store preserves recording replay speed and auto VEX positioning", () => {
@@ -160,7 +169,7 @@ test("config store preserves recording replay speed and auto VEX positioning", (
   assert.deepEqual(loaded.recordingReplayOptions["/home/pi/lekiwi-trajectories/legacy.json"], {
     homeMode: "end",
     speed: defaultConfig.settings.trajectories.defaultReplaySpeed,
-    autoVexPositioning: true,
+    autoVexPositioning: false,
     vexPositioningSpeed: 1,
     vexPositioningTimeoutS: 8,
     vexPositioningXyToleranceM: 0.02,
@@ -209,6 +218,49 @@ test("config store normalizes chain-links with safe confirmation defaults", () =
   assert.equal(loaded.chainLinks[0]?.items[0]?.homeMode, "both");
   assert.equal(loaded.chainLinks[0]?.items[0]?.speed, 0.7);
   assert.equal(loaded.chainLinks[0]?.items[0]?.autoVexPositioning, false);
+});
+
+test("config store validates VEX keyboard calibration and braking mode", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "robot-arm-config-"));
+  const configDir = path.join(tempRoot, ".lekiwi-ui");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      settings: {
+        ...defaultConfig.settings,
+        vex: {
+          ...defaultConfig.settings.vex,
+          keyboardCalibration: {
+            xSign: -1,
+            ySign: 99,
+            thetaSign: "-1",
+            calibratedAtIso: "2026-04-29T23:00:00.000Z",
+            notes: "field test",
+          },
+          manualIdleStoppingMode: "brake",
+        },
+      },
+      pinnedMoves: [],
+      training: defaultConfig.training,
+    }),
+  );
+
+  const store = new ConfigStore(defaultConfig, tempRoot);
+  const loaded = store.getConfig();
+
+  assert.deepEqual(loaded.settings.vex.keyboardCalibration, {
+    xSign: -1,
+    ySign: 1,
+    thetaSign: -1,
+    calibratedAtIso: "2026-04-29T23:00:00.000Z",
+    notes: "field test",
+  });
+  assert.equal(loaded.settings.vex.manualIdleStoppingMode, "brake");
+
+  loaded.settings.vex.manualIdleStoppingMode = "coast";
+  const saved = store.saveSettings(loaded.settings);
+  assert.equal(saved.settings.vex.manualIdleStoppingMode, "coast");
 });
 
 test("training profile validation rejects unsupported camera modes", () => {

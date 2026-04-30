@@ -111,6 +111,14 @@ DEFAULT_VEX_CONTROL_CONFIG = {
         "ecuLinearSpeedMps": KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
         "ecuTurnSpeedDps": KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
     },
+    "keyboardCalibration": {
+        "xSign": 1,
+        "ySign": 1,
+        "thetaSign": 1,
+        "calibratedAtIso": None,
+        "notes": "",
+    },
+    "manualIdleStoppingMode": "hold",
 }
 
 
@@ -267,6 +275,7 @@ def normalize_vex_control_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     motors = payload.get("motors") if isinstance(payload.get("motors"), dict) else {}
     controls = payload.get("controls") if isinstance(payload.get("controls"), dict) else {}
     tuning = payload.get("tuning") if isinstance(payload.get("tuning"), dict) else {}
+    keyboard_calibration = payload.get("keyboardCalibration") if isinstance(payload.get("keyboardCalibration"), dict) else {}
 
     def port_value(group: dict[str, Any], key: str, fallback: int) -> int:
         candidate = group.get(key)
@@ -293,6 +302,12 @@ def normalize_vex_control_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     def bool_value(group: dict[str, Any], key: str, fallback: bool) -> bool:
         candidate = group.get(key, fallback)
         return bool(candidate)
+
+    def sign_value(group: dict[str, Any], key: str, fallback: int) -> int:
+        return -1 if group.get(key, fallback) in {-1, -1.0, "-1"} else 1
+
+    def stopping_mode_value(value: Any, fallback: str) -> str:
+        return value if value in {"hold", "brake", "coast"} else fallback
 
     def float_value(group: dict[str, Any], key: str, fallback: float, low: float, high: float) -> float:
         candidate = group.get(key, fallback)
@@ -374,6 +389,21 @@ def normalize_vex_control_config(raw: dict[str, Any] | None) -> dict[str, Any]:
                 360.0,
             ),
         },
+        "keyboardCalibration": {
+            "xSign": sign_value(keyboard_calibration, "xSign", defaults["keyboardCalibration"]["xSign"]),
+            "ySign": sign_value(keyboard_calibration, "ySign", defaults["keyboardCalibration"]["ySign"]),
+            "thetaSign": sign_value(keyboard_calibration, "thetaSign", defaults["keyboardCalibration"]["thetaSign"]),
+            "calibratedAtIso": keyboard_calibration.get("calibratedAtIso")
+            if isinstance(keyboard_calibration.get("calibratedAtIso"), str)
+            else defaults["keyboardCalibration"]["calibratedAtIso"],
+            "notes": keyboard_calibration.get("notes")
+            if isinstance(keyboard_calibration.get("notes"), str)
+            else defaults["keyboardCalibration"]["notes"],
+        },
+        "manualIdleStoppingMode": stopping_mode_value(
+            payload.get("manualIdleStoppingMode"),
+            defaults["manualIdleStoppingMode"],
+        ),
     }
 
 

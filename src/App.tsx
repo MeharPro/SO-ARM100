@@ -9,6 +9,7 @@ import type {
   DashboardState,
   DeleteRecordingRequest,
   DuplicateRecordingRequest,
+  LiveArmSource,
   MarkRecordingGyroZeroRequest,
   PinnedMove,
   RecordingDetail,
@@ -18,6 +19,7 @@ import type {
   ReplayTarget,
   RecordingInputMode,
   RecordingEntry,
+  ResolveLeaderStaleRequest,
   RenameRecordingRequest,
   RecordingTimelinePoint,
   ResetRecordingUltrasonicPositionRequest,
@@ -26,10 +28,13 @@ import type {
   SetRecordingReplayOptionsRequest,
   ServiceSnapshot,
   ServoCalibrationRequest,
+  StartControlRequest,
   TrainingArtifact,
   TrainingProfile,
   TrimRecordingRequest,
   UpdatePinnedMoveRequest,
+  VexDirectionSign,
+  VexManualIdleStoppingMode,
   VexReplayMode,
 } from "./types";
 
@@ -771,6 +776,54 @@ function vexStatusLabel(vexBrain: DashboardState["vexBrain"] | null | undefined)
     return vexBrain.source === "replay" ? "replay" : "ready";
   }
   return "detected";
+}
+
+function armAuthorityLabel(authority: DashboardState["controlAuthority"]["arm"] | null | undefined): string {
+  switch (authority) {
+    case "leader":
+      return "Leader arm";
+    case "keyboard":
+      return "Keyboard arm";
+    case "handGuide":
+      return "Hand-guide";
+    case "holdPose":
+      return "Hold pose";
+    case "recording":
+      return "Recording";
+    case "replay":
+      return "Replay";
+    case "goHome":
+      return "Go home";
+    case "calibration":
+      return "Calibration";
+    case "emergencyStop":
+      return "Emergency stop";
+    case "none":
+    default:
+      return "None";
+  }
+}
+
+function baseAuthorityLabel(authority: DashboardState["controlAuthority"]["base"] | null | undefined): string {
+  switch (authority) {
+    case "keyboard":
+      return "Keyboard base";
+    case "vexController":
+      return "VEX controller";
+    case "vexReplay":
+      return "VEX replay";
+    case "vexPreposition":
+      return "VEX preposition";
+    case "hold":
+      return "Base available";
+    case "none":
+    default:
+      return "None";
+  }
+}
+
+function signLabel(sign: VexDirectionSign): string {
+  return sign === -1 ? "Invert" : "Neutral";
 }
 
 function recordingHasReplayableBaseReference(detail: RecordingDetail | null | undefined): boolean {
@@ -1709,6 +1762,7 @@ export default function App() {
   const [trainingDirty, setTrainingDirty] = useState(false);
   const [recordLabel, setRecordLabel] = useState("");
   const [recordInputMode, setRecordInputMode] = useState<RecordingInputMode>("auto");
+  const [liveArmSource, setLiveArmSource] = useState<LiveArmSource>("leader");
   const [selectedRecording, setSelectedRecording] = useState<string>("");
   const [recordingNameDraft, setRecordingNameDraft] = useState("");
   const [trimStartDraft, setTrimStartDraft] = useState("0");
@@ -1906,7 +1960,7 @@ export default function App() {
     return {
       homeMode: savedOptions?.homeMode ?? "none",
       speed: savedOptions?.speed ?? state?.settings.trajectories.defaultReplaySpeed ?? 1,
-      autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+      autoVexPositioning: savedOptions?.autoVexPositioning ?? false,
       vexPositioningSpeed: savedOptions?.vexPositioningSpeed ?? DEFAULT_VEX_POSITIONING_SPEED,
       vexPositioningTimeoutS:
         savedOptions?.vexPositioningTimeoutS ?? DEFAULT_VEX_POSITIONING_TIMEOUT_S,
@@ -2387,6 +2441,8 @@ export default function App() {
     state?.services.host.state === "running" && state.services.host.mode === "control";
   const hasArmHomePosition = Boolean(state?.homePosition);
   const recordingUltrasonicResetReady = Boolean(selectedRecordingEntry);
+  const controlAuthority = state?.controlAuthority;
+  const effectiveLiveArmSource: LiveArmSource = state?.activeArmHold ? "none" : liveArmSource;
 
   const activeSectionMeta = useMemo(
     () => SECTIONS.find((section) => section.key === activeSection) ?? SECTIONS[0],
@@ -2660,6 +2716,40 @@ export default function App() {
     });
     if (next) {
       flashToast("Arm moved home.");
+    }
+  };
+
+  const handleStartLiveControl = async (endpoint: "start-control" | "start-keyboard-control") => {
+    const armSource = state?.activeArmHold ? "none" : liveArmSource;
+    const payload: StartControlRequest = {
+      armSource,
+      baseSource: "keyboard",
+    };
+    const next = await mutate(endpoint, `/api/robot/${endpoint}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast(
+        armSource === "leader"
+          ? "Leader arm and keyboard base control started."
+          : armSource === "keyboard"
+            ? "Keyboard arm and keyboard base control started."
+            : "Base-only keyboard control started while arm input stays disabled.",
+      );
+    }
+  };
+
+  const handleResolveLeaderStale = async (
+    action: ResolveLeaderStaleRequest["action"],
+  ) => {
+    const payload: ResolveLeaderStaleRequest = { action };
+    const next = await mutate("resolve-leader-stale", "/api/robot/leader-stale/resolve", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast("Leader stale state resolved.");
     }
   };
 
@@ -3338,7 +3428,7 @@ export default function App() {
       vexReplayMode: "ecu",
       homeMode: savedOptions?.homeMode ?? "none",
       speed: savedOptions?.speed ?? defaultSpeed,
-      autoVexPositioning: savedOptions?.autoVexPositioning ?? true,
+      autoVexPositioning: savedOptions?.autoVexPositioning ?? false,
       vexPositioningSpeed: savedOptions?.vexPositioningSpeed ?? DEFAULT_VEX_POSITIONING_SPEED,
       vexPositioningTimeoutS:
         savedOptions?.vexPositioningTimeoutS ?? DEFAULT_VEX_POSITIONING_TIMEOUT_S,
@@ -3729,17 +3819,36 @@ export default function App() {
                   <h2>Connect and Control</h2>
                 </div>
                 <p className="card-note">
-                  The backend retries the Pi five times, auto-detects a single attached leader-arm port when the scripted path is stale, and streams the action output below.
+                  The backend keeps arm authority single-owner, leaves keyboard base control available during hold, and streams action output below.
                 </p>
+              </div>
+
+              <div className="form-grid compact">
+                <label>
+                  Live arm authority
+                  <select
+                    value={effectiveLiveArmSource}
+                    disabled={disabled || Boolean(state?.activeArmHold)}
+                    onChange={(event) => setLiveArmSource(event.target.value as LiveArmSource)}
+                  >
+                    <option value="leader">Leader arm</option>
+                    <option value="keyboard">Keyboard arm</option>
+                    <option value="none">Base only / held arm</option>
+                  </select>
+                </label>
+                <label>
+                  Base authority
+                  <input value="Keyboard VEX base (arrow keys + O/P)" readOnly />
+                </label>
               </div>
 
               <div className="button-cluster">
                 <button
                   className="primary"
                   disabled={disabled}
-                  onClick={() => void mutate("start-control", "/api/robot/start-control", { method: "POST" })}
+                  onClick={() => void handleStartLiveControl("start-control")}
                 >
-                  Start Keyboard + Leader
+                  Start Live Control
                 </button>
                 <button
                   disabled={disabled}
@@ -3759,19 +3868,15 @@ export default function App() {
                 </button>
                 <button
                   disabled={disabled || keyboardBackupActive}
-                  onClick={() =>
-                    void mutate("start-keyboard-control", "/api/robot/start-keyboard-control", {
-                      method: "POST",
-                    })
-                  }
+                  onClick={() => void handleStartLiveControl("start-keyboard-control")}
                 >
-                  Start Keyboard + Leader Backup
+                  Start Keyboard/Base Control
                 </button>
                 <button
                   disabled={disabled || hotkeysArmed}
                   onClick={() => void mutate("start-hotkeys", "/api/robot/start-hotkeys", { method: "POST" })}
                 >
-                  Arm Hotkeys
+                  Prime Pi for Pinned Moves
                 </button>
                 <button
                   disabled={disabled}
@@ -3793,12 +3898,74 @@ export default function App() {
                   Emergency Stop + Torque Off
                 </button>
               </div>
+              <div className="authority-grid">
+                <article className="status-card">
+                  <div className="status-card-head">
+                    <h3>Arm Authority</h3>
+                    <span className={`status-pill ${controlAuthority?.arm === "none" ? "muted" : "good"}`}>
+                      {armAuthorityLabel(controlAuthority?.arm)}
+                    </span>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Leader stale</dt>
+                      <dd>{controlAuthority?.leaderPoseStale ? controlAuthority.leaderPoseStaleReason ?? "stale" : "clear"}</dd>
+                    </div>
+                    <div>
+                      <dt>Active hold</dt>
+                      <dd>{controlAuthority?.activeHoldName ?? "none"}</dd>
+                    </div>
+                  </dl>
+                </article>
+                <article className="status-card">
+                  <div className="status-card-head">
+                    <h3>Base Authority</h3>
+                    <span className={`status-pill ${controlAuthority?.base === "none" ? "muted" : "good"}`}>
+                      {baseAuthorityLabel(controlAuthority?.base)}
+                    </span>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Speed preset</dt>
+                      <dd>{controlAuthority?.speedPreset ?? "drive"}</dd>
+                    </div>
+                    <div>
+                      <dt>Safety latch</dt>
+                      <dd>{controlAuthority?.safetyLatched ? "latched" : "clear"}</dd>
+                    </div>
+                  </dl>
+                </article>
+              </div>
+              {controlAuthority?.leaderPoseStale ? (
+                <div className="mode-strip warn-strip">
+                  <span className="status-pill warn">leader stale</span>
+                  <div className="stale-actions">
+                    <p className="card-note">
+                      Leader arm control is blocked until the operator chooses a transition. Sync and move-to-leader need robot validation before they can be enabled.
+                    </p>
+                    <div className="button-cluster inline">
+                      <button
+                        disabled={disabled}
+                        onClick={() => void handleResolveLeaderStale("discardLeaderAuthority")}
+                      >
+                        Stay Keyboard/Follower
+                      </button>
+                      <button disabled title="Requires implementation and physical robot validation.">
+                        Sync Leader to Follower
+                      </button>
+                      <button disabled title="Requires implementation and physical robot validation.">
+                        Move Follower to Leader
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
               <div className="mode-strip">
                 <span className={`status-pill ${keyboardBackupActive ? "good" : "muted"}`}>
-                  {keyboardBackupActive ? "keyboard + leader live" : "keyboard backup off"}
+                  {keyboardBackupActive ? "keyboard capture live" : "keyboard capture off"}
                 </span>
                 <p className="card-note">
-                  Keyboard and leader can run together. Arm: <code>Q/A</code> shoulder pan, <code>W/S</code> shoulder lift, <code>E/D</code> elbow, <code>R/F</code> wrist flex, <code>T/G</code> wrist roll, <code>Z/X</code> gripper. Base: <code>I/K</code> forward/back, <code>J/L</code> strafe, <code>U/O</code> turn. Press <code>0</code> to toggle Drive/ECU speed, <code>Esc</code> to stop keyboard capture, or use Stop Control here.
+                  One arm source is active at a time. Keyboard arm keys: <code>Q/A</code>, <code>W/S</code>, <code>E/D</code>, <code>R/F</code>, <code>T/G</code>, <code>Z/X</code>. Contest base: <code>ArrowUp/ArrowDown</code> forward/back, <code>ArrowLeft/ArrowRight</code> strafe, <code>O/P</code> rotate, <code>0</code> toggles speed, <code>Esc</code> stops keyboard capture.
                 </p>
               </div>
               <div className="mode-strip">
@@ -4140,8 +4307,8 @@ export default function App() {
                     disabled={disabled}
                   >
                     <option value="auto">Auto (Leader if connected)</option>
-                    <option value="leader">Leader + Keyboard</option>
-                    <option value="keyboard">Keyboard only</option>
+                    <option value="leader">Leader arm + keyboard base</option>
+                    <option value="keyboard">Keyboard arm + keyboard base</option>
                     <option value="free-teach">Hand-guide</option>
                   </select>
                 </label>
@@ -5863,6 +6030,102 @@ export default function App() {
                             tuning: {
                               ...settingsDraft.vex.tuning,
                               maxTurnSpeedDps: Number(event.target.value),
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      Manual X direction
+                      <select
+                        value={settingsDraft.vex.keyboardCalibration.xSign}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            keyboardCalibration: {
+                              ...settingsDraft.vex.keyboardCalibration,
+                              xSign: Number(event.target.value) === -1 ? -1 : 1,
+                            },
+                          })
+                        }
+                      >
+                        {[1, -1].map((value) => (
+                          <option key={value} value={value}>
+                            {signLabel(value as VexDirectionSign)} X
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Manual Y direction
+                      <select
+                        value={settingsDraft.vex.keyboardCalibration.ySign}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            keyboardCalibration: {
+                              ...settingsDraft.vex.keyboardCalibration,
+                              ySign: Number(event.target.value) === -1 ? -1 : 1,
+                            },
+                          })
+                        }
+                      >
+                        {[1, -1].map((value) => (
+                          <option key={value} value={value}>
+                            {signLabel(value as VexDirectionSign)} Y
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Manual theta direction
+                      <select
+                        value={settingsDraft.vex.keyboardCalibration.thetaSign}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            keyboardCalibration: {
+                              ...settingsDraft.vex.keyboardCalibration,
+                              thetaSign: Number(event.target.value) === -1 ? -1 : 1,
+                            },
+                          })
+                        }
+                      >
+                        {[1, -1].map((value) => (
+                          <option key={value} value={value}>
+                            {signLabel(value as VexDirectionSign)} theta
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Manual idle stopping
+                      <select
+                        value={settingsDraft.vex.manualIdleStoppingMode}
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            manualIdleStoppingMode: event.target.value as VexManualIdleStoppingMode,
+                          })
+                        }
+                      >
+                        <option value="hold">Hold</option>
+                        <option value="brake">Brake</option>
+                        <option value="coast">Coast</option>
+                      </select>
+                    </label>
+                    <label className="form-grid-wide">
+                      Direction calibration notes
+                      <input
+                        value={settingsDraft.vex.keyboardCalibration.notes}
+                        placeholder="Robot validation notes"
+                        onChange={(event) =>
+                          updateSettingsField("vex", {
+                            ...settingsDraft.vex,
+                            keyboardCalibration: {
+                              ...settingsDraft.vex.keyboardCalibration,
+                              notes: event.target.value,
+                              calibratedAtIso: new Date().toISOString(),
                             },
                           })
                         }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import time
@@ -46,6 +47,10 @@ KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS = 18.0
 VEX_DRIVE_CONTROL_MODE = "drive"
 VEX_ECU_CONTROL_MODE = "ecu"
 VEX_CONTROL_MODES = (VEX_DRIVE_CONTROL_MODE, VEX_ECU_CONTROL_MODE)
+ARM_SOURCE_LEADER = "leader"
+ARM_SOURCE_KEYBOARD = "keyboard"
+ARM_SOURCE_NONE = "none"
+ARM_SOURCES = (ARM_SOURCE_LEADER, ARM_SOURCE_KEYBOARD, ARM_SOURCE_NONE)
 KEYBOARD_BASE_INITIAL_SPEED_RATIO = 0.25
 KEYBOARD_BASE_ACCELERATION_S = 2.5
 LIMIT_LOCK_ERROR_DEG = 2.0
@@ -75,12 +80,17 @@ MAC_VK_TO_KEY = {
     29: "0",
     31: "o",
     32: "u",
+    35: "p",
     34: "i",
     37: "l",
     38: "j",
     40: "k",
     45: "n",
     53: "esc",
+    123: "arrow_left",
+    124: "arrow_right",
+    125: "arrow_down",
+    126: "arrow_up",
 }
 
 QUARTZ_EVENT_SOURCE_IDS = tuple(
@@ -102,9 +112,9 @@ ARM_BINDINGS = (
 )
 
 BASE_BINDINGS = (
-    ("x.vel", ("l",), ("j",)),
-    ("y.vel", ("i",), ("k",)),
-    ("theta.vel", ("o",), ("u",)),
+    ("x.vel", ("arrow_left", "l"), ("arrow_right", "j")),
+    ("y.vel", ("arrow_up", "i"), ("arrow_down", "k")),
+    ("theta.vel", ("p",), ("o", "u")),
 )
 CONTROL_KEYS = {
     "esc",
@@ -139,6 +149,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--leader-id", default=os.getenv("LEKIWI_LEADER_ID", "leader"))
     parser.add_argument("--joint-limits-json", default="{}")
     parser.add_argument("--disable-arm-input", action="store_true")
+    parser.add_argument("--arm-source", choices=ARM_SOURCES, default=ARM_SOURCE_KEYBOARD)
+    parser.add_argument("--vex-keyboard-calibration-json", default="{}")
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--connect-timeout-s", type=int, default=10)
     return parser.parse_args()
@@ -174,6 +186,24 @@ def finite_positive(value: float | None, fallback: float) -> float:
     if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) > 0.0:
         return float(value)
     return float(fallback)
+
+
+def _normalize_direction_sign(value: object) -> float:
+    return -1.0 if value == -1 or value == -1.0 or value == "-1" else 1.0
+
+
+def normalize_keyboard_direction_calibration(raw_json: str | None) -> dict[str, float]:
+    try:
+        payload = json.loads(raw_json or "{}")
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "x.vel": _normalize_direction_sign(payload.get("xSign", 1)),
+        "y.vel": _normalize_direction_sign(payload.get("ySign", 1)),
+        "theta.vel": _normalize_direction_sign(payload.get("thetaSign", 1)),
+    }
 
 
 def keyboard_arm_active(pressed: set[str]) -> bool:
@@ -520,6 +550,7 @@ def build_base_action(
     axis_speed_scales: dict[str, float] | None = None,
     linear_speed_limit: float = KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
     turn_speed_limit: float = KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
+    direction_signs: dict[str, float] | None = None,
 ) -> dict[str, float]:
     limited_linear_speed = clamp_keyboard_base_speed(
         linear_speed,
@@ -533,6 +564,7 @@ def build_base_action(
         axis: axis_from_keys(pressed, positive_keys, negative_keys)
         * (limited_turn_speed if axis == "theta.vel" else limited_linear_speed)
         * clamp_unit_interval((axis_speed_scales or {}).get(axis, 1.0))
+        * (direction_signs or {}).get(axis, 1.0)
         for axis, positive_keys, negative_keys in BASE_BINDINGS
     }
 
@@ -551,6 +583,7 @@ class KeyboardBaseRamp:
         now_s: float,
         linear_speed_limit: float = KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS,
         turn_speed_limit: float = KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS,
+        direction_signs: dict[str, float] | None = None,
     ) -> dict[str, float]:
         scales: dict[str, float] = {}
         active_axes: set[str] = set()
@@ -585,6 +618,7 @@ class KeyboardBaseRamp:
             axis_speed_scales=scales,
             linear_speed_limit=linear_speed_limit,
             turn_speed_limit=turn_speed_limit,
+            direction_signs=direction_signs,
         )
 
 
@@ -621,6 +655,35 @@ def update_arm_targets(
     return next_targets
 
 
+def apply_arm_authority(
+    arm_targets: dict[str, float],
+    observed_positions: dict[str, float],
+    pressed: set[str],
+    newly_pressed: set[str],
+    dt_s: float,
+    position_limits: dict[str, tuple[float, float]],
+    direction_limiter: JointDirectionLimiter,
+    *,
+    keyboard_arm_input_enabled: bool,
+    leader_arm_action: dict[str, float] | None,
+) -> dict[str, float]:
+    if leader_arm_action is not None:
+        next_targets = dict(arm_targets)
+        next_targets.update(leader_arm_action)
+        return next_targets
+    if keyboard_arm_input_enabled:
+        return update_arm_targets(
+            arm_targets,
+            observed_positions,
+            pressed,
+            newly_pressed,
+            dt_s,
+            position_limits,
+            direction_limiter,
+        )
+    return dict(arm_targets)
+
+
 def summarize_action(action: dict[str, float]) -> str:
     arm_summary = " ".join(
         f"{joint.removeprefix('arm_')}={action[joint]:7.2f}"
@@ -634,9 +697,11 @@ def summarize_action(action: dict[str, float]) -> str:
 
 
 def print_controls(leader_enabled: bool, mode: str, arm_input_enabled: bool = True) -> None:
-    label = "Keyboard + Leader teleop" if leader_enabled else "Keyboard backup teleop"
+    label = "Leader arm + keyboard base teleop" if leader_enabled else "Keyboard teleop"
     print(f"{label} is live. VEX base mode: {mode.upper()}.", flush=True)
-    if arm_input_enabled:
+    if leader_enabled:
+        print("Arm: leader arm owns the follower; keyboard arm keys are ignored.", flush=True)
+    elif arm_input_enabled:
         print(
             "Arm: Q/A shoulder pan, W/S shoulder lift, E/D elbow, "
             "R/F wrist flex (also Y/H), T/G wrist roll, Z/X gripper (also C/V and B/N).",
@@ -645,7 +710,8 @@ def print_controls(leader_enabled: bool, mode: str, arm_input_enabled: bool = Tr
     else:
         print("Arm: locked at the current target; keyboard arm keys are ignored.", flush=True)
     print(
-        "Base: I/K forward-back (Y), J/L left-right (X), U/O turn. "
+        "Base: ArrowUp/ArrowDown forward-back (Y), ArrowLeft/ArrowRight strafe (X), O/P rotate. "
+        "Legacy I/K and J/L are fallback translation keys; U is legacy rotate-left. "
         "Press 0 to toggle Drive/ECU speed, Esc to stop keyboard capture.",
         flush=True,
     )
@@ -668,14 +734,19 @@ def main() -> None:
     leader = None
     leader_connected = False
     leader_mapper = LeaderActionMapper()
-    leader_requested = str(args.leader_port or "off").strip().lower() != "off"
     keyboard_connected = False
     ecu_linear_speed = finite_positive(args.base_linear_speed, KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS)
     ecu_turn_speed = finite_positive(args.base_turn_speed, KEYBOARD_BASE_TURN_SPEED_LIMIT_DPS)
     drive_linear_speed = finite_positive(args.drive_base_linear_speed, ecu_linear_speed)
     drive_turn_speed = finite_positive(args.drive_base_turn_speed, ecu_turn_speed)
     mode_state = VexControlModeState(args.initial_vex_control_mode)
-    arm_input_enabled = not bool(args.disable_arm_input)
+    configured_arm_source = ARM_SOURCE_NONE if args.disable_arm_input else args.arm_source
+    keyboard_arm_input_enabled = configured_arm_source == ARM_SOURCE_KEYBOARD
+    leader_requested = (
+        configured_arm_source == ARM_SOURCE_LEADER
+        and str(args.leader_port or "off").strip().lower() != "off"
+    )
+    direction_signs = normalize_keyboard_direction_calibration(args.vex_keyboard_calibration_json)
 
     loop_idx = 0
     last_loop_t = time.perf_counter()
@@ -720,6 +791,9 @@ def main() -> None:
                 raise
             print("[keyboard] capture unavailable; leader arm remains live.", flush=True)
 
+        if configured_arm_source == ARM_SOURCE_LEADER and not leader_connected:
+            print("[leader] requested but unavailable; arm input remains disabled for safety.", flush=True)
+
         if not keyboard_connected and not leader_connected:
             raise SystemExit(
                 "Neither keyboard capture nor the leader arm started. On macOS, grant Input Monitoring/Accessibility access to the terminal/app running this process, or connect the leader arm."
@@ -730,15 +804,15 @@ def main() -> None:
         direction_limiter = JointDirectionLimiter(position_limits)
         direction_limiter.seed(observed_arm_positions)
         next_observation_poll_t = time.perf_counter()
-        print_controls(leader_connected, mode_state.mode, arm_input_enabled)
+        print_controls(leader_connected, mode_state.mode, keyboard_arm_input_enabled)
 
         while keyboard.is_connected or leader_connected:
             loop_start_t = time.perf_counter()
             pressed = keyboard.get_pressed() if keyboard.is_connected else set()
             newly_pressed = pressed - last_pressed
             last_pressed = pressed
-            arm_pressed = pressed if arm_input_enabled else set()
-            arm_newly_pressed = newly_pressed if arm_input_enabled else set()
+            arm_pressed = pressed if keyboard_arm_input_enabled else set()
+            arm_newly_pressed = newly_pressed if keyboard_arm_input_enabled else set()
             dt_s = max(loop_start_t - last_loop_t, 0.0)
             last_loop_t = loop_start_t
             if mode_state.update(newly_pressed):
@@ -771,20 +845,17 @@ def main() -> None:
                     leader = None
                     leader_connected = False
 
-            if not arm_input_enabled:
-                pass
-            elif leader_arm_action is not None and not keyboard_arm_active(pressed):
-                arm_targets.update(leader_arm_action)
-            else:
-                arm_targets = update_arm_targets(
-                    arm_targets,
-                    observed_arm_positions,
-                    arm_pressed,
-                    arm_newly_pressed,
-                    dt_s,
-                    position_limits,
-                    direction_limiter,
-                )
+            arm_targets = apply_arm_authority(
+                arm_targets,
+                observed_arm_positions,
+                arm_pressed,
+                arm_newly_pressed,
+                dt_s,
+                position_limits,
+                direction_limiter,
+                keyboard_arm_input_enabled=keyboard_arm_input_enabled,
+                leader_arm_action=leader_arm_action,
+            )
 
             linear_speed, turn_speed = mode_state.speed_pair(
                 drive_linear_speed=drive_linear_speed,
@@ -799,6 +870,7 @@ def main() -> None:
                 linear_speed_limit=linear_speed,
                 turn_speed_limit=turn_speed,
                 now_s=loop_start_t,
+                direction_signs=direction_signs,
             )
             action = {
                 **arm_targets,

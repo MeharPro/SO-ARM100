@@ -58,6 +58,17 @@ export interface VexDriveTuning {
   maxTurnSpeedDps: number;
 }
 
+export type VexDirectionSign = 1 | -1;
+export type VexManualIdleStoppingMode = "hold" | "brake" | "coast";
+
+export interface VexKeyboardDirectionCalibration {
+  xSign: VexDirectionSign;
+  ySign: VexDirectionSign;
+  thetaSign: VexDirectionSign;
+  calibratedAtIso: string | null;
+  notes: string;
+}
+
 export interface VexInertialSettings {
   port: number;
 }
@@ -77,6 +88,8 @@ export interface VexSettings {
   };
   controls: VexDriveControls;
   tuning: VexDriveTuning;
+  keyboardCalibration: VexKeyboardDirectionCalibration;
+  manualIdleStoppingMode: VexManualIdleStoppingMode;
 }
 
 export type TrainingCaptureMode = "leader" | "free-teach" | "leader-as-follower";
@@ -252,6 +265,22 @@ export interface AdjustRecordingServoRequest {
 }
 
 export type RecordingInputMode = "auto" | "leader" | "keyboard" | "free-teach";
+export type LiveArmSource = "auto" | "leader" | "keyboard" | "none";
+export type LiveBaseSource = "keyboard" | "vexController";
+
+export interface StartControlRequest {
+  armSource?: LiveArmSource;
+  baseSource?: LiveBaseSource;
+}
+
+export type LeaderStaleTransitionAction =
+  | "discardLeaderAuthority"
+  | "syncLeaderToFollowerPose"
+  | "moveFollowerToLeaderPose";
+
+export interface ResolveLeaderStaleRequest {
+  action: LeaderStaleTransitionAction;
+}
 
 export interface StartRecordingRequest {
   label: string;
@@ -344,12 +373,47 @@ export interface ActiveArmHold {
   homePosition: ArmHomePosition;
 }
 
+export type ArmAuthority =
+  | "none"
+  | "leader"
+  | "keyboard"
+  | "handGuide"
+  | "holdPose"
+  | "recording"
+  | "replay"
+  | "goHome"
+  | "calibration"
+  | "emergencyStop";
+
+export type BaseAuthority =
+  | "none"
+  | "vexController"
+  | "keyboard"
+  | "vexReplay"
+  | "vexPreposition"
+  | "hold";
+
+export interface ControlAuthorityState {
+  arm: ArmAuthority;
+  base: BaseAuthority;
+  activeHoldId: string | null;
+  activeHoldName: string | null;
+  leaderConnected: boolean;
+  keyboardCaptureActive: boolean;
+  vexTelemetryActive: boolean;
+  safetyLatched: boolean;
+  leaderPoseStale: boolean;
+  leaderPoseStaleReason: string | null;
+  speedPreset: "drive" | "ecu" | "crawl";
+}
+
 export interface DashboardState {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
   chainLinks: ChainLink[];
   homePosition: ArmHomePosition | null;
   activeArmHold: ActiveArmHold | null;
+  controlAuthority: ControlAuthorityState;
   recordingReplayOptions: Record<string, RecordingReplayOptions>;
   training: TrainingConfig & {
     selectedProfile: TrainingProfile | null;

@@ -20,12 +20,14 @@ import type {
   MarkRecordingGyroZeroRequest,
   RecordingDetailRequest,
   RenameRecordingRequest,
+  ResolveLeaderStaleRequest,
   ResetRecordingUltrasonicPositionRequest,
   ReplayRequest,
   SaveChainLinkRequest,
   SelectTrainingProfileRequest,
   SetArmHomeFromRecordingRequest,
   SetRecordingReplayOptionsRequest,
+  StartControlRequest,
   StartPolicyEvalRequest,
   StartRecordingRequest,
   StartTrainingCaptureRequest,
@@ -70,8 +72,8 @@ app.post(
 
 app.post(
   "/api/robot/start-control",
-  asyncRoute(async (_req, res) => {
-    res.json(await controller.startControl());
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startControl(req.body as StartControlRequest));
   }),
 );
 
@@ -84,8 +86,15 @@ app.post(
 
 app.post(
   "/api/robot/start-keyboard-control",
-  asyncRoute(async (_req, res) => {
-    res.json(await controller.startKeyboardControl());
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startKeyboardControl(req.body as StartControlRequest));
+  }),
+);
+
+app.post(
+  "/api/robot/leader-stale/resolve",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.resolveLeaderStale(req.body as ResolveLeaderStaleRequest));
   }),
 );
 
