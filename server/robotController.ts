@@ -39,6 +39,7 @@ import {
 } from "./transportErrors.js";
 import type {
   AdjustRecordingServoRequest,
+  ActiveArmHold,
   ArmHomeMode,
   ArmHomePosition,
   AppSettings,
@@ -448,6 +449,7 @@ export class RobotController {
       }
     | null = null;
   private replayControlRestoreInFlight: Promise<void> | null = null;
+  private activeArmHold: ActiveArmHold | null = null;
   private cachedVexBrainStatus: VexBrainStatus = {
     connected: false,
     telemetryActive: false,
@@ -496,6 +498,14 @@ export class RobotController {
     const visiblePinnedMoves = piReachable
       ? pinnedMoves.filter((move) => !hasDummyRecordingPath(move))
       : pinnedMoves;
+    if (
+      this.activeArmHold &&
+      !pinnedMoves.some(
+        (move) => move.id === this.activeArmHold?.pinnedMoveId && move.holdArmPose,
+      )
+    ) {
+      this.activeArmHold = null;
+    }
     const visibleChainLinks = piReachable
       ? chainLinks
           .map((chain) => ({
@@ -521,6 +531,7 @@ export class RobotController {
       pinnedMoves: visiblePinnedMoves,
       chainLinks: visibleChainLinks,
       homePosition,
+      activeArmHold: this.activeArmHold,
       recordingReplayOptions,
       training: {
         ...training,
@@ -1375,6 +1386,8 @@ export class RobotController {
       this.logActivity("Stop control requested.");
       await this.teleopRunner.stop("Stopping teleop.");
       await this.hostRunner.stop("Stopping the Pi host.");
+      this.activeArmHold = null;
+      this.clearReplayControlRestore();
       this.lastError = null;
       return this.getState();
     });
@@ -1401,6 +1414,8 @@ export class RobotController {
     this.lastTrainingMetadataRefresh = now;
     this.lastVexBrainStatusRefresh = now;
     this.lastResolvedHost = null;
+    this.activeArmHold = null;
+    this.clearReplayControlRestore();
     this.remoteStateRefreshInFlight = false;
     this.lastError = null;
     this.logActivity(
@@ -1426,6 +1441,8 @@ export class RobotController {
       await this.policyEvalRunner.stop("Emergency stop requested.");
       await this.execRemoteScript(this.buildStopAllScript(settings), host, settings);
 
+      this.activeArmHold = null;
+      this.clearReplayControlRestore();
       this.lastError = null;
       return this.getState();
     });
@@ -1669,14 +1686,17 @@ export class RobotController {
       const label = typeof payload?.label === "string" ? payload.label.trim() : "";
       const requestedInputMode = this.normalizeRecordingInputMode(payload?.inputMode);
       const useFreeTeachInput = requestedInputMode === "free-teach";
+      const useKeyboardOnlyInput = requestedInputMode === "keyboard";
       this.logActivity(`Start recording requested${label ? ` (${label})` : ""}.`);
-      const leader = useFreeTeachInput ? null : await this.getLeaderStatus(settings);
+      const leader = useFreeTeachInput || useKeyboardOnlyInput ? null : await this.getLeaderStatus(settings);
       const combinedInput = !useFreeTeachInput && leader?.connected ? "keyboard+leader" : "keyboard";
       this.logActivity(
         `Recording input source: ${
           useFreeTeachInput
             ? "hand-guided follower arm with torque disabled"
-            : leader?.connected
+            : useKeyboardOnlyInput
+              ? "keyboard controls only"
+              : leader?.connected
               ? "Keyboard + Leader controls"
               : "keyboard controls; leader arm unavailable"
         }.`,
@@ -1685,6 +1705,11 @@ export class RobotController {
         this.logActivity(leader.message);
       } else if (!useFreeTeachInput && leader) {
         this.logActivity(`Leader unavailable; recording with keyboard backup only. ${leader.message}`);
+      }
+      if (useKeyboardOnlyInput && this.activeArmHold) {
+        this.logActivity(
+          `Keyboard-only recording is starting from held arm pose ${this.activeArmHold.name}; arm keys remain enabled for this recording.`,
+        );
       }
       const host = await this.preparePi(settings, "start recording");
 
@@ -1740,16 +1765,22 @@ export class RobotController {
               settings,
               host,
               keyboardJointLimitsJson,
-              leader?.connected ? leader : null,
+              !useKeyboardOnlyInput && leader?.connected ? leader : null,
             ),
             "recording",
             {
               host,
-              input: combinedInput,
-              leaderPort: leader?.connected ? leader.expectedPort : null,
+              input: useKeyboardOnlyInput ? "keyboard" : combinedInput,
+              leaderPort: !useKeyboardOnlyInput && leader?.connected ? leader.expectedPort : null,
             },
           );
-          await this.waitForLocalProcessReady("Keyboard + Leader recording teleop", this.teleopRunner, 2500);
+          await this.waitForLocalProcessReady(
+            useKeyboardOnlyInput || !leader?.connected
+              ? "Keyboard-only recording teleop"
+              : "Keyboard + Leader recording teleop",
+            this.teleopRunner,
+            2500,
+          );
         }
       } catch (error) {
         await this.hostRunner.stop("Teleop failed to launch, stopping the recorder.");
@@ -1898,6 +1929,9 @@ export class RobotController {
 
       const remainingPins = pinnedMoves.filter((move) => move.trajectoryPath !== recordingPath);
       if (remainingPins.length !== pinnedMoves.length) {
+        if (this.activeArmHold?.trajectoryPath === recordingPath) {
+          this.activeArmHold = null;
+        }
         this.configStore.savePinnedMoves(remainingPins);
         this.logActivity("Removed pinned moves that referenced the deleted recording.");
       }
@@ -2102,97 +2136,128 @@ export class RobotController {
   }
 
   async startReplay(payload: ReplayRequest): Promise<DashboardState> {
-    return this.runExclusive(async () => {
-      const { settings, homePosition } = this.configStore.getConfig();
-      const replay = normalizeReplayRequest(payload, settings.trajectories);
-      if (!replay.trajectoryPath) {
-        throw new Error("Choose a saved trajectory before starting replay.");
-      }
-      if (isDummyRecordingPath(replay.trajectoryPath)) {
-        throw new Error("Dummy recordings are for offline UI testing only. Connect the Pi to replay real recordings.");
-      }
-      if (replay.homeMode !== "none" && !isFiniteHomePosition(homePosition)) {
-        throw new Error("Set an arm home position before replaying with Go Home enabled.");
-      }
-      this.logActivity(
-        `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}${
-          replay.target === "pi" ? ` (${replay.includeBase ? "VEX base + arm" : "arm only"})` : ""
-        }${replay.startTimeS ? ` from ${replay.startTimeS.toFixed(2)}s` : ""}${
-          replay.homeMode !== "none" ? `, home ${replay.homeMode}` : ""
-        }.`,
-      );
-      this.clearReplayControlRestore();
+    return this.runExclusive(() => this.startReplayLocked(payload));
+  }
 
-      await this.replayRunner.stop("Restarting replay.");
-      await this.localReplayRunner.stop("Restarting replay.");
-      await this.stopWarmHostReplay(settings, "Restarting warm-host replay.");
-
-      if (this.canUseWarmHostReplay(replay)) {
-        const host = this.getActiveHostAddress();
-        if (!host) {
-          throw new Error("The running Pi host is active, but its address is unavailable.");
+  private async startReplayLocked(
+    payload: ReplayRequest,
+    homePositionOverride?: ArmHomePosition,
+    options: { restoreControlAfterReplay?: boolean; returnToActiveHold?: boolean } = {},
+  ): Promise<DashboardState> {
+    const restoreControlAfterReplay = options.restoreControlAfterReplay !== false;
+    const { settings, homePosition } = this.configStore.getConfig();
+    const normalizedReplay = normalizeReplayRequest(payload, settings.trajectories);
+    const activeArmHold = this.activeArmHold;
+    const activeHoldHomePosition =
+      options.returnToActiveHold !== false &&
+      normalizedReplay.target === "pi" &&
+      activeArmHold &&
+      isFiniteHomePosition(activeArmHold?.homePosition ?? null)
+        ? activeArmHold.homePosition
+        : null;
+    const replayHomePosition = activeHoldHomePosition ?? homePositionOverride ?? homePosition;
+    const replay: ReplayRequest = activeHoldHomePosition
+      ? {
+          ...normalizedReplay,
+          homeMode:
+            normalizedReplay.homeMode === "none"
+              ? "end"
+              : normalizedReplay.homeMode === "start"
+              ? "both"
+              : normalizedReplay.homeMode,
         }
+      : normalizedReplay;
+    if (!replay.trajectoryPath) {
+      throw new Error("Choose a saved trajectory before starting replay.");
+    }
+    if (isDummyRecordingPath(replay.trajectoryPath)) {
+      throw new Error("Dummy recordings are for offline UI testing only. Connect the Pi to replay real recordings.");
+    }
+    if (replay.homeMode !== "none" && !isFiniteHomePosition(replayHomePosition)) {
+      throw new Error("Set an arm home position before replaying with Go Home enabled.");
+    }
+    this.logActivity(
+      `Starting ${replay.target === "leader" ? "leader" : "Pi"} replay for ${replay.trajectoryPath}${
+        replay.target === "pi" ? ` (${replay.includeBase ? "VEX base + arm" : "arm only"})` : ""
+      }${replay.startTimeS ? ` from ${replay.startTimeS.toFixed(2)}s` : ""}${
+        replay.homeMode !== "none" ? `, home ${replay.homeMode}` : ""
+      }${activeHoldHomePosition ? `, returning to held arm pose ${activeArmHold?.name}` : ""}.`,
+    );
+    this.clearReplayControlRestore();
 
-        await this.teleopRunner.stop("Switching from leader control to Pi replay.");
-        await this.piCalibrationRunner.stop("Replay needs the robot exclusively.");
-        await this.macCalibrationRunner.stop("Replay requested.");
-        await this.datasetCaptureRunner.stop("Replay needs the robot exclusively.");
-        await this.localDatasetCaptureRunner.stop("Replay needs the robot exclusively.");
-        await this.policyEvalRunner.stop("Replay needs the robot exclusively.");
-        await this.sendWarmHostReplay(settings, host, replay, homePosition);
-        this.markReplayControlRestorePending(replay);
+    await this.replayRunner.stop("Restarting replay.");
+    await this.localReplayRunner.stop("Restarting replay.");
+    await this.stopWarmHostReplay(settings, "Restarting warm-host replay.");
 
-        this.lastError = null;
-        return this.getState();
+    if (this.canUseWarmHostReplay(replay)) {
+      const host = this.getActiveHostAddress();
+      if (!host) {
+        throw new Error("The running Pi host is active, but its address is unavailable.");
       }
 
-      await this.teleopRunner.stop("Replay takes control away from teleop.");
-      await this.hostRunner.stop("Replay needs exclusive access.");
+      await this.teleopRunner.stop("Switching from leader control to Pi replay.");
       await this.piCalibrationRunner.stop("Replay needs the robot exclusively.");
       await this.macCalibrationRunner.stop("Replay requested.");
       await this.datasetCaptureRunner.stop("Replay needs the robot exclusively.");
       await this.localDatasetCaptureRunner.stop("Replay needs the robot exclusively.");
       await this.policyEvalRunner.stop("Replay needs the robot exclusively.");
-
-      if (replay.target === "leader") {
-        const leader = await this.ensureLeaderConnected(settings);
-        const host = await this.preparePi(settings, "download replay recording");
-        assertHelperExists(LOCAL_LEADER_REPLAY_SCRIPT);
-        const localTrajectoryPath = await this.downloadRemoteRecordingToLocal(
-          settings,
-          host,
-          replay.trajectoryPath,
-        );
-
-        await this.localReplayRunner.start(
-          this.buildLocalLeaderReplayScript(settings, replay, leader, localTrajectoryPath),
-          "replay",
-          {
-            ...replay,
-            leaderPort: leader.expectedPort,
-            localTrajectoryPath,
-          },
-        );
-      } else {
-        const host = await this.preparePi(settings, "start replay");
-
-        assertHelperExists(REPLAY_SCRIPT);
-        assertHelperExists(RUNTIME_SCRIPT);
-        await this.ensureRemoteHelpers(settings, host);
-        await this.writeRemoteTorqueLimits(settings, host);
-
-        await this.replayRunner.start(
-          this.buildReplayScript(settings, replay, homePosition),
-          this.toConnectConfig(settings, host),
-          "replay",
-          { ...replay },
-        );
+      await this.sendWarmHostReplay(settings, host, replay, replayHomePosition);
+      if (restoreControlAfterReplay) {
+        this.markReplayControlRestorePending(replay);
       }
 
-      this.markReplayControlRestorePending(replay);
       this.lastError = null;
       return this.getState();
-    });
+    }
+
+    await this.teleopRunner.stop("Replay takes control away from teleop.");
+    await this.hostRunner.stop("Replay needs exclusive access.");
+    await this.piCalibrationRunner.stop("Replay needs the robot exclusively.");
+    await this.macCalibrationRunner.stop("Replay requested.");
+    await this.datasetCaptureRunner.stop("Replay needs the robot exclusively.");
+    await this.localDatasetCaptureRunner.stop("Replay needs the robot exclusively.");
+    await this.policyEvalRunner.stop("Replay needs the robot exclusively.");
+
+    if (replay.target === "leader") {
+      const leader = await this.ensureLeaderConnected(settings);
+      const host = await this.preparePi(settings, "download replay recording");
+      assertHelperExists(LOCAL_LEADER_REPLAY_SCRIPT);
+      const localTrajectoryPath = await this.downloadRemoteRecordingToLocal(
+        settings,
+        host,
+        replay.trajectoryPath,
+      );
+
+      await this.localReplayRunner.start(
+        this.buildLocalLeaderReplayScript(settings, replay, leader, localTrajectoryPath),
+        "replay",
+        {
+          ...replay,
+          leaderPort: leader.expectedPort,
+          localTrajectoryPath,
+        },
+      );
+    } else {
+      const host = await this.preparePi(settings, "start replay");
+
+      assertHelperExists(REPLAY_SCRIPT);
+      assertHelperExists(RUNTIME_SCRIPT);
+      await this.ensureRemoteHelpers(settings, host);
+      await this.writeRemoteTorqueLimits(settings, host);
+
+      await this.replayRunner.start(
+        this.buildReplayScript(settings, replay, replayHomePosition),
+        this.toConnectConfig(settings, host),
+        "replay",
+        { ...replay },
+      );
+    }
+
+    if (restoreControlAfterReplay) {
+      this.markReplayControlRestorePending(replay);
+    }
+    this.lastError = null;
+    return this.getState();
   }
 
   async stopReplay(): Promise<DashboardState> {
@@ -2223,6 +2288,7 @@ export class RobotController {
           id: crypto.randomUUID(),
           name: payload.name.trim(),
           keyBinding: payload.keyBinding.trim(),
+          holdArmPose: payload.holdArmPose === true,
           ...replay,
         },
       ];
@@ -2256,6 +2322,10 @@ export class RobotController {
           typeof payload.keyBinding === "string"
             ? payload.keyBinding.trim()
             : existing.keyBinding,
+        holdArmPose:
+          typeof payload.holdArmPose === "boolean"
+            ? payload.holdArmPose
+            : existing.holdArmPose,
         ...replay,
       };
 
@@ -2263,6 +2333,15 @@ export class RobotController {
       this.configStore.savePinnedMoves(
         config.pinnedMoves.map((move) => (move.id === id ? updated : move)),
       );
+      if (this.activeArmHold?.pinnedMoveId === id) {
+        this.activeArmHold = updated.holdArmPose
+          ? {
+              ...this.activeArmHold,
+              name: updated.name,
+              trajectoryPath: updated.trajectoryPath,
+            }
+          : null;
+      }
       this.lastError = null;
       return this.getState();
     });
@@ -2272,6 +2351,9 @@ export class RobotController {
     return this.runExclusive(async () => {
       const config = this.configStore.getConfig();
       this.logActivity("Removing pinned move.");
+      if (this.activeArmHold?.pinnedMoveId === id) {
+        this.activeArmHold = null;
+      }
       this.configStore.savePinnedMoves(
         config.pinnedMoves.filter((move) => move.id !== id),
       );
@@ -2281,14 +2363,90 @@ export class RobotController {
   }
 
   async triggerPinnedMove(id: string): Promise<DashboardState> {
-    const config = this.configStore.getConfig();
-    const pinnedMove = config.pinnedMoves.find((move) => move.id === id);
-    if (!pinnedMove) {
-      throw new Error("Pinned move not found.");
-    }
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const pinnedMove = config.pinnedMoves.find((move) => move.id === id);
+      if (!pinnedMove) {
+        throw new Error("Pinned move not found.");
+      }
 
-    this.logActivity(`Pinned move triggered: ${pinnedMove.name}.`);
-    return this.startReplay(pinnedMove);
+      if (pinnedMove.holdArmPose) {
+        if (this.activeArmHold?.pinnedMoveId === pinnedMove.id) {
+          this.activeArmHold = null;
+          this.logActivity(`Arm hold toggled off: ${pinnedMove.name}.`);
+          this.lastError = null;
+          return this.getState();
+        }
+
+        if (pinnedMove.target !== "pi") {
+          throw new Error("Arm hold pins must target the Pi follower.");
+        }
+        if (isDummyRecordingPath(pinnedMove.trajectoryPath)) {
+          throw new Error("Dummy pinned moves are for offline UI testing only. Connect the Pi to hold a real arm pose.");
+        }
+
+        const host = await this.preparePi(config.settings, "load held arm pose");
+        const holdHomePosition = await this.readRecordingEndHomePosition(
+          config.settings,
+          host,
+          pinnedMove.trajectoryPath,
+        );
+        if (!isFiniteHomePosition(holdHomePosition)) {
+          throw new Error("The hold recording does not contain a valid final arm pose.");
+        }
+
+        const previousHold = this.activeArmHold;
+        this.activeArmHold = {
+          pinnedMoveId: pinnedMove.id,
+          name: pinnedMove.name,
+          trajectoryPath: pinnedMove.trajectoryPath,
+          activatedAt: new Date().toISOString(),
+          homePosition: holdHomePosition,
+        };
+
+        const holdReplay: ReplayRequest = {
+          ...pinnedMove,
+          target: "pi",
+          homeMode: "none",
+          includeBase: false,
+          autoVexPositioning: false,
+          startTimeS: 0,
+        };
+        this.logActivity(`Arm hold toggled on: ${pinnedMove.name}.`);
+        try {
+          await this.ensureCommandReadyHost(config.settings, "arm hold replay");
+          return await this.startReplayLocked(holdReplay, holdHomePosition, {
+            returnToActiveHold: false,
+          });
+        } catch (error) {
+          this.activeArmHold = previousHold;
+          throw error;
+        }
+      }
+
+      const activeArmHold = this.activeArmHold;
+      const shouldReturnToHold =
+        pinnedMove.target === "pi" && isFiniteHomePosition(activeArmHold?.homePosition ?? null);
+      const replay: ReplayRequest = shouldReturnToHold
+        ? {
+            ...pinnedMove,
+            homeMode: "end",
+          }
+        : pinnedMove;
+
+      this.logActivity(
+        shouldReturnToHold
+          ? `Pinned move triggered: ${pinnedMove.name}; will return to held arm pose ${activeArmHold?.name}.`
+          : `Pinned move triggered: ${pinnedMove.name}.`,
+      );
+      if (shouldReturnToHold) {
+        await this.ensureCommandReadyHost(config.settings, "held arm pinned replay");
+      }
+      return this.startReplayLocked(
+        replay,
+        shouldReturnToHold ? activeArmHold?.homePosition : undefined,
+      );
+    });
   }
 
   async saveChainLink(payload: SaveChainLinkRequest): Promise<DashboardState> {
@@ -2522,6 +2680,7 @@ export class RobotController {
     host: string,
     meta: Record<string, unknown> = {},
     syncVexTelemetry = true,
+    options: { allowLeader?: boolean; disableArmInput?: boolean } = {},
   ): Promise<void> {
     assertHelperExists(HOST_SCRIPT);
     assertHelperExists(POWER_SCRIPT);
@@ -2538,10 +2697,12 @@ export class RobotController {
     }
     await this.writeRemoteTorqueLimits(settings, host);
     const keyboardJointLimitsJson = await this.loadKeyboardJointLimitsJson(settings, host);
-    const leader = await this.getLeaderStatus(settings);
-    if (leader.connected) {
+    const allowLeader = options.allowLeader !== false;
+    const leader = allowLeader ? await this.getLeaderStatus(settings) : null;
+    if (leader?.connected) {
       this.logActivity(leader.message);
     }
+    const leaderConnected = Boolean(leader?.connected);
 
     await this.clearRemoteHostCommand(settings, host);
     await this.hostRunner.start(
@@ -2555,8 +2716,9 @@ export class RobotController {
         host,
         hotkeysArmed: true,
         keyboardBackup: true,
-        input: leader.connected ? "keyboard+leader" : "keyboard",
-        leaderPort: leader.connected ? leader.expectedPort : null,
+        input: leaderConnected ? "keyboard+leader" : "keyboard",
+        leaderPort: leaderConnected ? leader?.expectedPort : null,
+        armInput: options.disableArmInput ? "disabled" : "enabled",
         ...meta,
       },
     );
@@ -2568,17 +2730,23 @@ export class RobotController {
           settings,
           host,
           keyboardJointLimitsJson,
-          leader.connected ? leader : null,
+          leaderConnected ? leader : null,
+          { disableArmInput: Boolean(options.disableArmInput) },
         ),
         "keyboard-control",
         {
           host,
-          input: leader.connected ? "keyboard+leader" : "keyboard",
-          leaderPort: leader.connected ? leader.expectedPort : null,
+          input: leaderConnected ? "keyboard+leader" : "keyboard",
+          leaderPort: leaderConnected ? leader?.expectedPort : null,
+          armInput: options.disableArmInput ? "disabled" : "enabled",
           ...meta,
         },
       );
-      await this.waitForLocalProcessReady("Keyboard + Leader backup teleop", this.teleopRunner, 2500);
+      await this.waitForLocalProcessReady(
+        leaderConnected ? "Keyboard + Leader backup teleop" : "Keyboard backup teleop",
+        this.teleopRunner,
+        2500,
+      );
     } catch (error) {
       await this.teleopRunner.stop("Keyboard backup control failed to launch.");
       await this.hostRunner.stop("Keyboard backup control failed to launch.");
@@ -2726,13 +2894,28 @@ export class RobotController {
     const restore = this.replayControlRestore;
     this.replayControlRestore = null;
     this.replayControlRestoreInFlight = this.runExclusive(async () => {
-      this.logActivity(`Replay finished; restoring Keyboard + Leader control for ${restore.trajectoryPath}.`);
-      const host = await this.preparePi(settings, "restore Keyboard + Leader after replay");
-      await this.startKeyboardControlSession(settings, host, {
-        restoredAfterReplay: true,
-        replayTarget: restore.target,
-        trajectoryPath: restore.trajectoryPath,
-      });
+      const restoreKeyboardOnly = Boolean(this.activeArmHold);
+      this.logActivity(
+        restoreKeyboardOnly
+          ? `Replay finished; restoring keyboard-only base control while holding ${this.activeArmHold?.name}.`
+          : `Replay finished; restoring Keyboard + Leader control for ${restore.trajectoryPath}.`,
+      );
+      const host = await this.preparePi(settings, "restore keyboard base after replay");
+      await this.startKeyboardControlSession(
+        settings,
+        host,
+        {
+          restoredAfterReplay: true,
+          replayTarget: restore.target,
+          trajectoryPath: restore.trajectoryPath,
+          activeArmHold: restoreKeyboardOnly ? this.activeArmHold?.name : null,
+        },
+        true,
+        {
+          allowLeader: !restoreKeyboardOnly,
+          disableArmInput: restoreKeyboardOnly,
+        },
+      );
       this.lastError = null;
     })
       .catch((error) => {
@@ -2856,6 +3039,7 @@ export class RobotController {
     host: string,
     jointLimitsJson: string,
     leader?: LeaderStatus | null,
+    options: { disableArmInput?: boolean } = {},
   ): string {
     assertHelperExists(KEYBOARD_TELEOP_SCRIPT);
     const ecuLinearSpeed = KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS;
@@ -2875,7 +3059,7 @@ export class RobotController {
       `  --drive-base-turn-speed ${driveTurnSpeed} \\`,
       `  --initial-vex-control-mode drive \\`,
       `  --leader-port ${shellQuote(leader?.expectedPort ?? "off")} \\`,
-      `  --joint-limits-json ${shellQuote(jointLimitsJson)}`,
+      `  --joint-limits-json ${shellQuote(jointLimitsJson)}${options.disableArmInput ? " \\\n  --disable-arm-input" : ""}`,
     ].join("\n");
   }
 
@@ -4806,9 +4990,27 @@ PY
     host: string,
     recordingPath: string,
   ): Promise<ArmHomePosition> {
+    return this.readRecordingHomePosition(settings, host, recordingPath, "start");
+  }
+
+  private async readRecordingEndHomePosition(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+  ): Promise<ArmHomePosition> {
+    return this.readRecordingHomePosition(settings, host, recordingPath, "end");
+  }
+
+  private async readRecordingHomePosition(
+    settings: AppSettings,
+    host: string,
+    recordingPath: string,
+    samplePosition: "start" | "end",
+  ): Promise<ArmHomePosition> {
     const script = `
 export LEKIWI_TRAJECTORY_DIR=${shellQuote(settings.trajectories.remoteDir)}
 export LEKIWI_RECORDING_PATH=${shellQuote(recordingPath)}
+export LEKIWI_SAMPLE_POSITION=${shellQuote(samplePosition)}
 python - <<'PY'
 import json
 import os
@@ -4819,6 +5021,7 @@ ARM_HOME_KEYS = ${JSON.stringify(ARM_HOME_JOINT_KEYS)}
 
 root = Path(os.environ["LEKIWI_TRAJECTORY_DIR"]).expanduser().resolve()
 path = Path(os.environ["LEKIWI_RECORDING_PATH"]).expanduser().resolve()
+sample_position = os.environ["LEKIWI_SAMPLE_POSITION"]
 
 if root not in path.parents:
     raise SystemExit("Recording path is outside the trajectory directory.")
@@ -4833,19 +5036,20 @@ samples = payload.get("samples")
 if not isinstance(samples, list) or not samples:
     raise SystemExit("Recording does not contain any state samples.")
 
-first_sample = samples[0]
-if not isinstance(first_sample, dict):
-    raise SystemExit("Recording first sample is invalid.")
+sample = samples[-1] if sample_position == "end" else samples[0]
+sample_label = "final" if sample_position == "end" else "first"
+if not isinstance(sample, dict):
+    raise SystemExit(f"Recording {sample_label} sample is invalid.")
 
-state = first_sample.get("state")
+state = sample.get("state")
 if not isinstance(state, dict):
-    raise SystemExit("Recording first sample does not contain state.")
+    raise SystemExit(f"Recording {sample_label} sample does not contain state.")
 
 joints = {}
 for key in ARM_HOME_KEYS:
     value = state.get(key)
     if not isinstance(value, (int, float)):
-        raise SystemExit(f"Recording start is missing numeric {key}.")
+        raise SystemExit(f"Recording {sample_label} sample is missing numeric {key}.")
     joints[key] = float(value)
 
 print(json.dumps({

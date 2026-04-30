@@ -139,17 +139,20 @@ class RuntimeSafetyTests(unittest.TestCase):
     def test_clamp_safe_arm_torque_limits_caps_unsafe_values(self) -> None:
         clamped, capped = clamp_safe_arm_torque_limits(
             {
-                "arm_elbow_flex": 790,
-                "arm_shoulder_lift": 870,
+                "arm_elbow_flex": 920,
+                "arm_shoulder_lift": 970,
+                "arm_wrist_roll": 980,
                 "arm_gripper": 840,
             }
         )
 
-        self.assertEqual(clamped["arm_elbow_flex"], 600)
-        self.assertEqual(clamped["arm_shoulder_lift"], 650)
+        self.assertEqual(clamped["arm_elbow_flex"], 790)
+        self.assertEqual(clamped["arm_shoulder_lift"], 870)
+        self.assertEqual(clamped["arm_wrist_roll"], 850)
         self.assertEqual(clamped["arm_gripper"], 840)
-        self.assertIn("arm_elbow_flex=790->600", capped)
-        self.assertIn("arm_shoulder_lift=870->650", capped)
+        self.assertIn("arm_elbow_flex=920->790", capped)
+        self.assertIn("arm_shoulder_lift=970->870", capped)
+        self.assertIn("arm_wrist_roll=980->850", capped)
 
     def test_servo_protection_latches_on_persistent_stall(self) -> None:
         robot = FakeRobot()

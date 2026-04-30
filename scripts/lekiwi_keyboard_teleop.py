@@ -138,6 +138,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--leader-port", default=os.getenv("LEKIWI_LEADER_PORT", "off"))
     parser.add_argument("--leader-id", default=os.getenv("LEKIWI_LEADER_ID", "leader"))
     parser.add_argument("--joint-limits-json", default="{}")
+    parser.add_argument("--disable-arm-input", action="store_true")
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--connect-timeout-s", type=int, default=10)
     return parser.parse_args()
@@ -632,14 +633,17 @@ def summarize_action(action: dict[str, float]) -> str:
     return f"{arm_summary} | {base_summary}"
 
 
-def print_controls(leader_enabled: bool, mode: str) -> None:
+def print_controls(leader_enabled: bool, mode: str, arm_input_enabled: bool = True) -> None:
     label = "Keyboard + Leader teleop" if leader_enabled else "Keyboard backup teleop"
     print(f"{label} is live. VEX base mode: {mode.upper()}.", flush=True)
-    print(
-        "Arm: Q/A shoulder pan, W/S shoulder lift, E/D elbow, "
-        "R/F wrist flex (also Y/H), T/G wrist roll, Z/X gripper (also C/V and B/N).",
-        flush=True,
-    )
+    if arm_input_enabled:
+        print(
+            "Arm: Q/A shoulder pan, W/S shoulder lift, E/D elbow, "
+            "R/F wrist flex (also Y/H), T/G wrist roll, Z/X gripper (also C/V and B/N).",
+            flush=True,
+        )
+    else:
+        print("Arm: locked at the current target; keyboard arm keys are ignored.", flush=True)
     print(
         "Base: I/K forward-back (Y), J/L left-right (X), U/O turn. "
         "Press 0 to toggle Drive/ECU speed, Esc to stop keyboard capture.",
@@ -671,6 +675,7 @@ def main() -> None:
     drive_linear_speed = finite_positive(args.drive_base_linear_speed, ecu_linear_speed)
     drive_turn_speed = finite_positive(args.drive_base_turn_speed, ecu_turn_speed)
     mode_state = VexControlModeState(args.initial_vex_control_mode)
+    arm_input_enabled = not bool(args.disable_arm_input)
 
     loop_idx = 0
     last_loop_t = time.perf_counter()
@@ -725,13 +730,15 @@ def main() -> None:
         direction_limiter = JointDirectionLimiter(position_limits)
         direction_limiter.seed(observed_arm_positions)
         next_observation_poll_t = time.perf_counter()
-        print_controls(leader_connected, mode_state.mode)
+        print_controls(leader_connected, mode_state.mode, arm_input_enabled)
 
         while keyboard.is_connected or leader_connected:
             loop_start_t = time.perf_counter()
             pressed = keyboard.get_pressed() if keyboard.is_connected else set()
             newly_pressed = pressed - last_pressed
             last_pressed = pressed
+            arm_pressed = pressed if arm_input_enabled else set()
+            arm_newly_pressed = newly_pressed if arm_input_enabled else set()
             dt_s = max(loop_start_t - last_loop_t, 0.0)
             last_loop_t = loop_start_t
             if mode_state.update(newly_pressed):
@@ -746,7 +753,7 @@ def main() -> None:
                     for event in direction_limiter.update(
                         observed_arm_positions,
                         arm_targets,
-                        pressed,
+                        arm_pressed,
                         loop_start_t,
                     ):
                         print(event, flush=True)
@@ -764,14 +771,16 @@ def main() -> None:
                     leader = None
                     leader_connected = False
 
-            if leader_arm_action is not None and not keyboard_arm_active(pressed):
+            if not arm_input_enabled:
+                pass
+            elif leader_arm_action is not None and not keyboard_arm_active(pressed):
                 arm_targets.update(leader_arm_action)
             else:
                 arm_targets = update_arm_targets(
                     arm_targets,
                     observed_arm_positions,
-                    pressed,
-                    newly_pressed,
+                    arm_pressed,
+                    arm_newly_pressed,
                     dt_s,
                     position_limits,
                     direction_limiter,

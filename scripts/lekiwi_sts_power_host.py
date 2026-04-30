@@ -20,11 +20,11 @@ logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("lekiwi_sts_power_host")
 
 DEFAULT_ARM_TORQUE_LIMITS = {
-    "arm_shoulder_pan": 500,
-    "arm_shoulder_lift": 650,
-    "arm_elbow_flex": 600,
-    "arm_wrist_flex": 450,
-    "arm_wrist_roll": 250,
+    "arm_shoulder_pan": 810,
+    "arm_shoulder_lift": 870,
+    "arm_elbow_flex": 790,
+    "arm_wrist_flex": 820,
+    "arm_wrist_roll": 850,
     "arm_gripper": 1000,
 }
 DEFAULT_ARM_MAX_STEP = {

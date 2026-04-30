@@ -72,11 +72,11 @@ const DEFAULT_ARM_TORQUE_LIMITS = Object.fromEntries(
   ARM_SERVO_IDS.map((id) => [id, TORQUE_LIMIT_MAX]),
 ) as Record<string, number>;
 const RECOMMENDED_SAFE_ARM_TORQUE_LIMITS: Record<string, number> = {
-  arm_shoulder_pan: 500,
-  arm_shoulder_lift: 650,
-  arm_elbow_flex: 600,
-  arm_wrist_flex: 450,
-  arm_wrist_roll: 250,
+  arm_shoulder_pan: 810,
+  arm_shoulder_lift: 870,
+  arm_elbow_flex: 790,
+  arm_wrist_flex: 820,
+  arm_wrist_roll: 850,
   arm_gripper: 1000,
 };
 const LOCAL_TRAINING_ROOT = "/Users/meharkhanna/robot-arm/output";
@@ -1717,6 +1717,7 @@ export default function App() {
   const [pinHotkey, setPinHotkey] = useState("");
   const [pinSpeed, setPinSpeed] = useState(1);
   const [pinHoldFinal, setPinHoldFinal] = useState(0.5);
+  const [pinHoldArmPose, setPinHoldArmPose] = useState(false);
   const [chainDraftId, setChainDraftId] = useState<string | null>(null);
   const [chainName, setChainName] = useState("Chain-link");
   const [chainConfirmAfterEach, setChainConfirmAfterEach] = useState(true);
@@ -2186,6 +2187,12 @@ export default function App() {
       setTrainingDirty(false);
     }
   }, [selectedTrainingProfile, trainingDirty, trainingDraft?.id]);
+
+  useEffect(() => {
+    if (replayTarget !== "pi" && pinHoldArmPose) {
+      setPinHoldArmPose(false);
+    }
+  }, [pinHoldArmPose, replayTarget]);
 
   const recordingService = state?.services.host ?? null;
   const isRecordingActive = Boolean(
@@ -2852,7 +2859,15 @@ export default function App() {
       { method: "POST" },
     );
     if (next) {
-      flashToast(`Triggered ${move.name}.`);
+      if (move.holdArmPose) {
+        flashToast(
+          next.activeArmHold?.pinnedMoveId === move.id
+            ? `Holding ${move.name}.`
+            : `Stopped holding ${move.name}.`,
+        );
+      } else {
+        flashToast(`Triggered ${move.name}.`);
+      }
     }
   };
 
@@ -3275,6 +3290,7 @@ export default function App() {
       body: JSON.stringify({
         name: pinName.trim() || selectedRecordingEntry?.name || "Pinned move",
         keyBinding: normalizeHotkeyText(pinHotkey),
+        holdArmPose: pinHoldArmPose,
         ...selectedMovePayload,
       }),
     });
@@ -3283,6 +3299,7 @@ export default function App() {
       flashToast("Pinned move saved.");
       setPinName("");
       setPinHotkey("");
+      setPinHoldArmPose(false);
     }
   };
 
@@ -3297,6 +3314,7 @@ export default function App() {
     const payload: UpdatePinnedMoveRequest = {
       name: merged.name,
       keyBinding: normalizeHotkeyText(merged.keyBinding),
+      holdArmPose: Boolean(merged.holdArmPose),
       ...mergeReplayRequest(move, patch),
     };
     const next = await mutate(`update-pin-${move.id}`, `/api/pinned-moves/${move.id}`, {
@@ -4121,9 +4139,9 @@ export default function App() {
                     onChange={(event) => setRecordInputMode(event.target.value as RecordingInputMode)}
                     disabled={disabled}
                   >
-                    <option value="auto">Auto</option>
+                    <option value="auto">Auto (Leader if connected)</option>
                     <option value="leader">Leader + Keyboard</option>
-                    <option value="keyboard">Keyboard + Leader</option>
+                    <option value="keyboard">Keyboard only</option>
                     <option value="free-teach">Hand-guide</option>
                   </select>
                 </label>
@@ -4691,7 +4709,21 @@ export default function App() {
                           placeholder="SHIFT+1"
                         />
                       </label>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={pinHoldArmPose}
+                          disabled={!selectedRecordingEntry || replayTarget !== "pi"}
+                          onChange={(event) => setPinHoldArmPose(event.target.checked)}
+                        />
+                        <span>Hold arm pose toggle</span>
+                      </label>
                     </div>
+                    {pinHoldArmPose ? (
+                      <p className="card-note">
+                        This hotkey toggles an arm-only hold. Other Pi pinned moves return to this recording's final arm pose until the hold is toggled off.
+                      </p>
+                    ) : null}
                     <button
                       className="primary"
                       disabled={disabled || !selectedRecording}
@@ -4713,6 +4745,11 @@ export default function App() {
                   <h2>Keyboard Launch Pad</h2>
                 </div>
                 <div className="pin-head-actions">
+                  {state?.activeArmHold ? (
+                    <span className="status-pill good" title={state.activeArmHold.name}>
+                      arm hold active
+                    </span>
+                  ) : null}
                   <span className={`status-pill ${hotkeysArmed ? "good" : "muted"}`}>
                     {hotkeysArmed ? "instant Pi hotkeys ready" : "Pi hotkeys not armed"}
                   </span>
@@ -5059,7 +5096,9 @@ export default function App() {
               </div>
               <div className="pin-grid">
                 {state?.pinnedMoves.length ? (
-                  state.pinnedMoves.map((move) => (
+                  state.pinnedMoves.map((move) => {
+                    const holdActive = state.activeArmHold?.pinnedMoveId === move.id;
+                    return (
 	                    <article key={move.id} className="pin-card">
 	                      <div className="pin-card-head">
 	                        <div>
@@ -5067,6 +5106,11 @@ export default function App() {
 	                          <p>{move.trajectoryPath}</p>
 	                        </div>
 	                        <div className="pin-card-actions">
+                            {move.holdArmPose ? (
+                              <span className={`status-pill ${holdActive ? "good" : "muted"}`}>
+                                {holdActive ? "holding" : "hold"}
+                              </span>
+                            ) : null}
 	                          <span className="hotkey-chip">{move.keyBinding || "no hotkey"}</span>
 	                          <button
 	                            type="button"
@@ -5085,7 +5129,7 @@ export default function App() {
 	                      </div>
 	                      <ReplayOptionChecks options={move} />
 	                      <p className="pin-meta">
-	                        {replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} •{" "}
+	                        {move.holdArmPose ? "Hold arm pose toggle • " : ""}{replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} •{" "}
                         {move.includeBase
                           ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})`
                           : "Arm only"}
@@ -5129,6 +5173,19 @@ export default function App() {
 	                            hasArmHomePosition={hasArmHomePosition}
 	                            onChange={(patch) => void handleUpdatePinnedMove(move, patch)}
 	                          />
+                            <label className="checkbox-row">
+                              <input
+                                type="checkbox"
+                                checked={move.holdArmPose}
+                                disabled={disabled}
+                                onChange={(event) =>
+                                  void handleUpdatePinnedMove(move, {
+                                    holdArmPose: event.target.checked,
+                                  })
+                                }
+                              />
+                              <span>Hold arm pose toggle</span>
+                            </label>
 	                        </div>
 	                      ) : null}
 	                      <div className="button-cluster inline">
@@ -5137,7 +5194,7 @@ export default function App() {
 	                          disabled={disabled || isDummyRecordingPath(move.trajectoryPath)}
 	                          onClick={() => void handleTriggerPinnedMove(move)}
 	                        >
-                          Run
+                          {move.holdArmPose ? (holdActive ? "Turn Off" : "Turn On") : "Run"}
                         </button>
                         <button
                           disabled={disabled}
@@ -5151,7 +5208,8 @@ export default function App() {
                         </button>
                       </div>
                     </article>
-                  ))
+                    );
+                  })
                 ) : (
                   <div className="empty-state">
                     Pin your frequent motions here so you can replay them with one click or a hotkey.

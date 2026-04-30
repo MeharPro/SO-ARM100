@@ -177,6 +177,17 @@ class KeyboardTeleopTests(unittest.TestCase):
             (0.06, 18.0),
         )
 
+        self.assertTrue(mode.update({"0"}))
+        self.assertEqual(
+            mode.speed_pair(
+                drive_linear_speed=0.35,
+                drive_turn_speed=90.0,
+                ecu_linear_speed=0.06,
+                ecu_turn_speed=18.0,
+            ),
+            (0.35, 90.0),
+        )
+
         drive_action = keyboard_teleop.build_base_action(
             {"i", "o"},
             linear_speed=0.35,

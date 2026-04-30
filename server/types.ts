@@ -189,6 +189,7 @@ export interface PinnedMove {
   includeBase: boolean;
   holdFinalS: number;
   keyBinding: string;
+  holdArmPose: boolean;
 }
 
 export interface ChainLinkItem extends ReplayRequest {
@@ -330,11 +331,20 @@ export interface RobotSensorsStatus {
   y: RobotSensorStatus;
 }
 
+export interface ActiveArmHold {
+  pinnedMoveId: string;
+  name: string;
+  trajectoryPath: string;
+  activatedAt: string;
+  homePosition: ArmHomePosition;
+}
+
 export interface DashboardState {
   settings: AppSettings;
   pinnedMoves: PinnedMove[];
   chainLinks: ChainLink[];
   homePosition: ArmHomePosition | null;
+  activeArmHold: ActiveArmHold | null;
   recordingReplayOptions: Record<string, RecordingReplayOptions>;
   training: TrainingConfig & {
     selectedProfile: TrainingProfile | null;
@@ -384,11 +394,13 @@ export interface ReplayRequest {
 export interface CreatePinnedMoveRequest extends ReplayRequest {
   name: string;
   keyBinding: string;
+  holdArmPose?: boolean;
 }
 
 export interface UpdatePinnedMoveRequest extends Partial<ReplayRequest> {
   name?: string;
   keyBinding?: string;
+  holdArmPose?: boolean;
 }
 
 export interface SaveChainLinkRequest {

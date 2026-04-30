@@ -235,6 +235,7 @@ export class ConfigStore {
       includeBase: Boolean(raw?.includeBase),
       holdFinalS: Number(raw?.holdFinalS) >= 0 ? Number(raw?.holdFinalS) : 0.5,
       keyBinding: typeof raw?.keyBinding === "string" ? raw.keyBinding : "",
+      holdArmPose: raw?.holdArmPose === true,
     };
   }
 

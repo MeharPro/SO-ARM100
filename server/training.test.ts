@@ -56,6 +56,16 @@ test("config store defaults legacy pinned moves to Pi replay", () => {
           holdFinalS: 0.5,
           keyBinding: "SHIFT+1",
         },
+        {
+          id: "move-2",
+          name: "Alignment hold",
+          trajectoryPath: "/home/pi/lekiwi-trajectories/alignment.json",
+          speed: 1,
+          includeBase: false,
+          holdFinalS: 0.5,
+          keyBinding: "SHIFT+2",
+          holdArmPose: true,
+        },
       ],
       training: defaultConfig.training,
     }),
@@ -66,6 +76,8 @@ test("config store defaults legacy pinned moves to Pi replay", () => {
 
   assert.equal(loaded.pinnedMoves[0]?.target, "pi");
   assert.equal(loaded.pinnedMoves[0]?.vexReplayMode, "ecu");
+  assert.equal(loaded.pinnedMoves[0]?.holdArmPose, false);
+  assert.equal(loaded.pinnedMoves[1]?.holdArmPose, true);
 });
 
 test("config store upgrades untouched legacy VEX forward axis default", () => {
