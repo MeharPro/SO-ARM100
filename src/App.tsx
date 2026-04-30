@@ -1874,7 +1874,6 @@ export default function App() {
   const [proRecordInertialSensor, setProRecordInertialSensor] = useState(true);
   const [proIncludeVexBaseSamples, setProIncludeVexBaseSamples] = useState(false);
   const [proAutoVexPositioning, setProAutoVexPositioning] = useState(false);
-  const [proReturnToHold, setProReturnToHold] = useState(true);
   const [proPlaybackSpeed, setProPlaybackSpeed] = useState(1);
   const [proAdvancedOpen, setProAdvancedOpen] = useState(false);
   const [gameBuilderMode, setGameBuilderMode] = useState<"editor" | "play">("editor");
@@ -2069,7 +2068,6 @@ export default function App() {
     setProIncludeVexBaseSamples(move.defaultSensorRecordingSettings.includeVexBaseSamples);
     setProAutoVexPositioning(move.defaultVexPositioningEnabled);
     setProPlaybackSpeed(state?.settings.trajectories.defaultReplaySpeed ?? 1);
-    setProReturnToHold(Boolean(state?.activeArmHold));
   }, [selectedProMoveId]);
 
   useEffect(() => {
@@ -3075,7 +3073,7 @@ export default function App() {
       method: "POST",
     });
     if (next) {
-      flashToast(proReturnToHold && state?.activeArmHold ? "Recording stopped; returning to hold." : "Recording stopped.");
+      flashToast(state?.activeArmHold ? "Recording stopped; returning directly to hold." : "Recording stopped.");
     }
   };
 
@@ -4316,6 +4314,33 @@ export default function App() {
       !replayActive &&
       ARM_SERVO_POSITION_KEYS.every((key) => Number.isFinite(Number(servoAdjustmentDrafts[key]))),
   );
+  const recordingLiveStrip =
+    isRecordingActive && recordingService ? (
+      <div className="recording-live-strip" role="status" aria-live="polite">
+        <div className="recording-live-status">
+          <span className="recording-live-dot" />
+          <span className="recording-live-label">
+            {recordingHasCapturedMotion ? "REC" : "ARMED"}
+          </span>
+          {recordingHasCapturedMotion ? (
+            <strong className="recording-live-timer">
+              {recordingStartedMs
+                ? formatClockDuration((recordingClockMs - recordingStartedMs) / 1000)
+                : formatElapsedSince(recordingService.startedAt, recordingClockMs)}
+            </strong>
+          ) : (
+            <strong className="recording-live-waiting">
+              {getRecordingWaitingLabel(recordingService)}
+            </strong>
+          )}
+        </div>
+        <span className="recording-live-meta">
+          {recordingHasCapturedMotion
+            ? `Started ${prettyTimestamp(recordingService.startedAt)}`
+            : getRecordingArmedLabel(recordingService)}
+        </span>
+      </div>
+    ) : null;
 
   return (
     <div className="app-frame">
@@ -4964,32 +4989,7 @@ export default function App() {
                 </div>
               </div>
 
-              {isRecordingActive && recordingService ? (
-                <div className="recording-live-strip" role="status" aria-live="polite">
-                  <div className="recording-live-status">
-                    <span className="recording-live-dot" />
-                    <span className="recording-live-label">
-                      {recordingHasCapturedMotion ? "REC" : "ARMED"}
-                    </span>
-                    {recordingHasCapturedMotion ? (
-                      <strong className="recording-live-timer">
-                        {recordingStartedMs
-                          ? formatClockDuration((recordingClockMs - recordingStartedMs) / 1000)
-                          : formatElapsedSince(recordingService.startedAt, recordingClockMs)}
-                      </strong>
-                    ) : (
-                      <strong className="recording-live-waiting">
-                        {getRecordingWaitingLabel(recordingService)}
-                      </strong>
-                    )}
-                  </div>
-                  <span className="recording-live-meta">
-                    {recordingHasCapturedMotion
-                      ? `Started ${prettyTimestamp(recordingService.startedAt)}`
-                      : getRecordingArmedLabel(recordingService)}
-                  </span>
-                </div>
-              ) : null}
+              {recordingLiveStrip}
 
               <div className="recordings-layout">
                 <div className="recordings-list">
@@ -6073,6 +6073,8 @@ export default function App() {
                         </p>
                       </div>
 
+                      {recordingLiveStrip}
+
                       <div className="version-list">
                         {selectedProVersions.length ? (
                           selectedProVersions.map((version) => {
@@ -6136,14 +6138,6 @@ export default function App() {
                             ))}
                           </select>
                         </label>
-                        <label className="checkbox-row settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={proReturnToHold}
-                            onChange={(event) => setProReturnToHold(event.target.checked)}
-                          />
-                          <span>Return to active hold after stop</span>
-                        </label>
                       </div>
 
                       <details
@@ -6189,14 +6183,18 @@ export default function App() {
                       </details>
 
                       <div className="button-cluster inline">
-                        <button className="primary" disabled={disabled} onClick={() => void handleStartProRecording()}>
-                          Start Recording
+                        <button
+                          className="primary"
+                          disabled={disabled || isRecordingActive}
+                          onClick={() => void handleStartProRecording()}
+                        >
+                          {isRecordingActive ? "Recording Active" : "Start Recording"}
                         </button>
-                        <button disabled={pendingAction === "stop-pro-recording"} onClick={() => void handleStopProRecording()}>
-                          Stop Recording
-                        </button>
-                        <button disabled={pendingAction === "stop-pro-recording"} onClick={() => void handleStopProRecording()}>
-                          Stop and Return to Hold
+                        <button
+                          disabled={!isRecordingActive || pendingAction === "stop-pro-recording"}
+                          onClick={() => void handleStopProRecording()}
+                        >
+                          {state?.activeArmHold ? "Stop and Return to Hold" : "Stop Recording"}
                         </button>
                         <button disabled={disabled || !selectedRecordingEntry} onClick={() => void handleCreateProVersionFromSelectedRecording(false)}>
                           Save as New Version

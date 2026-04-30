@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { defaultConfig } from "./defaultConfig.js";
 import { RobotController } from "./robotController.js";
 import type { LeaderStatus, ServiceSnapshot, VexBrainStatus } from "./types.js";
 
@@ -35,6 +36,18 @@ const vexDisconnected: VexBrainStatus = {
   commPort: null,
   source: null,
   message: "VEX unavailable",
+};
+
+const holdHomePosition = {
+  capturedAt: "2026-04-30T13:00:00.000Z",
+  joints: {
+    "arm_shoulder_pan.pos": 10,
+    "arm_shoulder_lift.pos": -20,
+    "arm_elbow_flex.pos": 30,
+    "arm_wrist_flex.pos": -40,
+    "arm_wrist_roll.pos": 50,
+    "arm_gripper.pos": 60,
+  },
 };
 
 test("discarding leader authority keeps leader resume blocked", async () => {
@@ -146,4 +159,69 @@ test("runtime safety latch logs are reflected in control authority", () => {
     snapshot(),
   );
   assert.equal(relatchedAuthority.safetyLatched, true);
+});
+
+test("recording stop from active hold returns directly to saved hold pose", async () => {
+  const controller = new RobotController();
+  const harness = controller as any;
+  const commands: unknown[] = [];
+  const restoredSessions: unknown[] = [];
+
+  harness.configStore.getConfig = () => structuredClone(defaultConfig);
+  harness.hostRunner.getSnapshot = () =>
+    snapshot({
+      state: "running",
+      mode: "recording",
+      meta: { input: "keyboard", armSource: "keyboard" },
+    });
+  harness.teleopRunner.getSnapshot = () => snapshot({ state: "running", mode: "recording" });
+  harness.teleopRunner.stop = async () => undefined;
+  harness.hostRunner.stop = async () => undefined;
+  harness.findReachablePiHost = async () => "10.42.0.1";
+  harness.fetchRecordings = async () => [];
+  harness.ensureCommandReadyHost = async () => "10.42.0.1";
+  harness.writeRemoteHostCommand = async (_settings: unknown, _host: string, command: unknown) => {
+    commands.push(command);
+  };
+  harness.waitForWarmHostHomeCommandResult = async () => ({
+    success: true,
+    status: "ok",
+    homePosition: holdHomePosition,
+  });
+  harness.startKeyboardControlSession = async (...args: unknown[]) => {
+    restoredSessions.push(args);
+  };
+  harness.getState = async () => ({ ok: true });
+  harness.activeArmHold = {
+    pinnedMoveId: "hold-open",
+    name: "Open claw hold",
+    trajectoryPath: "/home/pi/lekiwi-trajectories/hold-open.json",
+    activatedAt: "2026-04-30T13:05:00.000Z",
+    homePosition: holdHomePosition,
+  };
+
+  await controller.stopRecording();
+
+  assert.equal(commands.length, 1);
+  const command = commands[0] as { command: string; requestId: string; homePosition: unknown };
+  assert.deepEqual(command, {
+    command: "go-home",
+    requestId: command.requestId,
+    homePosition: holdHomePosition,
+  });
+  assert.match(command.requestId, /^return-hold-/);
+  assert.equal(restoredSessions.length, 1);
+  assert.deepEqual((restoredSessions[0] as unknown[])[4], {
+    allowLeader: false,
+    disableArmInput: true,
+  });
+});
+
+test("emergency stop script releases VEX base hold before torque-off", () => {
+  const harness = new RobotController() as any;
+  const script = harness.buildStopAllScript(defaultConfig.settings);
+
+  assert.match(script, /handle\.write\(b"!release\\n"\)/);
+  assert.match(script, /Sent VEX base release/);
+  assert.ok(script.indexOf('b"!release\\n"') < script.indexOf("bus.disable_torque"));
 });

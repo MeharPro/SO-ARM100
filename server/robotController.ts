@@ -2160,27 +2160,20 @@ export class RobotController {
       }
 
       if (this.activeArmHold && isFiniteHomePosition(this.activeArmHold.homePosition)) {
-        const holdReplay: ReplayRequest = {
-          trajectoryPath: this.activeArmHold.trajectoryPath,
-          target: "pi",
-          vexReplayMode: "ecu",
-          homeMode: "none",
-          speed: 1,
-          autoVexPositioning: false,
-          vexPositioningSpeed: DEFAULT_VEX_POSITIONING_SPEED,
-          vexPositioningTimeoutS: DEFAULT_VEX_POSITIONING_TIMEOUT_S,
-          vexPositioningXyToleranceM: DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
-          vexPositioningHeadingToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
-          vexPositioningXyTrimToleranceM: DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
-          vexPositioningHeadingTrimToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
-          includeBase: false,
-          holdFinalS: settings.trajectories.defaultHoldFinalS,
-        };
-        this.logActivity(`Returning to held arm pose ${this.activeArmHold.name} after recording.`);
-        await this.ensureCommandReadyHost(settings, "return to held arm pose after recording");
-        await this.startReplayLocked(holdReplay, this.activeArmHold.homePosition, {
-          returnToActiveHold: false,
-        });
+        const hostForHold = await this.returnToActiveArmHoldPose(
+          settings,
+          "return to held arm pose after recording",
+          "after recording",
+        );
+        await this.restoreBaseOnlyKeyboardControlForActiveHold(
+          settings,
+          hostForHold,
+          {
+            restoredAfterRecording: true,
+            recordingArmSource: "hold",
+          },
+          "after recording",
+        );
       } else if (recordingArmSource) {
         const restoreArmSource = recordingArmSource;
         const keyboardHost =
@@ -2793,13 +2786,38 @@ export class RobotController {
     return this.runExclusive(async () => {
       this.logActivity("Stop replay requested.");
       const { settings } = this.configStore.getConfig();
+      const warmReplayActiveBeforeStop =
+        this.deriveWarmHostReplaySnapshot(this.hostRunner.getSnapshot()).state === "running";
+      const warmReplayStopRequestedAtMs = Date.now();
       await this.replayRunner.stop("Stopping replay.");
       await this.localReplayRunner.stop("Stopping replay.");
       await this.stopWarmHostReplay(settings, "Stopping warm-host replay.");
       this.clearReplayControlRestore();
-      const host = await this.findReachablePiHost(settings);
-      if (host && settings.vex.autoRunTelemetry) {
-        await this.syncVexTelemetryProgramOnPi(settings, host, "restore controller telemetry after replay", false);
+      if (warmReplayActiveBeforeStop) {
+        await this.waitForWarmHostReplayStopped(warmReplayStopRequestedAtMs, 9000);
+      }
+      if (this.activeArmHold && isFiniteHomePosition(this.activeArmHold.homePosition)) {
+        const hostForHold = await this.returnToActiveArmHoldPose(
+          settings,
+          "return to held arm pose after stopping replay",
+          "after stopping replay",
+        );
+        await this.restoreBaseOnlyKeyboardControlForActiveHold(
+          settings,
+          hostForHold,
+          { restoredAfterReplayStop: true },
+          "after stopping replay",
+        );
+      } else {
+        const host = await this.findReachablePiHost(settings);
+        if (host && settings.vex.autoRunTelemetry) {
+          await this.syncVexTelemetryProgramOnPi(
+            settings,
+            host,
+            "restore controller telemetry after replay",
+            false,
+          );
+        }
       }
       this.lastError = null;
       return this.getState();
@@ -3335,6 +3353,61 @@ export class RobotController {
     }
   }
 
+  private async returnToActiveArmHoldPose(
+    settings: AppSettings,
+    actionLabel: string,
+    reason: string,
+  ): Promise<string> {
+    const activeArmHold = this.activeArmHold;
+    if (!activeArmHold || !isFiniteHomePosition(activeArmHold.homePosition)) {
+      throw new Error("No valid active arm hold pose is available.");
+    }
+
+    this.logActivity(`Returning directly to held arm pose ${activeArmHold.name} ${reason}.`);
+    this.markLeaderPoseStale(`follower returned to held arm pose ${activeArmHold.name}`);
+    const host = await this.ensureCommandReadyHost(settings, actionLabel);
+    await this.teleopRunner.stop(`Stopping live command stream before returning to held arm pose ${reason}.`);
+    const requestId = `return-hold-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await this.writeRemoteHostCommand(settings, host, {
+      command: "go-home",
+      requestId,
+      homePosition: activeArmHold.homePosition,
+    });
+    const result = await this.waitForWarmHostHomeCommandResult(requestId, 20000);
+    if (!result) {
+      throw new Error(`Timed out waiting for the Pi host to return to held arm pose ${activeArmHold.name}.`);
+    }
+    if (!result.success) {
+      throw new Error(result.status || `The Pi host failed to return to held arm pose ${activeArmHold.name}.`);
+    }
+
+    this.logActivity(`Held arm pose ${activeArmHold.name} reached ${reason}.`);
+    return host;
+  }
+
+  private async restoreBaseOnlyKeyboardControlForActiveHold(
+    settings: AppSettings,
+    host: string,
+    meta: Record<string, unknown>,
+    reason: string,
+  ): Promise<void> {
+    const holdName = this.activeArmHold?.name ?? "active hold";
+    this.logActivity(`Restoring base-only keyboard control while holding ${holdName} ${reason}.`);
+    await this.startKeyboardControlSession(
+      settings,
+      host,
+      {
+        ...meta,
+        activeArmHold: this.activeArmHold?.name ?? null,
+      },
+      true,
+      {
+        allowLeader: false,
+        disableArmInput: true,
+      },
+    );
+  }
+
   private maybeCleanupCoupledTeleopFailure(
     hostSnapshot: ServiceSnapshot,
     teleopSnapshot: ServiceSnapshot,
@@ -3436,6 +3509,24 @@ export class RobotController {
         host: this.getActiveHostAddress(),
       },
     };
+  }
+
+  private async waitForWarmHostReplayStopped(
+    requestedAtMs: number,
+    timeoutMs: number,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const snapshot = this.deriveWarmHostReplaySnapshot(this.hostRunner.getSnapshot());
+      if (snapshot.state !== "running") {
+        const stoppedAtMs = snapshot.stoppedAt ? Date.parse(snapshot.stoppedAt) : Date.now();
+        if (!Number.isFinite(stoppedAtMs) || stoppedAtMs >= requestedAtMs - 1000) {
+          return;
+        }
+      }
+      await sleep(100);
+    }
+    throw new Error("Timed out waiting for the warm-host replay to stop before returning to hold.");
   }
 
   private markReplayControlRestorePending(replay: ReplayRequest): void {
@@ -4792,6 +4883,42 @@ pkill -f 'lekiwi_replay_trajectory\\.py' >/dev/null 2>&1 || true
 sleep 1
 
 ${this.buildPiActivation(settings)}
+
+python3 - <<'PY' || true
+import glob
+import time
+
+try:
+    import serial
+except Exception as exc:
+    print(f"VEX base release skipped: pyserial unavailable: {exc}")
+    raise SystemExit(0)
+
+preferred_suffixes = ("if02", "if00")
+
+def rank(path):
+    for index, suffix in enumerate(preferred_suffixes):
+        if suffix in path:
+            return index
+    return len(preferred_suffixes)
+
+sent = False
+for port in sorted(glob.glob("/dev/serial/by-id/*VEX_Robotics_V5_Brain*"), key=rank):
+    try:
+        handle = serial.Serial(port, baudrate=115200, timeout=0.05, write_timeout=0.25)
+        handle.write(b"!release\\n")
+        handle.flush()
+        time.sleep(0.05)
+        handle.close()
+        print(f"Sent VEX base release on {port}.")
+        sent = True
+        break
+    except Exception as exc:
+        print(f"Failed VEX base release on {port}: {exc}")
+
+if not sent:
+    print("VEX base release skipped: no V5 Brain serial port accepted !release.")
+PY
 
 python - <<'PY'
 import os

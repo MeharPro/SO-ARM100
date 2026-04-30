@@ -991,6 +991,24 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn('brain.screen.print("Hold power button to shut down")', source)
         self.assertIn("remote_takeover = True", source)
         self.assertIn('remote_mode = "hold"', source)
+        self.assertIn("def coast_drive():", source)
+        self.assertIn("base_released = False", source)
+        self.assertIn("def idle_stop_mode():", source)
+        self.assertIn("return COAST if base_released else HOLD", source)
+        self.assertIn(
+            'if command == "!release":\n'
+            '        clear_remote_command(release_controller=True)\n'
+            '        base_released = True\n'
+            '        coast_drive()\n'
+            '        return',
+            source,
+        )
+        self.assertIn(
+            "if motion_is_active(active_motion):\n"
+            "                base_released = False\n"
+            "            apply_drive_motion(active_motion)",
+            source,
+        )
 
     def test_command_stream_probe_requires_runtime_zero_velocity_command(self) -> None:
         bridge = VexBaseBridge(
@@ -1114,6 +1132,7 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn(
             'active_motion = controller_motion()\n'
             '                if motion_is_active(active_motion):\n'
+            '                    base_released = False\n'
             '                    clear_remote_command(release_controller=True)\n'
             '                    apply_drive_motion(active_motion)\n'
             '                    source = "controller"',

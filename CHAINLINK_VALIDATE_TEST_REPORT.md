@@ -276,6 +276,12 @@ Hardware-session follow-up on 2026-04-30:
 - User later reported the VEX handheld controller strafe left/right direction was swapped while keyboard base controls were correct.
 - Fixed the controller-only default by inverting VEX controller Axis4 for strafe in the generated VEX Brain program, leaving keyboard calibration, X/Y semantics, and motor reversed flags unchanged.
 - Migrated stored VEX control preset v2 configs to preset v3 so existing installations receive the corrected controller strafe default.
+- User then reported the controller direction and Drive/ECU toggle worked, base + hold pose worked together, and stale-leader blocking occurred, but three issues remained: Emergency Stop left the VEX base motors in HOLD, Pro Recording did not make recording armed/started state obvious, and recording/replay stop from hold could leave the follower away from the saved held pose.
+- Fixed the generated VEX Brain telemetry program so `!release` explicitly stops all four drive motors with `COAST` after clearing remote takeover, and keeps the zero-speed controller idle path in COAST until the next real controller/Pi motion command. Emergency Stop now also sends `!release` directly to the VEX Brain serial port before disabling follower torque, so controls stop and the VEX servo HOLD is released when the Brain accepts the command.
+- Fixed recording stop from active hold to return directly to the saved held arm pose through the existing warm-host `go-home` path instead of replaying the entire old hold trajectory. This keeps the return bounded by the safer go-home stepping, safety latch checks, and final pose tolerance.
+- Fixed Stop Replay while an active hold exists to stop any warm-host replay, wait for that stop acknowledgement, return directly to the saved held pose, then restore base-only keyboard control with arm input disabled.
+- Updated Pro Recording beta to reuse the live recording strip from the Recordings page. It now shows ARMED while waiting for first motion and REC/timer once motion capture has started. The duplicate stop buttons and misleading optional "Return to active hold" checkbox were removed; the stop button now says "Stop and Return to Hold" whenever an active hold is present.
+- Added regression coverage for direct hold return after recording stop, Emergency Stop VEX release script ordering, and generated VEX `!release` coasting behavior.
 
 Additional commands run and results:
 
@@ -285,6 +291,13 @@ Additional commands run and results:
 - `python3 -m py_compile scripts/lekiwi_keyboard_teleop.py scripts/vex_base_bridge.py scripts/lekiwi_runtime.py scripts/lekiwi_host.py` - passed.
 - `npm run test:server` - passed, 22 tests after the VEX controller strafe migration tests were added.
 - `python3 -m py_compile scripts/vex_base_bridge.py` - passed after the controller strafe fix.
+- `npm run test:server` - passed, 24 tests after the hold-return and emergency VEX release tests were added.
+- `python3 -m unittest tests.test_sensor_replay` - passed, 37 tests after the generated VEX `!release` coasting assertion was added.
+- `python3 -m py_compile scripts/vex_base_bridge.py scripts/lekiwi_host.py scripts/lekiwi_runtime.py scripts/lekiwi_record_trajectory.py scripts/lekiwi_replay_trajectory.py` - passed.
+- `python3 -m unittest tests.test_runtime_safety tests.test_keyboard_teleop` - passed, 30 tests.
+- `python3 -m unittest discover tests` - passed, 67 tests.
+- `npm run build` - passed after the Pro Recording UI changes.
+- In-app browser reload of `http://localhost:5173/` - passed; Pro Recording beta opened, move/version controls rendered, the removed return-to-hold checkbox was absent, and browser console error count was 0.
 
 Physical robot validation checklist:
 

@@ -506,6 +506,7 @@ pose_epoch = 0
 controller_control_mode = "{VEX_DRIVE_CONTROL_MODE}"
 serial_command_lines = []
 serial_reader_thread = None
+base_released = False
 
 
 def clamp(value, low, high):
@@ -551,9 +552,13 @@ def motion_to_percent(motion):
     )
 
 
+def idle_stop_mode():
+    return COAST if base_released else HOLD
+
+
 def spin_drive_motor(motor, percent):
     if abs(percent) <= 0.01:
-        motor.stop(HOLD)
+        motor.stop(idle_stop_mode())
         return
     motor.set_velocity(abs(percent), PERCENT)
     motor.spin(FORWARD if percent >= 0 else REVERSE)
@@ -586,6 +591,13 @@ def hold_drive():
     rear_left.stop(HOLD)
     front_right.stop(HOLD)
     rear_right.stop(HOLD)
+
+
+def coast_drive():
+    front_left.stop(COAST)
+    rear_left.stop(COAST)
+    front_right.stop(COAST)
+    rear_right.stop(COAST)
 
 
 def parse_float(token, fallback=0.0):
@@ -638,6 +650,7 @@ def handle_command_line(line):
     global remote_expires_ms
     global last_targets
     global controller_control_mode
+    global base_released
 
     if not line:
         return
@@ -660,9 +673,12 @@ def handle_command_line(line):
 
     if command == "!release":
         clear_remote_command(release_controller=True)
+        base_released = True
+        coast_drive()
         return
 
     if command == "!hold":
+        base_released = False
         remote_takeover = True
         remote_mode = "hold"
         remote_motion = zero_motion()
@@ -677,6 +693,7 @@ def handle_command_line(line):
         return
 
     if command == "!origin":
+        base_released = False
         remote_takeover = True
         remote_mode = "origin"
         remote_motion = zero_motion()
@@ -692,6 +709,7 @@ def handle_command_line(line):
         return
 
     if command == "!velocity" and len(parts) >= 5:
+        base_released = False
         remote_takeover = True
         remote_mode = "velocity"
         remote_motion = {{
@@ -706,6 +724,7 @@ def handle_command_line(line):
         return
 
     if command == "!ecu" and len(parts) >= 10:
+        base_released = False
         remote_takeover = True
         remote_mode = "ecu"
         remote_targets = {{
@@ -839,6 +858,7 @@ def display_keepalive(source):
 
 
 def main():
+    global base_released
     last_telemetry_ms = -TELEMETRY_INTERVAL_MS
     last_screen_ms = -SCREEN_KEEPALIVE_INTERVAL_MS
     initialize_inertial()
@@ -867,6 +887,7 @@ def main():
             else:
                 active_motion = controller_motion()
                 if motion_is_active(active_motion):
+                    base_released = False
                     clear_remote_command(release_controller=True)
                     apply_drive_motion(active_motion)
                     source = "controller"
@@ -880,6 +901,8 @@ def main():
                     source = "pi-timeout"
         else:
             active_motion = controller_motion()
+            if motion_is_active(active_motion):
+                base_released = False
             apply_drive_motion(active_motion)
             source = "controller"
 
