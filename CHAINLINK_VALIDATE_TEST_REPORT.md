@@ -82,3 +82,24 @@ Requires physical robot validation:
 - Starting and stopping Pro Recording beta sessions must be exercised with the Pi connected.
 - Return-to-hold after Pro Recording stop requires real follower servo validation.
 - Replay selected beta versions uses existing replay code paths but still needs robot validation for motion, hold, and VEX behavior.
+
+## Phase 4: Game Builder (beta)
+
+Commands run:
+
+- `npm run build` - passed, Vite client build and server TypeScript compile.
+- `npm run test:server` - passed, 18 tests.
+
+Failures fixed:
+
+- None in the focused Phase 4 validation run.
+
+Failures remaining:
+
+- None known from Phase 4 code-level validation.
+
+Requires physical robot validation:
+
+- Favorite-only sequence execution must be tested against real trajectories on the Pi.
+- Cancel, pause, manual override, and emergency stop use existing backend control paths but still require robot validation during active replay.
+- Per-step return-to-hold and VEX base replay/positioning toggles need real robot and VEX sensor validation.

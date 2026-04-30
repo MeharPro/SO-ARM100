@@ -5,9 +5,12 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  createGamePlanStepFromFavorite,
   createDefaultMoveDefinitions,
   favoriteTrajectoryIsBroken,
   favoriteVersionForMove,
+  gameBuilderEligibleFavorites,
+  gameBuilderHotkeyErrors,
   nextMoveVersionNumber,
   withFavoriteVersion,
 } from "./betaMoves.js";
@@ -171,4 +174,54 @@ test("legacy config still loads old recordings and pins while adding beta move d
   assert.equal(loaded.recordingReplayOptions["/home/pi/lekiwi-trajectories/legacy.json"]?.autoVexPositioning, false);
   assert.equal(loaded.moveDefinitions.length, EXPECTED_STARTER_MOVES.length);
   assert.deepEqual(loaded.moveRecordingVersions, []);
+});
+
+test("game builder only exposes favorites and defaults VEX positioning off", () => {
+  const moves = createDefaultMoveDefinitions();
+  const moveId = "fuse-transfer-low-height";
+  const versions = [
+    version(moveId, "low-v1", 1, "/tmp/low-v1.json"),
+    version("fuse-transfer-high-height", "high-v1", 1, "/tmp/high-v1.json"),
+  ];
+  const favorite = withFavoriteVersion(moves, versions, moveId, "low-v1");
+  const eligible = gameBuilderEligibleFavorites(
+    favorite.moves,
+    favorite.versions,
+    (trajectoryPath) => trajectoryPath === "/tmp/low-v1.json",
+  );
+
+  assert.deepEqual(eligible.map((item) => item.move.id), [moveId]);
+  assert.equal(eligible[0]?.broken, false);
+
+  const step = createGamePlanStepFromFavorite(eligible[0].move, eligible[0].favorite);
+  assert.equal(step.autoVexPositioning, false);
+  assert.equal(step.includeVexBaseReplay, false);
+  assert.equal(step.returnToActiveHold, true);
+  assert.equal(step.transitionPolicy, "returnToActiveHoldFirst");
+});
+
+test("game builder hotkey conflicts and protected drive keys are detected", () => {
+  const moves = createDefaultMoveDefinitions();
+  const move = moves.find((item) => item.id === "fuse-transfer-low-height")!;
+  const favorite = version(move.id, "low-v1", 1, "/tmp/low-v1.json");
+  const first = {
+    ...createGamePlanStepFromFavorite(move, favorite),
+    id: "step-1",
+    hotkey: "A",
+  };
+  const duplicate = {
+    ...createGamePlanStepFromFavorite(move, favorite),
+    id: "step-2",
+    hotkey: "a",
+  };
+  const protectedKey = {
+    ...createGamePlanStepFromFavorite(move, favorite),
+    id: "step-3",
+    hotkey: "ArrowUp",
+  };
+
+  const errors = gameBuilderHotkeyErrors([first, duplicate, protectedKey]);
+  assert.match(errors["step-1"], /Conflicts/);
+  assert.match(errors["step-2"], /Conflicts/);
+  assert.match(errors["step-3"], /Protected/);
 });

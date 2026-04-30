@@ -778,6 +778,33 @@ code {
   grid-template-columns: minmax(360px, 1fr) minmax(360px, 0.9fr);
 }
 
+.game-builder-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(420px, 1.2fr);
+  gap: 1rem;
+}
+
+.game-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.game-palette,
+.game-sequence-panel,
+.saved-plan-list,
+.game-step-list {
+  display: grid;
+  gap: 0.8rem;
+  align-content: start;
+}
+
+.game-palette-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  gap: 0.75rem;
+}
+
 .pro-move-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(150px, 1fr));
@@ -890,6 +917,27 @@ code {
   cursor: pointer;
   font-weight: 850;
   color: var(--ink);
+}
+
+.game-step {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.game-step.warn {
+  border-color: #fde68a;
+  background: var(--warning-soft);
+}
+
+.game-step-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
 }
 
 .record-toolbar {
@@ -1810,6 +1858,8 @@ label {
   .chain-link-panel,
   .pro-recording-layout,
   .pro-move-grid,
+  .game-builder-layout,
+  .game-palette-grid,
   .recordings-layout,
   .logs-shell {
     grid-template-columns: 1fr;
@@ -1819,6 +1869,10 @@ label {
   .version-row,
   .stage-header,
   .selected-recording-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .game-step-head {
     grid-template-columns: 1fr;
   }
 

@@ -11,6 +11,9 @@ import type {
   DashboardState,
   DeleteRecordingRequest,
   DuplicateRecordingRequest,
+  GamePlan,
+  GamePlanStep,
+  GamePlanStepTransitionPolicy,
   LiveArmSource,
   MarkRecordingGyroZeroRequest,
   MoveCategory,
@@ -50,6 +53,7 @@ const SECTIONS = [
   { key: "overview", label: "Overview" },
   { key: "recordings", label: "Recordings" },
   { key: "pro-recording", label: "Pro Recording (beta)" },
+  { key: "game-builder", label: "Game Builder (beta)" },
   { key: "pins", label: "Pinned Moves" },
   { key: "training", label: "Training" },
   { key: "settings", label: "Settings" },
@@ -125,6 +129,13 @@ const BETA_RECORDING_TYPE_LABELS: Record<BetaRecordingType, string> = {
   keyboardFromActiveHold: "Keyboard from active hold",
   leaderFromSyncedHold: "Leader from synced hold",
 };
+const GAME_BUILDER_TRANSITION_OPTIONS: Array<{ value: GamePlanStepTransitionPolicy; label: string }> = [
+  { value: "returnToActiveHoldFirst", label: "Return to active hold first" },
+  { value: "requireStartPoseTolerance", label: "Require start pose tolerance" },
+  { value: "runNamedTransitionMoveFirst", label: "Run transition move first" },
+  { value: "askForManualConfirmation", label: "Ask for manual confirmation" },
+];
+const PROTECTED_GAME_BUILDER_KEYS = new Set(["ESC", "0", "UP", "DOWN", "LEFT", "RIGHT", "O", "P"]);
 const HOME_MODE_OPTIONS: Array<{ value: ArmHomeMode; label: string }> = [
   { value: "none", label: "Do not go home" },
   { value: "start", label: "Go home before replay" },
@@ -286,6 +297,26 @@ function normalizeHotkeyText(value: string): string {
     return "";
   }
   return raw.replace(/\s+/g, "").replace(/COMMAND/g, "META");
+}
+
+function normalizeGameBuilderHotkey(value: string | null | undefined): string {
+  const normalized = normalizeHotkeyText(value ?? "");
+  if (normalized === "ARROWUP") {
+    return "UP";
+  }
+  if (normalized === "ARROWDOWN") {
+    return "DOWN";
+  }
+  if (normalized === "ARROWLEFT") {
+    return "LEFT";
+  }
+  if (normalized === "ARROWRIGHT") {
+    return "RIGHT";
+  }
+  if (normalized === "ESCAPE") {
+    return "ESC";
+  }
+  return normalized;
 }
 
 function keyboardEventPrimaryKey(event: KeyboardEvent): string {
@@ -1845,6 +1876,12 @@ export default function App() {
   const [proReturnToHold, setProReturnToHold] = useState(true);
   const [proPlaybackSpeed, setProPlaybackSpeed] = useState(1);
   const [proAdvancedOpen, setProAdvancedOpen] = useState(false);
+  const [gameBuilderMode, setGameBuilderMode] = useState<"editor" | "play">("editor");
+  const [gamePlanId, setGamePlanId] = useState<string | null>(null);
+  const [gamePlanName, setGamePlanName] = useState("Game Plan");
+  const [gamePlanSteps, setGamePlanSteps] = useState<GamePlanStep[]>([]);
+  const [gameStepStatuses, setGameStepStatuses] = useState<Record<string, "idle" | "running" | "completed" | "failed" | "canceled" | "paused">>({});
+  const [activeGameStepId, setActiveGameStepId] = useState<string | null>(null);
   const [selectedRecording, setSelectedRecording] = useState<string>("");
   const [recordingNameDraft, setRecordingNameDraft] = useState("");
   const [trimStartDraft, setTrimStartDraft] = useState("0");
@@ -2036,6 +2073,24 @@ export default function App() {
     if (!state) {
       return;
     }
+    const selectedPlan =
+      (gamePlanId ? state.gamePlans.find((plan) => plan.id === gamePlanId) : null) ??
+      state.gamePlans[0] ??
+      null;
+    if (!selectedPlan) {
+      return;
+    }
+    if (selectedPlan.id !== gamePlanId) {
+      setGamePlanId(selectedPlan.id);
+      setGamePlanName(selectedPlan.name);
+      setGamePlanSteps(structuredClone(selectedPlan.steps));
+    }
+  }, [gamePlanId, state]);
+
+  useEffect(() => {
+    if (!state) {
+      return;
+    }
 
     const activeRecording = state.recordings.find((item) => item.path === selectedRecording);
     if (activeRecording && !pinName) {
@@ -2045,6 +2100,9 @@ export default function App() {
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
+      if (activeSection === "game-builder" && gameBuilderMode === "play") {
+        return;
+      }
       if (!state?.pinnedMoves.length) {
         return;
       }
@@ -2074,7 +2132,40 @@ export default function App() {
 
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [state]);
+  }, [activeSection, gameBuilderMode, state]);
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if (activeSection !== "game-builder" || gameBuilderMode !== "play") {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      if (
+        target?.isContentEditable ||
+        tagName === "input" ||
+        tagName === "textarea" ||
+        tagName === "select"
+      ) {
+        return;
+      }
+      const normalized = normalizeGameBuilderHotkey(normalizeKeyboardEvent(event));
+      if (!normalized || PROTECTED_GAME_BUILDER_KEYS.has(normalized)) {
+        return;
+      }
+      const match = gamePlanSteps.find(
+        (step) => normalizeGameBuilderHotkey(step.hotkey) === normalized && !gameHotkeyErrors[step.id],
+      );
+      if (!match) {
+        return;
+      }
+      event.preventDefault();
+      void handleRunGameStep(match);
+    };
+
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [activeSection, gameBuilderMode, gameHotkeyErrors, gamePlanSteps, state]);
 
   const selectedRecordingEntry = useMemo<RecordingEntry | undefined>(
     () => state?.recordings.find((item) => item.path === selectedRecording),
@@ -2113,6 +2204,47 @@ export default function App() {
     () => new Set((state?.recordings ?? []).map((recording) => recording.path)),
     [state?.recordings],
   );
+  const gameFavoriteMoves = useMemo(
+    () =>
+      (state?.moveDefinitions ?? [])
+        .filter((move) => !move.archived && move.favoriteVersionId)
+        .map((move) => {
+          const favorite = (state?.moveRecordingVersions ?? []).find(
+            (version) => version.id === move.favoriteVersionId && version.moveId === move.id,
+          );
+          return favorite
+            ? {
+                move,
+                favorite,
+                broken: !favorite.trajectoryPath || !knownRecordingPaths.has(favorite.trajectoryPath),
+              }
+            : null;
+        })
+        .filter((item): item is { move: MoveDefinition; favorite: MoveRecordingVersion; broken: boolean } => item !== null),
+    [knownRecordingPaths, state?.moveDefinitions, state?.moveRecordingVersions],
+  );
+  const gameHotkeyErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    const seen = new Map<string, string>();
+    for (const step of gamePlanSteps) {
+      const hotkey = normalizeGameBuilderHotkey(step.hotkey);
+      if (!hotkey) {
+        continue;
+      }
+      if (PROTECTED_GAME_BUILDER_KEYS.has(hotkey)) {
+        errors[step.id] = "Protected drive or emergency key";
+        continue;
+      }
+      const existing = seen.get(hotkey);
+      if (existing) {
+        errors[step.id] = "Conflicts with another step";
+        errors[existing] = "Conflicts with another step";
+        continue;
+      }
+      seen.set(hotkey, step.id);
+    }
+    return errors;
+  }, [gamePlanSteps]);
   const selectedRecordingIsDummy = Boolean(selectedRecordingEntry?.dummy || isDummyRecordingPath(selectedRecording));
   const selectedRecordingReplayOptions: RecordingReplayOptions = useMemo(() => {
     const savedOptions = state?.recordingReplayOptions[selectedRecording];
@@ -3023,6 +3155,162 @@ export default function App() {
       method: "POST",
       body: JSON.stringify(replay),
     });
+  };
+
+  const createGameStep = (move: MoveDefinition, favorite: MoveRecordingVersion): GamePlanStep => ({
+    id: createUiId("game-step"),
+    moveId: move.id,
+    favoriteVersionId: favorite.id,
+    labelOverride: null,
+    hotkey: null,
+    playbackSpeedOverride: null,
+    includeVexBaseReplay: false,
+    autoVexPositioning: false,
+    returnToActiveHold: true,
+    requireConfirmationAfter: false,
+    pauseAfter: false,
+    transitionPolicy: "returnToActiveHoldFirst",
+    transitionMoveId: null,
+  });
+
+  const handleNewGamePlan = () => {
+    setGamePlanId(createUiId("game-plan"));
+    setGamePlanName("Game Plan");
+    setGamePlanSteps([]);
+    setGameStepStatuses({});
+    setActiveGameStepId(null);
+    setGameBuilderMode("editor");
+  };
+
+  const handleEditGamePlan = (plan: GamePlan) => {
+    setGamePlanId(plan.id);
+    setGamePlanName(plan.name);
+    setGamePlanSteps(structuredClone(plan.steps));
+    setGameStepStatuses({});
+    setActiveGameStepId(null);
+    setGameBuilderMode("editor");
+  };
+
+  const updateGameStep = (stepId: string, patch: Partial<GamePlanStep>) => {
+    setGamePlanSteps((current) =>
+      current.map((step) => (step.id === stepId ? { ...step, ...patch } : step)),
+    );
+  };
+
+  const handleAddFavoriteMoveToGamePlan = (move: MoveDefinition, favorite: MoveRecordingVersion) => {
+    setGamePlanSteps((current) => [...current, createGameStep(move, favorite)]);
+    setGamePlanId((current) => current ?? createUiId("game-plan"));
+  };
+
+  const handleMoveGameStep = (stepId: string, direction: -1 | 1) => {
+    setGamePlanSteps((current) => {
+      const index = current.findIndex((step) => step.id === stepId);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) {
+        return current;
+      }
+      const next = [...current];
+      const [step] = next.splice(index, 1);
+      next.splice(nextIndex, 0, step);
+      return next;
+    });
+  };
+
+  const handleDuplicateGameStep = (stepId: string) => {
+    setGamePlanSteps((current) => {
+      const index = current.findIndex((step) => step.id === stepId);
+      if (index < 0) {
+        return current;
+      }
+      const copy = {
+        ...current[index],
+        id: createUiId("game-step"),
+        hotkey: null,
+      };
+      const next = [...current];
+      next.splice(index + 1, 0, copy);
+      return next;
+    });
+  };
+
+  const handleRemoveGameStep = (stepId: string) => {
+    setGamePlanSteps((current) => current.filter((step) => step.id !== stepId));
+  };
+
+  const handleSaveGamePlan = async () => {
+    const now = new Date().toISOString();
+    const payload: GamePlan = {
+      id: gamePlanId ?? createUiId("game-plan"),
+      name: gamePlanName.trim() || "Game Plan",
+      steps: gamePlanSteps,
+      createdAtIso: now,
+      updatedAtIso: now,
+    };
+    const next = await mutate("save-game-plan", "/api/beta/game-plans", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      setGamePlanId(payload.id);
+      flashToast("Game plan saved.");
+    }
+  };
+
+  const replayRequestForGameStep = (step: GamePlanStep): ReplayRequest | null => {
+    const move = state?.moveDefinitions.find((item) => item.id === step.moveId);
+    const version = state?.moveRecordingVersions.find(
+      (item) => item.id === step.favoriteVersionId && item.moveId === step.moveId,
+    );
+    if (!move || !version?.trajectoryPath) {
+      return null;
+    }
+    return {
+      trajectoryPath: version.trajectoryPath,
+      target: "pi",
+      vexReplayMode: move.defaultVexReplaySetting.replayMode,
+      homeMode: step.returnToActiveHold || state?.activeArmHold ? "end" : "none",
+      speed: step.playbackSpeedOverride ?? version.playbackSpeed,
+      autoVexPositioning: step.autoVexPositioning,
+      vexPositioningSpeed: DEFAULT_VEX_POSITIONING_SPEED,
+      vexPositioningTimeoutS: DEFAULT_VEX_POSITIONING_TIMEOUT_S,
+      vexPositioningXyToleranceM: DEFAULT_VEX_POSITIONING_XY_TOLERANCE_M,
+      vexPositioningHeadingToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TOLERANCE_DEG,
+      vexPositioningXyTrimToleranceM: DEFAULT_VEX_POSITIONING_XY_TRIM_TOLERANCE_M,
+      vexPositioningHeadingTrimToleranceDeg: DEFAULT_VEX_POSITIONING_HEADING_TRIM_TOLERANCE_DEG,
+      includeBase: step.includeVexBaseReplay && version.vexBaseSamplesPresent,
+      holdFinalS: state?.settings.trajectories.defaultHoldFinalS ?? 0.5,
+    };
+  };
+
+  const handleRunGameStep = async (step: GamePlanStep) => {
+    const replay = replayRequestForGameStep(step);
+    if (!replay) {
+      setGameStepStatuses((current) => ({ ...current, [step.id]: "failed" }));
+      flashToast("This game step is missing its favorite trajectory.");
+      return;
+    }
+    setActiveGameStepId(step.id);
+    setGameStepStatuses((current) => ({ ...current, [step.id]: "running" }));
+    const next = await mutate(`run-game-step-${step.id}`, "/api/replays/start", {
+      method: "POST",
+      body: JSON.stringify(replay),
+    });
+    setGameStepStatuses((current) => ({
+      ...current,
+      [step.id]: next ? (step.pauseAfter ? "paused" : "completed") : "failed",
+    }));
+    if (next && !step.pauseAfter) {
+      setActiveGameStepId(null);
+    }
+  };
+
+  const handleCancelGameStep = async () => {
+    const canceledStepId = activeGameStepId;
+    const next = await mutate("cancel-game-step", "/api/replays/stop", { method: "POST" });
+    if (next && canceledStepId) {
+      setGameStepStatuses((current) => ({ ...current, [canceledStepId]: "canceled" }));
+      setActiveGameStepId(null);
+    }
   };
 
   const handleSetArmHomeFromRecordingStart = async () => {
@@ -4061,6 +4349,8 @@ export default function App() {
               "Record follower motion on the Pi, replay saved trajectories, and pin them for reuse."}
             {activeSection === "pro-recording" &&
               "Record competition move versions, test them quickly, and mark one final version per move."}
+            {activeSection === "game-builder" &&
+              "Build favorite-only match sequences and run them with visible authority, hold, and cancel controls."}
             {activeSection === "pins" &&
               "Launch saved movements instantly from the dashboard or with keyboard shortcuts."}
             {activeSection === "training" &&
@@ -5934,6 +6224,293 @@ export default function App() {
                   ) : (
                     <div className="empty-state">Select a move tile to start recording versions.</div>
                   )}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {activeSection === "game-builder" && (
+            <section className="card stage-panel">
+              <div className="card-head">
+                <div>
+                  <p className="card-kicker">Game Builder (beta)</p>
+                  <h2>Favorite Move Sequence</h2>
+                </div>
+                <div className="button-cluster inline">
+                  <button
+                    className={gameBuilderMode === "editor" ? "primary" : ""}
+                    onClick={() => setGameBuilderMode("editor")}
+                  >
+                    Editor
+                  </button>
+                  <button
+                    className={gameBuilderMode === "play" ? "primary" : ""}
+                    onClick={() => setGameBuilderMode("play")}
+                  >
+                    Play
+                  </button>
+                </div>
+              </div>
+
+              <div className="game-status-strip">
+                <span className={`status-pill ${state?.piReachable ? "good" : "bad"}`}>Pi {state?.piReachable ? "ready" : "offline"}</span>
+                <span className={`status-pill ${state?.vexBrain.connected ? "good" : "bad"}`}>VEX {vexStatusLabel(state?.vexBrain)}</span>
+                <span className={`status-pill ${controlAuthority?.safetyLatched ? "bad" : "good"}`}>Safety {controlAuthority?.safetyLatched ? "latched" : "clear"}</span>
+                <span className={`status-pill ${state?.activeArmHold ? "good" : "muted"}`}>Hold {state?.activeArmHold?.name ?? "none"}</span>
+                <span className="status-pill muted">Arm {armAuthorityLabel(controlAuthority?.arm)}</span>
+                <span className="status-pill muted">Base {baseAuthorityLabel(controlAuthority?.base)}</span>
+                <span className="status-pill muted">Speed {controlAuthority?.speedPreset ?? "drive"}</span>
+              </div>
+
+              <div className="game-builder-layout">
+                <div className="game-palette">
+                  <div className="card-head">
+                    <div>
+                      <p className="card-kicker">Favorites</p>
+                      <h3>Move Palette</h3>
+                    </div>
+                    <button onClick={handleNewGamePlan}>New Plan</button>
+                  </div>
+                  <div className="game-palette-grid">
+                    {gameFavoriteMoves.length ? (
+                      gameFavoriteMoves.map(({ move, favorite, broken }) => (
+                        <button
+                          key={move.id}
+                          className={`move-tile ${broken ? "warn" : ""}`}
+                          disabled={broken || gameBuilderMode === "play"}
+                          onClick={() => handleAddFavoriteMoveToGamePlan(move, favorite)}
+                        >
+                          <span className={`move-icon ${move.colorToken}`}>{moveIconGlyph(move)}</span>
+                          <span className="move-tile-label">{move.label}</span>
+                          <span className="move-tile-meta">
+                            {MOVE_CATEGORY_LABELS[move.category]} • {versionLabel(favorite)}
+                          </span>
+                          <span className="move-tile-state">{broken ? "Missing trajectory" : "Add to sequence"}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="empty-state">
+                        Mark favorite versions in Pro Recording before building a game plan.
+                      </div>
+                    )}
+                  </div>
+                  {state?.gamePlans.length ? (
+                    <div className="saved-plan-list">
+                      {state.gamePlans.map((plan) => (
+                        <button
+                          key={plan.id}
+                          className={plan.id === gamePlanId ? "version-row active" : "version-row"}
+                          onClick={() => handleEditGamePlan(plan)}
+                        >
+                          <span>{plan.steps.length}</span>
+                          <strong>{plan.name}</strong>
+                          <span>saved</span>
+                          <span />
+                          <span />
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="game-sequence-panel">
+                  <div className="card-head">
+                    <div>
+                      <p className="card-kicker">{gameBuilderMode === "play" ? "Play Mode" : "Editor Mode"}</p>
+                      <h3>{gamePlanName}</h3>
+                    </div>
+                    <div className="button-cluster inline">
+                      <button disabled={gameBuilderMode === "play" || Boolean(Object.keys(gameHotkeyErrors).length)} onClick={() => void handleSaveGamePlan()}>
+                        Save Game Plan
+                      </button>
+                      <button className="danger" onClick={() => void mutate("game-emergency-stop", "/api/robot/emergency-stop", { method: "POST" })}>
+                        Emergency Stop + Torque Off
+                      </button>
+                    </div>
+                  </div>
+
+                  {gameBuilderMode === "editor" ? (
+                    <div className="form-grid compact">
+                      <label>
+                        Plan name
+                        <input value={gamePlanName} onChange={(event) => setGamePlanName(event.target.value)} />
+                      </label>
+                      <label>
+                        Hotkey status
+                        <input
+                          value={Object.keys(gameHotkeyErrors).length ? "Resolve conflicts before saving" : "No conflicts"}
+                          readOnly
+                        />
+                      </label>
+                    </div>
+                  ) : (
+                    <div className="button-cluster inline">
+                      <button disabled={!activeGameStepId} onClick={() => void mutate("pause-game-step", "/api/replays/stop", { method: "POST" })}>
+                        Pause
+                      </button>
+                      <button disabled={!activeGameStepId} onClick={() => void handleCancelGameStep()}>
+                        Cancel
+                      </button>
+                      <button onClick={() => void handleStartLiveControl("start-keyboard-control")}>
+                        Manual Override
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="game-step-list">
+                    {gamePlanSteps.length ? (
+                      gamePlanSteps.map((step, index) => {
+                        const move = state?.moveDefinitions.find((item) => item.id === step.moveId) ?? null;
+                        const version = state?.moveRecordingVersions.find((item) => item.id === step.favoriteVersionId) ?? null;
+                        const status = gameStepStatuses[step.id] ?? "idle";
+                        const hotkeyError = gameHotkeyErrors[step.id] ?? "";
+                        const broken = !move || !version?.trajectoryPath || !knownRecordingPaths.has(version.trajectoryPath);
+                        return (
+                          <article key={step.id} className={`game-step ${broken ? "warn" : ""}`}>
+                            <div className="game-step-head">
+                              <span className="status-pill muted">#{index + 1}</span>
+                              <div>
+                                <strong>{step.labelOverride || move?.label || "Missing move"}</strong>
+                                <p className="card-note">
+                                  {version ? versionLabel(version) : "missing favorite"} • {status}
+                                  {hotkeyError ? ` • ${hotkeyError}` : ""}
+                                </p>
+                              </div>
+                              {gameBuilderMode === "play" ? (
+                                <button className="primary" disabled={broken} onClick={() => void handleRunGameStep(step)}>
+                                  Run
+                                </button>
+                              ) : (
+                                <div className="button-cluster inline">
+                                  <button onClick={() => handleMoveGameStep(step.id, -1)}>Up</button>
+                                  <button onClick={() => handleMoveGameStep(step.id, 1)}>Down</button>
+                                  <button onClick={() => handleDuplicateGameStep(step.id)}>Duplicate</button>
+                                  <button onClick={() => handleRemoveGameStep(step.id)}>Remove</button>
+                                </div>
+                              )}
+                            </div>
+
+                            {gameBuilderMode === "editor" ? (
+                              <div className="form-grid compact">
+                                <label>
+                                  Step label
+                                  <input
+                                    value={step.labelOverride ?? ""}
+                                    placeholder={move?.label ?? "Step label"}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, {
+                                        labelOverride: event.target.value.trim() ? event.target.value : null,
+                                      })
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  Hotkey
+                                  <input
+                                    value={step.hotkey ?? ""}
+                                    placeholder="Optional"
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, {
+                                        hotkey: normalizeGameBuilderHotkey(event.target.value) || null,
+                                      })
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  Playback speed override
+                                  <input
+                                    type="number"
+                                    min="0.1"
+                                    max="3"
+                                    step="0.05"
+                                    value={step.playbackSpeedOverride ?? ""}
+                                    placeholder={version?.playbackSpeed.toFixed(2) ?? "1"}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, {
+                                        playbackSpeedOverride: event.target.value ? Number(event.target.value) : null,
+                                      })
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  Transition policy
+                                  <select
+                                    value={step.transitionPolicy}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, {
+                                        transitionPolicy: event.target.value as GamePlanStepTransitionPolicy,
+                                      })
+                                    }
+                                  >
+                                    {GAME_BUILDER_TRANSITION_OPTIONS.map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="checkbox-row settings-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={step.includeVexBaseReplay}
+                                    disabled={!version?.vexBaseSamplesPresent}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, { includeVexBaseReplay: event.target.checked })
+                                    }
+                                  />
+                                  <span>Include VEX base replay</span>
+                                </label>
+                                <label className="checkbox-row settings-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={step.autoVexPositioning}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, { autoVexPositioning: event.target.checked })
+                                    }
+                                  />
+                                  <span>Auto VEX positioning</span>
+                                </label>
+                                <label className="checkbox-row settings-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={step.returnToActiveHold}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, { returnToActiveHold: event.target.checked })
+                                    }
+                                  />
+                                  <span>Return to active hold</span>
+                                </label>
+                                <label className="checkbox-row settings-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={step.requireConfirmationAfter}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, { requireConfirmationAfter: event.target.checked })
+                                    }
+                                  />
+                                  <span>Require confirmation after step</span>
+                                </label>
+                                <label className="checkbox-row settings-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={step.pauseAfter}
+                                    onChange={(event) =>
+                                      updateGameStep(step.id, { pauseAfter: event.target.checked })
+                                    }
+                                  />
+                                  <span>Pause after step</span>
+                                </label>
+                              </div>
+                            ) : null}
+                          </article>
+                        );
+                      })
+                    ) : (
+                      <div className="empty-state">
+                        Add favorite moves from the palette. Removing a step never deletes the recording.
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </section>

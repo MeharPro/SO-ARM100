@@ -58,6 +58,7 @@ import type {
   DeleteTrainingProfileRequest,
   DeleteRecordingRequest,
   DuplicateRecordingRequest,
+  GamePlan,
   LeaderStatus,
   MarkRecordingGyroZeroRequest,
   PinnedMove,
@@ -2370,6 +2371,29 @@ export class RobotController {
       this.configStore.saveMoveDefinitions(favorite.moves);
       this.configStore.saveMoveRecordingVersions(favorite.versions);
       this.logActivity("Updated beta move favorite version.");
+      this.lastError = null;
+      return this.getState();
+    });
+  }
+
+  async saveGamePlan(payload: GamePlan): Promise<DashboardState> {
+    return this.runExclusive(async () => {
+      const config = this.configStore.getConfig();
+      const id = typeof payload.id === "string" && payload.id.trim() ? payload.id.trim() : crypto.randomUUID();
+      const now = new Date().toISOString();
+      const existing = config.gamePlans.find((plan) => plan.id === id);
+      const plan: GamePlan = {
+        id,
+        name: typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : "Game plan",
+        steps: Array.isArray(payload.steps) ? payload.steps : [],
+        createdAtIso: existing?.createdAtIso ?? payload.createdAtIso ?? now,
+        updatedAtIso: now,
+      };
+      const nextPlans = existing
+        ? config.gamePlans.map((item) => (item.id === id ? plan : item))
+        : [...config.gamePlans, plan];
+      this.configStore.saveGamePlans(nextPlans);
+      this.logActivity(`Saved Game Builder plan ${plan.name}.`);
       this.lastError = null;
       return this.getState();
     });

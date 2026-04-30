@@ -18,6 +18,7 @@ import type {
   DuplicateRecordingRequest,
   DeployTrainingCheckpointRequest,
   DeleteTrainingProfileRequest,
+  GamePlan,
   MarkRecordingGyroZeroRequest,
   RecordingDetailRequest,
   RenameRecordingRequest,
@@ -324,6 +325,13 @@ app.post(
   "/api/beta/favorite-version",
   asyncRoute(async (req, res) => {
     res.json(await controller.setMoveFavoriteVersion(req.body as SetMoveFavoriteVersionRequest));
+  }),
+);
+
+app.post(
+  "/api/beta/game-plans",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.saveGamePlan(req.body as GamePlan));
   }),
 );
 

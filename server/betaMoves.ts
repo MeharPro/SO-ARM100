@@ -13,6 +13,17 @@ import type {
   VexReplayMode,
 } from "./types.js";
 
+export const PROTECTED_GAME_BUILDER_HOTKEYS = new Set([
+  "ESC",
+  "0",
+  "UP",
+  "DOWN",
+  "LEFT",
+  "RIGHT",
+  "O",
+  "P",
+]);
+
 export const MOVE_CATEGORY_LABELS: Record<MoveCategory, string> = {
   general: "General",
   fuseCollection: "Fuse collection",
@@ -561,6 +572,90 @@ export function favoriteTrajectoryIsBroken(
 ): boolean {
   const favorite = favoriteVersionForMove(move, versions);
   return Boolean(!favorite?.trajectoryPath || !trajectoryExists(favorite.trajectoryPath));
+}
+
+export function gameBuilderEligibleFavorites(
+  moves: MoveDefinition[],
+  versions: MoveRecordingVersion[],
+  trajectoryExists: (trajectoryPath: string) => boolean,
+): Array<{ move: MoveDefinition; favorite: MoveRecordingVersion; broken: boolean }> {
+  return moves
+    .filter((move) => !move.archived)
+    .map((move) => {
+      const favorite = favoriteVersionForMove(move, versions);
+      return favorite
+        ? {
+            move,
+            favorite,
+            broken: favoriteTrajectoryIsBroken(move, versions, trajectoryExists),
+          }
+        : null;
+    })
+    .filter((item): item is { move: MoveDefinition; favorite: MoveRecordingVersion; broken: boolean } => item !== null);
+}
+
+export function normalizeGameBuilderHotkey(value: string | null | undefined): string {
+  const normalized = (value ?? "").trim().toUpperCase().replace(/\s+/g, "");
+  if (normalized === "ARROWUP") {
+    return "UP";
+  }
+  if (normalized === "ARROWDOWN") {
+    return "DOWN";
+  }
+  if (normalized === "ARROWLEFT") {
+    return "LEFT";
+  }
+  if (normalized === "ARROWRIGHT") {
+    return "RIGHT";
+  }
+  if (normalized === "ESCAPE") {
+    return "ESC";
+  }
+  return normalized;
+}
+
+export function gameBuilderHotkeyErrors(steps: GamePlanStep[]): Record<string, string> {
+  const errors: Record<string, string> = {};
+  const seen = new Map<string, string>();
+  for (const step of steps) {
+    const hotkey = normalizeGameBuilderHotkey(step.hotkey);
+    if (!hotkey) {
+      continue;
+    }
+    if (PROTECTED_GAME_BUILDER_HOTKEYS.has(hotkey)) {
+      errors[step.id] = "Protected drive or emergency key";
+      continue;
+    }
+    const existingStepId = seen.get(hotkey);
+    if (existingStepId) {
+      errors[step.id] = "Conflicts with another step";
+      errors[existingStepId] = "Conflicts with another step";
+      continue;
+    }
+    seen.set(hotkey, step.id);
+  }
+  return errors;
+}
+
+export function createGamePlanStepFromFavorite(
+  move: MoveDefinition,
+  favorite: MoveRecordingVersion,
+): GamePlanStep {
+  return {
+    id: crypto.randomUUID(),
+    moveId: move.id,
+    favoriteVersionId: favorite.id,
+    labelOverride: null,
+    hotkey: null,
+    playbackSpeedOverride: null,
+    includeVexBaseReplay: false,
+    autoVexPositioning: false,
+    returnToActiveHold: true,
+    requireConfirmationAfter: false,
+    pauseAfter: false,
+    transitionPolicy: "returnToActiveHoldFirst",
+    transitionMoveId: null,
+  };
 }
 
 export function normalizeGamePlans(
