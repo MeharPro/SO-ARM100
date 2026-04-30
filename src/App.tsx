@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 
 import type {
   AdjustRecordingServoRequest,
@@ -55,6 +55,7 @@ const SECTIONS = [
   { key: "pro-recording", label: "Pro Recording (beta)" },
   { key: "game-builder", label: "Game Builder (beta)" },
   { key: "pins", label: "Pinned Moves" },
+  { key: "chain-link", label: "Chain-link" },
   { key: "training", label: "Training" },
   { key: "settings", label: "Settings" },
   { key: "logs", label: "Logs" },
@@ -1940,6 +1941,8 @@ export default function App() {
   const stateRequestController = useRef<AbortController | null>(null);
   const mutationSequenceRef = useRef(0);
   const chainRunCancelledRef = useRef(false);
+  const gameRunCancelledRef = useRef(false);
+  const gameRunTokenRef = useRef(0);
   const chainConfirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
 
   const loadState = async () => {
@@ -3041,7 +3044,12 @@ export default function App() {
       body: JSON.stringify(payload),
     });
     if (next) {
-      flashToast("Leader stale state resolved.");
+      if (action === "discardLeaderAuthority") {
+        setLiveArmSource("keyboard");
+        flashToast("Keyboard/follower mode selected; leader arm remains blocked until sync.");
+      } else {
+        flashToast("Leader stale state resolved.");
+      }
     }
   };
 
@@ -3290,26 +3298,53 @@ export default function App() {
       flashToast("This game step is missing its favorite trajectory.");
       return;
     }
+    const runToken = gameRunTokenRef.current + 1;
+    gameRunTokenRef.current = runToken;
+    gameRunCancelledRef.current = false;
     setActiveGameStepId(step.id);
     setGameStepStatuses((current) => ({ ...current, [step.id]: "running" }));
     const next = await mutate(`run-game-step-${step.id}`, "/api/replays/start", {
       method: "POST",
       body: JSON.stringify(replay),
     });
-    setGameStepStatuses((current) => ({
-      ...current,
-      [step.id]: next ? (step.pauseAfter ? "paused" : "completed") : "failed",
-    }));
-    if (next && !step.pauseAfter) {
+    if (!next) {
+      setGameStepStatuses((current) => ({ ...current, [step.id]: "failed" }));
       setActiveGameStepId(null);
+      return;
+    }
+
+    try {
+      await waitForReplayCompletion(next, gameRunCancelledRef);
+      if (gameRunCancelledRef.current || gameRunTokenRef.current !== runToken) {
+        return;
+      }
+      setGameStepStatuses((current) => ({
+        ...current,
+        [step.id]: step.pauseAfter ? "paused" : "completed",
+      }));
+      if (!step.pauseAfter) {
+        setActiveGameStepId(null);
+      }
+    } catch (error) {
+      if (gameRunCancelledRef.current || gameRunTokenRef.current !== runToken) {
+        return;
+      }
+      setGameStepStatuses((current) => ({ ...current, [step.id]: "failed" }));
+      setActiveGameStepId(null);
+      flashToast(error instanceof Error ? error.message : "Replay failed.");
     }
   };
 
   const handleCancelGameStep = async () => {
     const canceledStepId = activeGameStepId;
+    gameRunCancelledRef.current = true;
+    gameRunTokenRef.current += 1;
     const next = await mutate("cancel-game-step", "/api/replays/stop", { method: "POST" });
     if (next && canceledStepId) {
       setGameStepStatuses((current) => ({ ...current, [canceledStepId]: "canceled" }));
+      setActiveGameStepId(null);
+    } else if (!next && canceledStepId) {
+      setGameStepStatuses((current) => ({ ...current, [canceledStepId]: "failed" }));
       setActiveGameStepId(null);
     }
   };
@@ -4138,12 +4173,15 @@ export default function App() {
     }
   };
 
-  const waitForReplayCompletion = async (initialState: DashboardState): Promise<void> => {
+  const waitForReplayCompletion = async (
+    initialState: DashboardState,
+    cancelledRef: MutableRefObject<boolean> = chainRunCancelledRef,
+  ): Promise<void> => {
     let sawActiveReplay = isReplayServiceActive(initialState.services.replay);
     const initialStartedAt = initialState.services.replay.startedAt;
     const waitStartedAtMs = Date.now();
 
-    while (!chainRunCancelledRef.current) {
+    while (!cancelledRef.current) {
       await delay(900);
       const next = await request<DashboardState>("/api/state");
       setStateFromChainPoll(next);
@@ -4354,6 +4392,8 @@ export default function App() {
               "Build favorite-only match sequences and run them with visible authority, hold, and cancel controls."}
             {activeSection === "pins" &&
               "Launch saved movements instantly from the dashboard or with keyboard shortcuts."}
+            {activeSection === "chain-link" &&
+              "Build and run saved recording sequences with explicit confirmation, cancel, and per-block replay options."}
             {activeSection === "training" &&
               "Create task profiles, capture either on the Pi or directly from the leader arm on the Mac, train ACT locally, then deploy and benchmark policies on the Pi."}
             {activeSection === "settings" &&
@@ -4506,7 +4546,7 @@ export default function App() {
                   <span className="status-pill warn">leader stale</span>
                   <div className="stale-actions">
                     <p className="card-note">
-                      Leader arm control is blocked until the operator chooses a transition. Sync and move-to-leader need robot validation before they can be enabled.
+                      Leader arm control is blocked until the leader is physically synced. Keyboard/follower mode keeps the leader blocked.
                     </p>
                     <div className="button-cluster inline">
                       <button
@@ -5469,12 +5509,16 @@ export default function App() {
             </section>
           )}
 
-          {activeSection === "pins" && (
+          {(activeSection === "pins" || activeSection === "chain-link") && (
             <section className="card stage-panel">
               <div className="card-head">
                 <div>
-                  <p className="card-kicker">Pinned Moves</p>
-                  <h2>Keyboard Launch Pad</h2>
+                  <p className="card-kicker">
+                    {activeSection === "chain-link" ? "Chain-link" : "Pinned Moves"}
+                  </p>
+                  <h2>
+                    {activeSection === "chain-link" ? "Sequence Builder" : "Keyboard Launch Pad"}
+                  </h2>
                 </div>
                 <div className="pin-head-actions">
                   {state?.activeArmHold ? (

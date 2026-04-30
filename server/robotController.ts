@@ -464,6 +464,9 @@ export class RobotController {
   private activeArmHold: ActiveArmHold | null = null;
   private leaderPoseStale = false;
   private leaderPoseStaleReason: string | null = null;
+  private runtimeSafetyLatched = false;
+  private runtimeSafetyLatchReason: string | null = null;
+  private runtimeSafetyLatchClearedAtMs = 0;
   private cachedVexBrainStatus: VexBrainStatus = {
     connected: false,
     telemetryActive: false,
@@ -557,6 +560,17 @@ export class RobotController {
       datasetCaptureSnapshot,
       this.localDatasetCaptureRunner.getSnapshot(),
     );
+    this.updateRuntimeSafetyLatchFromSnapshots([
+      hostSnapshot,
+      teleopSnapshot,
+      replaySnapshot,
+      this.localReplayRunner.getSnapshot(),
+      this.piCalibrationRunner.getSnapshot(),
+      this.macCalibrationRunner.getSnapshot(),
+      datasetCaptureSnapshot,
+      this.localDatasetCaptureRunner.getSnapshot(),
+      this.policyEvalRunner.getSnapshot(),
+    ]);
 
     return {
       settings,
@@ -620,7 +634,7 @@ export class RobotController {
     const replayRunning = replaySnapshot.state === "running" || replaySnapshot.state === "starting";
     const keyboardCaptureActive =
       teleopSnapshot.state === "running" || teleopSnapshot.state === "starting";
-    const safetyLatched = false;
+    const safetyLatched = this.runtimeSafetyLatched;
     let arm: ControlAuthorityState["arm"] = "none";
     let base: ControlAuthorityState["base"] = "none";
 
@@ -682,6 +696,97 @@ export class RobotController {
     }
     this.leaderPoseStale = false;
     this.leaderPoseStaleReason = null;
+  }
+
+  private discardLeaderAuthorityForKeyboardMode(reason: string): void {
+    this.leaderPoseStale = true;
+    this.leaderPoseStaleReason =
+      "leader authority discarded; use keyboard/follower mode until the leader is explicitly synced";
+    this.logActivity(`Leader authority discarded for keyboard/follower mode: ${reason}`);
+  }
+
+  private resetRuntimeSafetyLatch(reason: string): void {
+    if (this.runtimeSafetyLatched) {
+      this.logActivity(`Runtime safety latch cleared from dashboard state: ${reason}`);
+    }
+    this.runtimeSafetyLatched = false;
+    this.runtimeSafetyLatchReason = null;
+    this.runtimeSafetyLatchClearedAtMs = Date.now();
+  }
+
+  private updateRuntimeSafetyLatchFromSnapshots(snapshots: ServiceSnapshot[]): void {
+    const safetyLine = snapshots
+      .filter((snapshot) => this.snapshotCanRelatchRuntimeSafety(snapshot))
+      .flatMap((snapshot) => [snapshot.detail, ...snapshot.logs])
+      .find((line) => /\[safety\].*latched|telemetry\.safety_fault_active/i.test(line));
+    if (!safetyLine) {
+      return;
+    }
+
+    const reason = this.cleanServiceLogLine(safetyLine);
+    if (!this.runtimeSafetyLatched || this.runtimeSafetyLatchReason !== reason) {
+      this.runtimeSafetyLatched = true;
+      this.runtimeSafetyLatchReason = reason;
+      this.logActivity(`Runtime safety latch detected: ${reason}`);
+    }
+  }
+
+  private snapshotCanRelatchRuntimeSafety(snapshot: ServiceSnapshot): boolean {
+    if (!this.runtimeSafetyLatchClearedAtMs) {
+      return true;
+    }
+    if (snapshot.state === "starting" || snapshot.state === "running" || snapshot.state === "stopping") {
+      return true;
+    }
+
+    const stoppedAtMs = snapshot.stoppedAt ? Date.parse(snapshot.stoppedAt) : Number.NaN;
+    if (Number.isFinite(stoppedAtMs) && stoppedAtMs <= this.runtimeSafetyLatchClearedAtMs) {
+      return false;
+    }
+
+    const startedAtMs = snapshot.startedAt ? Date.parse(snapshot.startedAt) : Number.NaN;
+    if (Number.isFinite(startedAtMs)) {
+      return startedAtMs > this.runtimeSafetyLatchClearedAtMs;
+    }
+
+    return true;
+  }
+
+  private normalizeArmSourceMeta(value: unknown): "leader" | "keyboard" | "none" | null {
+    return value === "leader" || value === "keyboard" || value === "none" ? value : null;
+  }
+
+  private resolveRecordingRestoreArmSource(
+    hostSnapshot: ServiceSnapshot,
+    teleopSnapshot: ServiceSnapshot,
+  ): "leader" | "keyboard" | null {
+    if (hostSnapshot.mode !== "recording") {
+      return null;
+    }
+
+    const metaArmSource =
+      this.normalizeArmSourceMeta(hostSnapshot.meta.armSource) ??
+      this.normalizeArmSourceMeta(teleopSnapshot.meta.armSource);
+    if (metaArmSource === "leader" || metaArmSource === "keyboard") {
+      return metaArmSource;
+    }
+    if (metaArmSource === "none") {
+      return null;
+    }
+
+    const hostInput = typeof hostSnapshot.meta.input === "string" ? hostSnapshot.meta.input : "";
+    const teleopInput = typeof teleopSnapshot.meta.input === "string" ? teleopSnapshot.meta.input : "";
+    if (hostInput.includes("leader") || teleopInput.includes("leader")) {
+      return "leader";
+    }
+    if (
+      hostInput.includes("keyboard") ||
+      teleopInput.includes("keyboard") ||
+      teleopSnapshot.mode === "keyboard-control"
+    ) {
+      return "keyboard";
+    }
+    return null;
   }
 
   private assertLeaderPoseFresh(action: string): void {
@@ -1620,6 +1725,7 @@ export class RobotController {
     this.lastVexBrainStatusRefresh = now;
     this.lastResolvedHost = null;
     this.activeArmHold = null;
+    this.resetRuntimeSafetyLatch("Pi connections were reset");
     this.clearReplayControlRestore();
     this.remoteStateRefreshInFlight = false;
     this.lastError = null;
@@ -1632,7 +1738,7 @@ export class RobotController {
   async resolveLeaderStale(payload: ResolveLeaderStaleRequest): Promise<DashboardState> {
     return this.runExclusive(async () => {
       if (payload.action === "discardLeaderAuthority") {
-        this.clearLeaderPoseStale("operator chose keyboard/follower mode and discarded leader authority");
+        this.discardLeaderAuthorityForKeyboardMode("operator chose to stay in keyboard/follower mode");
         this.lastError = null;
         return this.getState();
       }
@@ -2039,13 +2145,7 @@ export class RobotController {
       const state = this.hostRunner.getSnapshot();
       const teleopState = this.teleopRunner.getSnapshot();
       const { settings } = this.configStore.getConfig();
-      const hostInput = typeof state.meta.input === "string" ? state.meta.input : "";
-      const teleopInput = typeof teleopState.meta.input === "string" ? teleopState.meta.input : "";
-      const wasKeyboardRecording =
-        state.mode === "recording" &&
-        (hostInput.includes("keyboard") ||
-          teleopInput.includes("keyboard") ||
-          teleopState.mode === "keyboard-control");
+      const recordingArmSource = this.resolveRecordingRestoreArmSource(state, teleopState);
       this.logActivity("Stop recording requested.");
 
       await this.teleopRunner.stop("Stopping teleop for recording save.");
@@ -2081,13 +2181,28 @@ export class RobotController {
         await this.startReplayLocked(holdReplay, this.activeArmHold.homePosition, {
           returnToActiveHold: false,
         });
-      } else if (wasKeyboardRecording) {
+      } else if (recordingArmSource) {
+        const restoreArmSource = recordingArmSource;
         const keyboardHost =
           host ?? (await this.preparePi(settings, "restore keyboard control after recording"));
-        this.logActivity("Restoring keyboard backup control after keyboard recording.");
-        await this.startKeyboardControlSession(settings, keyboardHost, {
-          restoredAfterRecording: true,
-        }, false);
+        this.logActivity(
+          restoreArmSource === "leader"
+            ? "Restoring leader arm + keyboard base control after leader recording."
+            : "Restoring keyboard arm/base control after keyboard recording.",
+        );
+        await this.startKeyboardControlSession(
+          settings,
+          keyboardHost,
+          {
+            restoredAfterRecording: true,
+            recordingArmSource: restoreArmSource,
+          },
+          false,
+          {
+            allowLeader: restoreArmSource === "leader",
+            armSource: restoreArmSource === "keyboard" ? "keyboard" : undefined,
+          },
+        );
       }
 
       this.lastError = null;
@@ -3126,7 +3241,11 @@ export class RobotController {
     host: string,
     meta: Record<string, unknown> = {},
     syncVexTelemetry = true,
-    options: { allowLeader?: boolean; disableArmInput?: boolean } = {},
+    options: {
+      allowLeader?: boolean;
+      disableArmInput?: boolean;
+      armSource?: "leader" | "keyboard" | "none";
+    } = {},
   ): Promise<void> {
     assertHelperExists(HOST_SCRIPT);
     assertHelperExists(POWER_SCRIPT);
@@ -3143,14 +3262,21 @@ export class RobotController {
     }
     await this.writeRemoteTorqueLimits(settings, host);
     const keyboardJointLimitsJson = await this.loadKeyboardJointLimitsJson(settings, host);
-    const allowLeader = options.allowLeader !== false;
+    const requestedArmSource = options.disableArmInput ? "none" : options.armSource;
+    const allowLeader =
+      options.allowLeader !== false &&
+      requestedArmSource !== "keyboard" &&
+      requestedArmSource !== "none";
     const leader = allowLeader ? await this.getLeaderStatus(settings) : null;
     if (leader?.connected) {
       this.assertLeaderPoseFresh("Leader arm control restore");
       this.logActivity(leader.message);
     }
     const leaderConnected = Boolean(leader?.connected);
-    const armSource = options.disableArmInput ? "none" : leaderConnected ? "leader" : "keyboard";
+    if (requestedArmSource === "leader" && !leaderConnected) {
+      throw new Error("Leader arm restore was requested, but the leader arm is not connected.");
+    }
+    const armSource = requestedArmSource ?? (leaderConnected ? "leader" : "keyboard");
     if (armSource === "keyboard") {
       this.markLeaderPoseStale("keyboard arm authority selected for restored control");
     }
@@ -3349,10 +3475,10 @@ export class RobotController {
     const restore = this.replayControlRestore;
     this.replayControlRestore = null;
     this.replayControlRestoreInFlight = this.runExclusive(async () => {
-      const restoreKeyboardOnly = Boolean(this.activeArmHold);
+      const restoreBaseOnly = Boolean(this.activeArmHold) || restore.target === "pi";
       this.logActivity(
-        restoreKeyboardOnly
-          ? `Replay finished; restoring keyboard-only base control while holding ${this.activeArmHold?.name}.`
+        restoreBaseOnly
+          ? `Replay finished; restoring base-only keyboard control${this.activeArmHold ? ` while holding ${this.activeArmHold.name}` : " with leader authority blocked"}.`
           : `Replay finished; restoring explicit control for ${restore.trajectoryPath}.`,
       );
       const host = await this.preparePi(settings, "restore keyboard base after replay");
@@ -3363,12 +3489,12 @@ export class RobotController {
           restoredAfterReplay: true,
           replayTarget: restore.target,
           trajectoryPath: restore.trajectoryPath,
-          activeArmHold: restoreKeyboardOnly ? this.activeArmHold?.name : null,
+          activeArmHold: restoreBaseOnly ? this.activeArmHold?.name ?? null : null,
         },
         true,
         {
-          allowLeader: !restoreKeyboardOnly,
-          disableArmInput: restoreKeyboardOnly,
+          allowLeader: !restoreBaseOnly,
+          disableArmInput: restoreBaseOnly,
         },
       );
       this.lastError = null;
