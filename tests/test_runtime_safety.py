@@ -19,6 +19,8 @@ from lekiwi_runtime import (
     ArmSafetyFilter,
     COMMAND_SOURCE_KEYBOARD,
     ServoProtectionSupervisor,
+    VEX_CONTROL_MODE_KEY,
+    apply_robot_action,
     build_normalized_arm_position_limits,
     clamp_safe_arm_torque_limits,
 )
@@ -53,6 +55,11 @@ class FakeRobot:
     def __init__(self) -> None:
         self.arm_motors = list(ARM_MOTORS)
         self.bus = FakeBus()
+        self.sent_actions: list[dict[str, float]] = []
+
+    def send_action(self, action: dict[str, float]) -> dict[str, float]:
+        self.sent_actions.append(dict(action))
+        return dict(action)
 
 
 class FakeMotorConfig:
@@ -95,6 +102,53 @@ def build_observation(elbow: float = -95.0) -> dict[str, float]:
 
 
 class RuntimeSafetyTests(unittest.TestCase):
+    def test_apply_robot_action_preserves_valid_vex_control_mode_metadata(self) -> None:
+        robot = FakeRobot()
+
+        sent = apply_robot_action(
+            robot,
+            {
+                "arm_shoulder_pan.pos": 12.0,
+                "x.vel": 0.0,
+                "y.vel": 0.0,
+                "theta.vel": 0.0,
+                VEX_CONTROL_MODE_KEY: "ecu",
+            },
+            allow_legacy_base=False,
+        )
+
+        self.assertEqual(robot.bus.goal_writes, [{"arm_shoulder_pan": 12.0}])
+        self.assertEqual(sent[VEX_CONTROL_MODE_KEY], "ecu")
+        self.assertNotIn(VEX_CONTROL_MODE_KEY, robot.bus.goal_writes[0])
+
+    def test_apply_robot_action_preserves_vex_mode_without_sending_metadata_to_legacy_robot(self) -> None:
+        robot = FakeRobot()
+
+        sent = apply_robot_action(
+            robot,
+            {
+                "x.vel": 0.2,
+                "y.vel": 0.0,
+                "theta.vel": 0.0,
+                VEX_CONTROL_MODE_KEY: "drive",
+            },
+            allow_legacy_base=True,
+        )
+
+        self.assertEqual(robot.sent_actions, [{"x.vel": 0.2, "y.vel": 0.0, "theta.vel": 0.0}])
+        self.assertEqual(sent[VEX_CONTROL_MODE_KEY], "drive")
+
+    def test_apply_robot_action_drops_invalid_vex_control_mode_metadata(self) -> None:
+        robot = FakeRobot()
+
+        sent = apply_robot_action(
+            robot,
+            {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0, VEX_CONTROL_MODE_KEY: "fast"},
+            allow_legacy_base=False,
+        )
+
+        self.assertNotIn(VEX_CONTROL_MODE_KEY, sent)
+
     def test_build_normalized_arm_position_limits_uses_robot_calibration(self) -> None:
         limits = build_normalized_arm_position_limits(
             FakeLimitRobot(),

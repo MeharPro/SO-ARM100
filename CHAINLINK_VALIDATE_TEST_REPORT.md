@@ -266,6 +266,21 @@ Remaining code-level risks:
 - Runtime safety latch detection now reflects safety output logs/details, but it still depends on the runtime scripts emitting the expected safety markers.
 - UI coverage is browser-automation/manual; there is no dedicated frontend unit test harness in this repo.
 
+Hardware-session follow-up on 2026-04-30:
+
+- User reported all VEX keyboard base commands worked on hardware.
+- User reported VEX controller control worked, but pressing `0` did not toggle the VEX Brain between Drive and ECU mode.
+- Code inspection found that `scripts/lekiwi_keyboard_teleop.py` did toggle local mode and emitted `__vex_control_mode__`, but `scripts/lekiwi_runtime.py::apply_robot_action` returned only numeric arm/base command keys. That stripped the VEX mode metadata before `scripts/lekiwi_host.py::send_vex_live_base_motion` could send `!mode ecu` or `!mode drive` to the VEX Brain.
+- Fixed `apply_robot_action` to preserve validated VEX control mode metadata in the returned action while still keeping that metadata out of the physical robot `send_action`/`sync_write` payload.
+- Added regression tests proving `drive`/`ecu` metadata survives the sanitization path and invalid mode metadata is dropped.
+
+Additional commands run and results:
+
+- `python3 -m unittest tests.test_runtime_safety` - passed, 19 tests.
+- `python3 -m unittest tests.test_keyboard_teleop` - passed, 11 tests.
+- `python3 -m unittest tests.test_sensor_replay` - passed, 37 tests.
+- `python3 -m py_compile scripts/lekiwi_keyboard_teleop.py scripts/vex_base_bridge.py scripts/lekiwi_runtime.py scripts/lekiwi_host.py` - passed.
+
 Physical robot validation checklist:
 
 - Verify `ArrowUp` drives forward and decreases Y distance.

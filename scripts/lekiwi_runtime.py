@@ -1410,12 +1410,23 @@ class TorqueLimitFileWatcher:
             print(f"[torque] failed to load {self.path}: {exc}", flush=True)
 
 
+def _preserve_robot_action_metadata(
+    sent_action: dict[str, Any],
+    source_action: dict[str, Any],
+) -> dict[str, Any]:
+    enriched = dict(sent_action)
+    requested_vex_mode = str(source_action.get(VEX_CONTROL_MODE_KEY, "")).strip().lower()
+    if requested_vex_mode in {"drive", "ecu"}:
+        enriched[VEX_CONTROL_MODE_KEY] = requested_vex_mode
+    return enriched
+
+
 def apply_robot_action(
     robot: Any,
     action: dict[str, Any],
     *,
     allow_legacy_base: bool,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     arm_goal_pos = {
         key: float(value)
         for key, value in action.items()
@@ -1427,12 +1438,15 @@ def apply_robot_action(
     }
 
     if allow_legacy_base:
-        return robot.send_action({**arm_goal_pos, **base_goal_vel})
+        sent_action = robot.send_action({**arm_goal_pos, **base_goal_vel})
+        if not isinstance(sent_action, dict):
+            sent_action = {**arm_goal_pos, **base_goal_vel}
+        return _preserve_robot_action_metadata(sent_action, action)
 
     arm_goal_pos_raw = {key.removesuffix(".pos"): value for key, value in arm_goal_pos.items()}
     if arm_goal_pos_raw:
         robot.bus.sync_write("Goal_Position", arm_goal_pos_raw)
-    return {**arm_goal_pos, **base_goal_vel}
+    return _preserve_robot_action_metadata({**arm_goal_pos, **base_goal_vel}, action)
 
 
 def stop_robot_base(robot: Any, *, allow_legacy_base: bool) -> None:
