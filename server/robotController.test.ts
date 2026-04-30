@@ -161,6 +161,59 @@ test("runtime safety latch logs are reflected in control authority", () => {
   assert.equal(relatchedAuthority.safetyLatched, true);
 });
 
+test("runtime safety latch blocks new recording before Pi commands", async () => {
+  const controller = new RobotController();
+  const harness = controller as any;
+  let prepareCalled = false;
+
+  harness.configStore.getConfig = () => structuredClone(defaultConfig);
+  harness.runtimeSafetyLatched = true;
+  harness.runtimeSafetyLatchReason =
+    "[safety] latched arm_shoulder_lift stalled; disabled all motor torque";
+  harness.preparePi = async () => {
+    prepareCalled = true;
+    return "10.42.0.1";
+  };
+
+  await assert.rejects(
+    () => controller.startRecording({ label: "blocked", inputMode: "keyboard" }),
+    /Start recording is blocked because the runtime arm safety latch is active/,
+  );
+  assert.equal(prepareCalled, false);
+  assert.match(harness.lastError, /runtime arm safety latch is active/);
+});
+
+test("errored recording process does not keep arm authority", () => {
+  const harness = new RobotController() as any;
+  const erroredRecorder = snapshot({
+    state: "error",
+    mode: "recording",
+    detail: "Connection lost before handshake",
+    meta: { recordingInputMode: "keyboard", armSource: "keyboard" },
+  });
+
+  const authority = harness.buildControlAuthorityState(
+    leaderDisconnected,
+    vexDisconnected,
+    erroredRecorder,
+    snapshot(),
+    snapshot(),
+    snapshot(),
+    snapshot(),
+  );
+
+  assert.equal(authority.arm, "none");
+  assert.equal(authority.base, "none");
+});
+
+test("foreground transient SSH errors become visible backend errors", () => {
+  const harness = new RobotController() as any;
+
+  harness.noteError(new Error("read ECONNRESET"));
+
+  assert.match(harness.lastError, /Pi SSH connection dropped/);
+});
+
 test("recording stop from active hold returns directly to saved hold pose", async () => {
   const controller = new RobotController();
   const harness = controller as any;

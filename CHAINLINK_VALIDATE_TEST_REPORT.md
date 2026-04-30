@@ -299,6 +299,20 @@ Additional commands run and results:
 - `npm run build` - passed after the Pro Recording UI changes.
 - In-app browser reload of `http://localhost:5173/` - passed; Pro Recording beta opened, move/version controls rendered, the removed return-to-hold checkbox was absent, and browser console error count was 0.
 
+Hardware-session safety follow-up on 2026-04-30:
+
+- User reported that starting Pro Recording after a held pose hit a runtime safety latch before recording: `arm_shoulder_lift` stalled with an 11.17 degree position error, no meaningful motion for 0.58s, and 767mA current over the 650mA stall threshold. The runtime correctly disabled all follower-arm torque.
+- Follow-up state inspection found the dashboard could still attempt Start Recording/Live Control after this latch, and an errored recorder snapshot could continue to advertise arm authority as `recording`.
+- Fixed the server to treat the runtime safety latch as a motion-command lockout. Start Recording, Live Control, Keyboard/Base Control, hotkey host arming, replay, go-home, calibration, training capture, and policy evaluation now fail before issuing Pi commands while the latch is active.
+- Fixed control-authority reporting so safety latch reports arm/base as `none`, and errored/stale host snapshots no longer claim active recording, keyboard, leader, or VEX live-base authority.
+- Fixed foreground transient SSH failures to surface as `lastError` instead of being logged as ignorable noise.
+- Updated the UI to show a runtime safety latch banner and disable robot-start actions while the latch is active. Stop, Emergency Stop, and Reset Pi Connections remain available.
+- Added regression tests for blocked recording before Pi commands, errored recorder authority cleanup, and foreground transient SSH error visibility.
+- `npm run test:server` - passed, 27 tests.
+- `npm run build:server` - passed.
+- `npm run build` - passed.
+- In-app browser reload of `http://localhost:5173/` - passed; Overview, Pro Recording, and Game Builder navigation were present and browser console error count was 0.
+
 Physical robot validation checklist:
 
 - Verify `ArrowUp` drives forward and decreases Y distance.

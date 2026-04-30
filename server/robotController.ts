@@ -631,24 +631,46 @@ export class RobotController {
   ): ControlAuthorityState {
     const hostMode = hostSnapshot.mode;
     const teleopMode = teleopSnapshot.mode;
+    const hostActive =
+      hostSnapshot.state === "running" || hostSnapshot.state === "starting" || hostSnapshot.state === "stopping";
     const replayRunning = replaySnapshot.state === "running" || replaySnapshot.state === "starting";
     const keyboardCaptureActive =
       teleopSnapshot.state === "running" || teleopSnapshot.state === "starting";
     const safetyLatched = this.runtimeSafetyLatched;
     let arm: ControlAuthorityState["arm"] = "none";
     let base: ControlAuthorityState["base"] = "none";
+    const speedPreset =
+      teleopSnapshot.meta.vexControlMode === "ecu" || hostSnapshot.meta.vexControlMode === "ecu"
+        ? "ecu"
+        : "drive";
+
+    if (safetyLatched) {
+      return {
+        arm: "none",
+        base: "none",
+        activeHoldId: this.activeArmHold?.pinnedMoveId ?? null,
+        activeHoldName: this.activeArmHold?.name ?? null,
+        leaderConnected: leader.connected,
+        keyboardCaptureActive,
+        vexTelemetryActive: vexBrain.telemetryActive,
+        safetyLatched,
+        leaderPoseStale: this.leaderPoseStale,
+        leaderPoseStaleReason: this.leaderPoseStaleReason,
+        speedPreset,
+      };
+    }
 
     if (piCalibrationSnapshot.state === "running" || macCalibrationSnapshot.state === "running") {
       arm = "calibration";
     } else if (replayRunning) {
       arm = "replay";
-    } else if (hostMode === "recording") {
+    } else if (hostActive && hostMode === "recording") {
       arm = hostSnapshot.meta.recordingInputMode === "free-teach" ? "handGuide" : "recording";
     } else if (this.activeArmHold && teleopSnapshot.meta.armInput === "disabled") {
       arm = "holdPose";
-    } else if (hostSnapshot.meta.armSource === "leader" || teleopSnapshot.meta.armSource === "leader") {
+    } else if ((hostActive && hostSnapshot.meta.armSource === "leader") || teleopSnapshot.meta.armSource === "leader") {
       arm = "leader";
-    } else if (hostSnapshot.meta.armSource === "keyboard" || teleopSnapshot.meta.armSource === "keyboard") {
+    } else if ((hostActive && hostSnapshot.meta.armSource === "keyboard") || teleopSnapshot.meta.armSource === "keyboard") {
       arm = "keyboard";
     } else if (this.activeArmHold) {
       arm = "holdPose";
@@ -660,7 +682,7 @@ export class RobotController {
       base = "vexReplay";
     } else if (keyboardCaptureActive) {
       base = "keyboard";
-    } else if (hostSnapshot.meta.vexLiveBaseControl === true || vexBrain.telemetryActive) {
+    } else if ((hostActive && hostSnapshot.meta.vexLiveBaseControl === true) || vexBrain.telemetryActive) {
       base = "vexController";
     } else if (this.activeArmHold) {
       base = "hold";
@@ -677,10 +699,7 @@ export class RobotController {
       safetyLatched,
       leaderPoseStale: this.leaderPoseStale,
       leaderPoseStaleReason: this.leaderPoseStaleReason,
-      speedPreset:
-        teleopSnapshot.meta.vexControlMode === "ecu" || hostSnapshot.meta.vexControlMode === "ecu"
-          ? "ecu"
-          : "drive",
+      speedPreset,
     };
   }
 
@@ -712,6 +731,34 @@ export class RobotController {
     this.runtimeSafetyLatched = false;
     this.runtimeSafetyLatchReason = null;
     this.runtimeSafetyLatchClearedAtMs = Date.now();
+  }
+
+  private refreshRuntimeSafetyLatchFromCurrentSnapshots(): void {
+    this.updateRuntimeSafetyLatchFromSnapshots([
+      this.hostRunner.getSnapshot(),
+      this.teleopRunner.getSnapshot(),
+      this.replayRunner.getSnapshot(),
+      this.localReplayRunner.getSnapshot(),
+      this.piCalibrationRunner.getSnapshot(),
+      this.macCalibrationRunner.getSnapshot(),
+      this.datasetCaptureRunner.getSnapshot(),
+      this.localDatasetCaptureRunner.getSnapshot(),
+      this.policyEvalRunner.getSnapshot(),
+    ]);
+  }
+
+  private assertRuntimeSafetyClear(actionLabel: string): void {
+    this.refreshRuntimeSafetyLatchFromCurrentSnapshots();
+    if (!this.runtimeSafetyLatched) {
+      return;
+    }
+
+    const reason = this.runtimeSafetyLatchReason
+      ? ` Reason: ${this.runtimeSafetyLatchReason}`
+      : "";
+    throw new Error(
+      `${actionLabel} is blocked because the runtime arm safety latch is active.${reason} Inspect the arm, clear any mechanical bind, then use Reset Pi Connections before commanding motion again.`,
+    );
   }
 
   private updateRuntimeSafetyLatchFromSnapshots(snapshots: ServiceSnapshot[]): void {
@@ -1141,6 +1188,7 @@ export class RobotController {
       validateTrainingProfile(profile);
 
       this.logActivity(`Training dataset capture requested for ${profile.name}.`);
+      this.assertRuntimeSafetyClear("Training dataset capture");
       await this.stopRobotExclusiveProcesses("Training dataset capture needs the robot exclusively.");
       await this.datasetCaptureRunner.stop("Restarting training dataset capture.");
       await this.localDatasetCaptureRunner.stop("Restarting training dataset capture.");
@@ -1455,6 +1503,7 @@ export class RobotController {
         throw new Error("Run and pass the Pi policy benchmark before starting evaluation.");
       }
 
+      this.assertRuntimeSafetyClear("Policy evaluation");
       const host = await this.preparePi(settings, "start policy evaluation");
       await this.ensureRemoteHelpers(settings, host);
       await this.stopRobotExclusiveProcesses("Policy evaluation needs the robot exclusively.");
@@ -1498,6 +1547,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Live control requested.");
+      this.assertRuntimeSafetyClear("Live control");
       const leader = await this.getLeaderStatus(settings);
       const armSource = this.normalizeLiveArmSource(payload?.armSource, leader.connected);
       const leaderArmActive = armSource === "leader";
@@ -1594,6 +1644,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Keyboard hotkey host requested.");
+      this.assertRuntimeSafetyClear("Keyboard hotkey host");
       await this.ensureCommandReadyHost(settings, "arm keyboard hotkeys");
 
       this.lastError = null;
@@ -1605,6 +1656,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Keyboard/base control requested.");
+      this.assertRuntimeSafetyClear("Keyboard/base control");
       const leader = await this.getLeaderStatus(settings);
       const armSource = this.normalizeLiveArmSource(payload?.armSource ?? "keyboard", leader.connected);
       const leaderArmActive = armSource === "leader";
@@ -1780,6 +1832,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Set arm home position requested.");
+      this.assertRuntimeSafetyClear("Set arm home");
       const host = await this.ensureCommandReadyHost(settings, "set arm home");
       const requestId = `capture-home-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       await this.writeRemoteHostCommand(settings, host, {
@@ -1833,6 +1886,7 @@ export class RobotController {
       }
 
       this.logActivity("Go home requested.");
+      this.assertRuntimeSafetyClear("Go home");
       this.markLeaderPoseStale("follower moved with Go Home command");
       const host = await this.ensureCommandReadyHost(settings, "go home");
       await this.teleopRunner.stop(
@@ -1886,6 +1940,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Pi calibration requested.");
+      this.assertRuntimeSafetyClear("Pi calibration");
       const host = await this.preparePi(settings, "start Pi calibration");
       assertHelperExists(PI_CALIBRATION_SCRIPT);
       await this.ensureRemoteHelpers(settings, host);
@@ -1924,6 +1979,7 @@ export class RobotController {
 
       const { settings } = this.configStore.getConfig();
       this.logActivity(`Pi single-servo calibration requested for ${servoId}.`);
+      this.assertRuntimeSafetyClear("Pi servo calibration");
       const host = await this.preparePi(settings, `start ${servoId} calibration`);
       assertHelperExists(PI_CALIBRATION_SCRIPT);
       await this.ensureRemoteHelpers(settings, host);
@@ -1953,6 +2009,7 @@ export class RobotController {
     return this.runExclusive(async () => {
       const { settings } = this.configStore.getConfig();
       this.logActivity("Mac leader calibration requested.");
+      this.assertRuntimeSafetyClear("Mac leader calibration");
       const leader = await this.ensureLeaderConnected(settings);
 
       await this.teleopRunner.stop("Mac calibration needs the leader arm exclusively.");
@@ -2017,6 +2074,7 @@ export class RobotController {
       const useFreeTeachInput = requestedInputMode === "free-teach";
       const useKeyboardOnlyInput = requestedInputMode === "keyboard";
       this.logActivity(`Start recording requested${label ? ` (${label})` : ""}.`);
+      this.assertRuntimeSafetyClear("Start recording");
       const leader = useFreeTeachInput || useKeyboardOnlyInput ? null : await this.getLeaderStatus(settings);
       const combinedInput = !useFreeTeachInput && leader?.connected ? "leader+keyboard-base" : "keyboard";
       const recordingArmSource =
@@ -2663,6 +2721,7 @@ export class RobotController {
     homePositionOverride?: ArmHomePosition,
     options: { restoreControlAfterReplay?: boolean; returnToActiveHold?: boolean } = {},
   ): Promise<DashboardState> {
+    this.assertRuntimeSafetyClear("Replay");
     const restoreControlAfterReplay = options.restoreControlAfterReplay !== false;
     const { settings, homePosition } = this.configStore.getConfig();
     const normalizedReplay = normalizeReplayRequest(payload, settings.trajectories);
@@ -3110,11 +3169,13 @@ export class RobotController {
 
   private noteError(error: unknown): void {
     if (isTransientRemoteTransportError(error)) {
-      const action =
-        Date.now() < this.suppressRemoteTransportErrorsUntil
-          ? "Suppressed reset transport error"
-          : "Ignored transient Pi SSH transport error";
-      this.logActivity(`${action}: ${errorMessage(error)}`);
+      if (Date.now() < this.suppressRemoteTransportErrorsUntil) {
+        this.logActivity(`Suppressed reset transport error: ${errorMessage(error)}`);
+        return;
+      }
+      this.lastError =
+        "The Pi SSH connection dropped while the backend was talking to it. Reset Pi Connections, confirm the Pi is still reachable, then retry.";
+      this.logActivity(`Error: ${this.lastError} (${errorMessage(error)})`);
       return;
     }
     this.lastError = errorMessage(error);

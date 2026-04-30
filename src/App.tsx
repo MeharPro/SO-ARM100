@@ -2735,6 +2735,7 @@ export default function App() {
   const hasArmHomePosition = Boolean(state?.homePosition);
   const recordingUltrasonicResetReady = Boolean(selectedRecordingEntry);
   const controlAuthority = state?.controlAuthority;
+  const safetyLocked = Boolean(controlAuthority?.safetyLatched);
   const effectiveLiveArmSource: LiveArmSource = state?.activeArmHold ? "none" : liveArmSource;
 
   const activeSectionMeta = useMemo(
@@ -4293,6 +4294,7 @@ export default function App() {
   };
 
   const disabled = pendingAction !== null;
+  const robotCommandDisabled = disabled || safetyLocked;
   const activeChain = chainRunState
     ? state?.chainLinks.find((chain) => chain.id === chainRunState.chainId) ?? null
     : null;
@@ -4439,6 +4441,11 @@ export default function App() {
             <strong>Last backend error:</strong> {state.lastError}
           </div>
         ) : null}
+        {safetyLocked ? (
+          <div className="alert-banner">
+            <strong>Runtime arm safety latch active:</strong> robot-start actions are blocked until the arm is inspected and Pi connections are reset.
+          </div>
+        ) : null}
 
         <div className="stage-body">
           {activeSection === "overview" && (
@@ -4475,7 +4482,7 @@ export default function App() {
               <div className="button-cluster">
                 <button
                   className="primary"
-                  disabled={disabled}
+                  disabled={robotCommandDisabled}
                   onClick={() => void handleStartLiveControl("start-control")}
                 >
                   Start Live Control
@@ -4497,13 +4504,13 @@ export default function App() {
                   Reset Pi Connections
                 </button>
                 <button
-                  disabled={disabled || keyboardBackupActive}
+                  disabled={robotCommandDisabled || keyboardBackupActive}
                   onClick={() => void handleStartLiveControl("start-keyboard-control")}
                 >
                   Start Keyboard/Base Control
                 </button>
                 <button
-                  disabled={disabled || hotkeysArmed}
+                  disabled={robotCommandDisabled || hotkeysArmed}
                   onClick={() => void mutate("start-hotkeys", "/api/robot/start-hotkeys", { method: "POST" })}
                 >
                   Prime Pi for Pinned Moves
@@ -4945,7 +4952,7 @@ export default function App() {
                 <div className="button-cluster inline">
                   <button
                     className="primary"
-                    disabled={disabled}
+                    disabled={robotCommandDisabled}
                     onClick={() =>
                       void mutate("start-recording", "/api/recordings/start", {
                         method: "POST",
@@ -5448,7 +5455,7 @@ export default function App() {
                   <div className="button-cluster inline">
 	                    <button
 	                      className="primary"
-	                      disabled={disabled || !selectedRecording || selectedRecordingIsDummy}
+	                      disabled={robotCommandDisabled || !selectedRecording || selectedRecordingIsDummy}
 	                      onClick={() => void handleStartReplay()}
 	                    >
                       {replayTarget === "leader" ? "Replay on Leader" : "Replay"}
@@ -5532,7 +5539,7 @@ export default function App() {
                   <div className="button-cluster inline">
                     <button
                       className="primary"
-                      disabled={disabled || hotkeysArmed}
+                      disabled={robotCommandDisabled || hotkeysArmed}
                       onClick={() => void mutate("start-hotkeys", "/api/robot/start-hotkeys", { method: "POST" })}
                     >
                       Arm Hotkeys
@@ -5967,7 +5974,7 @@ export default function App() {
 	                      <div className="button-cluster inline">
 	                        <button
 	                          className="primary"
-	                          disabled={disabled || isDummyRecordingPath(move.trajectoryPath)}
+	                          disabled={robotCommandDisabled || isDummyRecordingPath(move.trajectoryPath)}
 	                          onClick={() => void handleTriggerPinnedMove(move)}
 	                        >
                           {move.holdArmPose ? (holdActive ? "Turn Off" : "Turn On") : "Run"}
@@ -6185,7 +6192,7 @@ export default function App() {
                       <div className="button-cluster inline">
                         <button
                           className="primary"
-                          disabled={disabled || isRecordingActive}
+                          disabled={robotCommandDisabled || isRecordingActive}
                           onClick={() => void handleStartProRecording()}
                         >
                           {isRecordingActive ? "Recording Active" : "Start Recording"}
@@ -6252,7 +6259,7 @@ export default function App() {
                           <div className="button-cluster inline">
                             <button
                               className="primary"
-                              disabled={disabled || !selectedProVersion.trajectoryPath}
+                              disabled={robotCommandDisabled || !selectedProVersion.trajectoryPath}
                               onClick={() => void handleReplayProVersion(selectedProMove, selectedProVersion)}
                             >
                               Replay Selected Version
