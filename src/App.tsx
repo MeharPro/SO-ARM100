@@ -2134,6 +2134,29 @@ export default function App() {
     return () => window.removeEventListener("keydown", listener);
   }, [activeSection, gameBuilderMode, state]);
 
+  const gameHotkeyErrors = useMemo(() => {
+    const errors: Record<string, string> = {};
+    const seen = new Map<string, string>();
+    for (const step of gamePlanSteps) {
+      const hotkey = normalizeGameBuilderHotkey(step.hotkey);
+      if (!hotkey) {
+        continue;
+      }
+      if (PROTECTED_GAME_BUILDER_KEYS.has(hotkey)) {
+        errors[step.id] = "Protected drive or emergency key";
+        continue;
+      }
+      const existing = seen.get(hotkey);
+      if (existing) {
+        errors[step.id] = "Conflicts with another step";
+        errors[existing] = "Conflicts with another step";
+        continue;
+      }
+      seen.set(hotkey, step.id);
+    }
+    return errors;
+  }, [gamePlanSteps]);
+
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if (activeSection !== "game-builder" || gameBuilderMode !== "play") {
@@ -2223,28 +2246,6 @@ export default function App() {
         .filter((item): item is { move: MoveDefinition; favorite: MoveRecordingVersion; broken: boolean } => item !== null),
     [knownRecordingPaths, state?.moveDefinitions, state?.moveRecordingVersions],
   );
-  const gameHotkeyErrors = useMemo(() => {
-    const errors: Record<string, string> = {};
-    const seen = new Map<string, string>();
-    for (const step of gamePlanSteps) {
-      const hotkey = normalizeGameBuilderHotkey(step.hotkey);
-      if (!hotkey) {
-        continue;
-      }
-      if (PROTECTED_GAME_BUILDER_KEYS.has(hotkey)) {
-        errors[step.id] = "Protected drive or emergency key";
-        continue;
-      }
-      const existing = seen.get(hotkey);
-      if (existing) {
-        errors[step.id] = "Conflicts with another step";
-        errors[existing] = "Conflicts with another step";
-        continue;
-      }
-      seen.set(hotkey, step.id);
-    }
-    return errors;
-  }, [gamePlanSteps]);
   const selectedRecordingIsDummy = Boolean(selectedRecordingEntry?.dummy || isDummyRecordingPath(selectedRecording));
   const selectedRecordingReplayOptions: RecordingReplayOptions = useMemo(() => {
     const savedOptions = state?.recordingReplayOptions[selectedRecording];
