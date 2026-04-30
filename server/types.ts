@@ -175,6 +175,106 @@ export interface TrainingConfig {
   selectedProfileId: string | null;
 }
 
+export type MoveCategory =
+  | "general"
+  | "fuseCollection"
+  | "fuseTransfer"
+  | "boardCollection"
+  | "boardTransfer";
+
+export type MoveIconKind =
+  | "doorLeft"
+  | "doorRight"
+  | "circleBlue"
+  | "circleYellow"
+  | "circleGreen"
+  | "heightLow"
+  | "heightHigh"
+  | "board4"
+  | "board6"
+  | "board8";
+
+export type BetaRecordingType =
+  | "keyboardControl"
+  | "leaderArm"
+  | "followerHandGuide"
+  | "keyboardFromActiveHold"
+  | "leaderFromSyncedHold";
+
+export interface MoveDefinition {
+  id: string;
+  label: string;
+  category: MoveCategory;
+  iconKind: MoveIconKind;
+  colorToken: string;
+  sortOrder: number;
+  description: string;
+  allowedRecordingTypes: BetaRecordingType[];
+  defaultRecordingType: BetaRecordingType;
+  defaultVexReplaySetting: {
+    includeBaseReplay: boolean;
+    replayMode: VexReplayMode;
+  };
+  defaultVexPositioningEnabled: boolean;
+  defaultSensorRecordingSettings: {
+    distanceSensors: boolean;
+    inertialSensor: boolean;
+    includeVexBaseSamples: boolean;
+  };
+  favoriteVersionId: string | null;
+  archived: boolean;
+}
+
+export type MoveRecordingSafetyStatus = "clear" | "latched" | "unknown";
+
+export interface MoveRecordingVersion {
+  id: string;
+  moveId: string;
+  versionNumber: number;
+  trajectoryPath: string | null;
+  displayName: string;
+  recordedAtIso: string;
+  recordingType: BetaRecordingType;
+  playbackSpeed: number;
+  vexBaseSamplesPresent: boolean;
+  distanceSensorSamplesPresent: boolean;
+  inertialSamplesPresent: boolean;
+  autoVexPositioningEnabled: boolean;
+  isFavorite: boolean;
+  notes: string;
+  safetyStatus: MoveRecordingSafetyStatus;
+}
+
+export type GamePlanStepTransitionPolicy =
+  | "requireStartPoseTolerance"
+  | "returnToActiveHoldFirst"
+  | "runNamedTransitionMoveFirst"
+  | "askForManualConfirmation";
+
+export interface GamePlanStep {
+  id: string;
+  moveId: string;
+  favoriteVersionId: string;
+  labelOverride: string | null;
+  hotkey: string | null;
+  playbackSpeedOverride: number | null;
+  includeVexBaseReplay: boolean;
+  autoVexPositioning: boolean;
+  returnToActiveHold: boolean;
+  requireConfirmationAfter: boolean;
+  pauseAfter: boolean;
+  transitionPolicy: GamePlanStepTransitionPolicy;
+  transitionMoveId: string | null;
+}
+
+export interface GamePlan {
+  id: string;
+  name: string;
+  steps: GamePlanStep[];
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
 export interface AppSettings {
   hotspot: HotspotSettings;
   pi: PiSettings;
@@ -223,6 +323,9 @@ export interface StoredConfig {
   chainLinks: ChainLink[];
   homePosition: ArmHomePosition | null;
   recordingReplayOptions: Record<string, RecordingReplayOptions>;
+  moveDefinitions: MoveDefinition[];
+  moveRecordingVersions: MoveRecordingVersion[];
+  gamePlans: GamePlan[];
   training: TrainingConfig;
 }
 
@@ -410,6 +513,9 @@ export interface DashboardState {
   activeArmHold: ActiveArmHold | null;
   controlAuthority: ControlAuthorityState;
   recordingReplayOptions: Record<string, RecordingReplayOptions>;
+  moveDefinitions: MoveDefinition[];
+  moveRecordingVersions: MoveRecordingVersion[];
+  gamePlans: GamePlan[];
   training: TrainingConfig & {
     selectedProfile: TrainingProfile | null;
   };

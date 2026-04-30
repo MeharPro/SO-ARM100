@@ -465,8 +465,17 @@ export class RobotController {
   };
 
   async getState(): Promise<DashboardState> {
-    const { settings, pinnedMoves, chainLinks, homePosition, recordingReplayOptions, training } =
-      this.configStore.getConfig();
+    const {
+      settings,
+      pinnedMoves,
+      chainLinks,
+      homePosition,
+      recordingReplayOptions,
+      moveDefinitions,
+      moveRecordingVersions,
+      gamePlans,
+      training,
+    } = this.configStore.getConfig();
     const wifi = await getWifiStatus();
     const resolvedPiHost = await this.findReachablePiHost(settings);
     const piReachable = Boolean(resolvedPiHost);
@@ -556,6 +565,9 @@ export class RobotController {
         this.macCalibrationRunner.getSnapshot(),
       ),
       recordingReplayOptions,
+      moveDefinitions,
+      moveRecordingVersions,
+      gamePlans,
       training: {
         ...training,
         selectedProfile,

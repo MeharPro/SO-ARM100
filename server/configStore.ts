@@ -6,6 +6,9 @@ import type {
   ArmHomePosition,
   AppSettings,
   ChainLink,
+  GamePlan,
+  MoveDefinition,
+  MoveRecordingVersion,
   PinnedMove,
   RecordingReplayOptions,
   StoredConfig,
@@ -13,6 +16,11 @@ import type {
   VexDirectionSign,
   VexManualIdleStoppingMode,
 } from "./types.js";
+import {
+  normalizeGamePlans,
+  normalizeMoveDefinitions,
+  normalizeMoveRecordingVersions,
+} from "./betaMoves.js";
 import { normalizeTrainingConfig } from "./trainingUtils.js";
 
 const ARM_HOME_JOINT_KEYS = [
@@ -97,6 +105,59 @@ export class ConfigStore {
     this.config = {
       ...this.config,
       recordingReplayOptions: structuredClone(recordingReplayOptions),
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  saveMoveDefinitions(moveDefinitions: MoveDefinition[]): StoredConfig {
+    const normalizedMoves = normalizeMoveDefinitions(moveDefinitions);
+    const normalizedVersions = normalizeMoveRecordingVersions(
+      this.config.moveRecordingVersions,
+      normalizedMoves,
+    );
+    this.config = {
+      ...this.config,
+      moveDefinitions: normalizedMoves,
+      moveRecordingVersions: normalizedVersions,
+      gamePlans: normalizeGamePlans(this.config.gamePlans, normalizedMoves, normalizedVersions),
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  saveMoveRecordingVersions(moveRecordingVersions: MoveRecordingVersion[]): StoredConfig {
+    const normalizedVersions = normalizeMoveRecordingVersions(
+      moveRecordingVersions,
+      this.config.moveDefinitions,
+    );
+    this.config = {
+      ...this.config,
+      moveRecordingVersions: normalizedVersions,
+      moveDefinitions: normalizeMoveDefinitions(
+        this.config.moveDefinitions.map((move) => ({
+          ...move,
+          favoriteVersionId: normalizedVersions.some(
+            (version) => version.id === move.favoriteVersionId && version.moveId === move.id,
+          )
+            ? move.favoriteVersionId
+            : null,
+        })),
+      ),
+      gamePlans: normalizeGamePlans(this.config.gamePlans, this.config.moveDefinitions, normalizedVersions),
+    };
+    this.persist();
+    return this.getConfig();
+  }
+
+  saveGamePlans(gamePlans: GamePlan[]): StoredConfig {
+    this.config = {
+      ...this.config,
+      gamePlans: normalizeGamePlans(
+        gamePlans,
+        this.config.moveDefinitions,
+        this.config.moveRecordingVersions,
+      ),
     };
     this.persist();
     return this.getConfig();
@@ -197,6 +258,35 @@ export class ConfigStore {
             this.defaults.settings.vex.manualIdleStoppingMode,
         },
       });
+      const moveDefinitions = normalizeMoveDefinitions(raw.moveDefinitions);
+      const moveRecordingVersions = normalizeMoveRecordingVersions(
+        raw.moveRecordingVersions,
+        moveDefinitions,
+      );
+      const favoriteVersionIds = new Set(
+        moveRecordingVersions.filter((version) => version.isFavorite).map((version) => version.id),
+      );
+      const normalizedMoveDefinitions = moveDefinitions.map((move) => {
+        if (
+          move.favoriteVersionId &&
+          moveRecordingVersions.some(
+            (version) => version.id === move.favoriteVersionId && version.moveId === move.id,
+          )
+        ) {
+          return move;
+        }
+        const favorite = moveRecordingVersions.find(
+          (version) => version.moveId === move.id && favoriteVersionIds.has(version.id),
+        );
+        return favorite ? { ...move, favoriteVersionId: favorite.id } : { ...move, favoriteVersionId: null };
+      });
+      const normalizedMoveRecordingVersions = moveRecordingVersions.map((version) => ({
+        ...version,
+        isFavorite: normalizedMoveDefinitions.some(
+          (move) => move.id === version.moveId && move.favoriteVersionId === version.id,
+        ),
+      }));
+
       return {
         settings,
         pinnedMoves: Array.isArray(raw.pinnedMoves)
@@ -209,6 +299,13 @@ export class ConfigStore {
         recordingReplayOptions: this.normalizeRecordingReplayOptions(
           raw.recordingReplayOptions,
           settings.trajectories.defaultReplaySpeed,
+        ),
+        moveDefinitions: normalizedMoveDefinitions,
+        moveRecordingVersions: normalizedMoveRecordingVersions,
+        gamePlans: normalizeGamePlans(
+          raw.gamePlans,
+          normalizedMoveDefinitions,
+          normalizedMoveRecordingVersions,
         ),
         training: normalizeTrainingConfig(raw.training, this.rootDir),
       };

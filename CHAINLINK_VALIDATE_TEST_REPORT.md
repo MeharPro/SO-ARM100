@@ -41,3 +41,23 @@ Requires physical robot validation:
 - Leader stale transition workflows, especially sync and follower-to-leader transitions.
 - Emergency stop effect on both arm torque and VEX base.
 - Temperature/current safety latch behavior under real load.
+
+## Phase 2: Beta Move and Recording Foundations
+
+Commands run:
+
+- `npm run test:server` - passed, 16 tests.
+- `npm run build` - passed, Vite client build and server TypeScript compile.
+
+Failures fixed:
+
+- None in the focused Phase 2 validation run.
+
+Failures remaining:
+
+- None known from Phase 2 code-level validation.
+
+Requires physical robot validation:
+
+- Favorite/broken trajectory checks currently validate data paths only; a real Pi recording refresh is still needed to prove file presence during match setup.
+- Sensor sample presence is metadata until recordings are captured from the real robot and VEX telemetry stream.

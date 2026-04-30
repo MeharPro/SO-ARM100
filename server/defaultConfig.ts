@@ -1,4 +1,5 @@
 import type { StoredConfig } from "./types.js";
+import { createDefaultMoveDefinitions } from "./betaMoves.js";
 import { createDefaultTrainingConfig } from "./trainingUtils.js";
 
 export const defaultConfig: StoredConfig = {
@@ -96,5 +97,8 @@ export const defaultConfig: StoredConfig = {
   chainLinks: [],
   homePosition: null,
   recordingReplayOptions: {},
+  moveDefinitions: createDefaultMoveDefinitions(),
+  moveRecordingVersions: [],
+  gamePlans: [],
   training: createDefaultTrainingConfig(process.cwd()),
 };
