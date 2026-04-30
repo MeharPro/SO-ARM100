@@ -146,3 +146,147 @@ Requires physical robot validation:
 - Leader stale state blocking unsafe snapback with real leader/follower positions.
 - Emergency stop effect on both arm torque and VEX base.
 - Temperature/current safety latch behavior under real load.
+
+## Phase 6: Independent Audit and Hardening Pass
+
+Date: 2026-04-30.
+
+Branch audited:
+
+- `meharpro/Chainlink-validate` at `8296761bba35e06ea57237f0f91b40601b5a55c2`.
+
+Baseline commit:
+
+- `3423822 chore: preserve chainlink validation baseline`.
+
+Audit branch:
+
+- `Chainlink-validate-audit`.
+
+Commits reviewed:
+
+- `3423822 chore: preserve chainlink validation baseline`
+- `15f59f5 feat: implement P0 contest control reliability`
+- `71c735e feat: add beta move and recording foundations`
+- `a6ac5a7 feat: add pro recording beta workflow`
+- `52019ab feat: add game builder beta workflow`
+- `8296761 test: validate chainlink beta control workflow`
+
+Files reviewed:
+
+- `ROBOT_COMPETITION_CONTROL_SPEC.md`
+- `CHAINLINK_VALIDATE_TEST_REPORT.md`
+- Full diff from `3423822..8296761`
+- `server/robotController.ts`
+- `server/types.ts`
+- `src/types.ts`
+- `server/configStore.ts`
+- `server/defaultConfig.ts`
+- `server/index.ts`
+- `scripts/lekiwi_keyboard_teleop.py`
+- `scripts/vex_base_bridge.py`
+- `server/betaMoves.ts`
+- `server/betaMoves.test.ts`
+- `src/App.tsx`
+- `src/styles.css`
+- Related tests under `server/*.test.ts` and `tests/*.py`
+
+Tests added:
+
+- `server/robotController.test.ts`
+  - Discarding leader authority keeps leader resume blocked.
+  - Recording restore source distinguishes leader arm + keyboard base from keyboard arm recording.
+  - Runtime safety latch logs are surfaced through `controlAuthority.safetyLatched`, while pre-reset stopped-runner logs do not immediately relatch after reset.
+
+Failures found and fixed:
+
+- `resolveLeaderStale({ action: "discardLeaderAuthority" })` cleared stale leader state, which allowed a later leader resume after the operator had chosen keyboard/follower authority. It now keeps leader authority blocked until an explicit physical sync path exists.
+- Recording restore used broad string matching on `input.includes("keyboard")`, so `leader+keyboard-base` recordings could be treated as keyboard-arm recordings and keyboard recordings could try to restore leader authority. Restore now uses explicit `armSource` metadata and falls back conservatively.
+- Pi replay restore could attempt to restore leader authority after replay even though Pi replay marks the leader pose stale. Pi replay now restores base-only keyboard control unless the flow is a local leader replay path.
+- `controlAuthority.safetyLatched` was hard-coded false. It now latches from runtime safety log/details signals and clears on Pi connection reset.
+- Resetting the dashboard safety latch could immediately relatch from old stopped-runner logs retained after a Pi reset. Old pre-reset stopped snapshots are now ignored; active or post-reset safety signals still relatch.
+- Game Builder marked a replay step completed immediately after `/api/replays/start` returned. It now waits for replay completion, respects cancel tokens, and does not let a late completion overwrite cancel/failure state.
+- The old Chain-link page was not exposed as a separate navigation item. It is now restored as an additive `Chain-link` tab while reusing the existing builder/library workflow.
+
+Commands run and results:
+
+- `git status` - clean before audit branch creation; later showed only intended audit edits.
+- `git branch --show-current` - confirmed `Chainlink-validate`, then `Chainlink-validate-audit`.
+- `git remote -v` - confirmed `meharpro` and `origin`; `meharpro` is the writable remote used for this work.
+- `git fetch --all --prune` - passed.
+- `git log --oneline --decorate --graph --max-count=30` - expected commits present.
+- `git diff --stat 3423822..HEAD` - reviewed scoped diff; no generated blobs or source deletions found.
+- `git diff 3423822..HEAD -- server/robotController.ts` - reviewed.
+- `git diff 3423822..HEAD -- scripts/lekiwi_keyboard_teleop.py` - reviewed.
+- `git diff 3423822..HEAD -- scripts/vex_base_bridge.py` - reviewed.
+- `git diff 3423822..HEAD -- src/App.tsx` - reviewed.
+- `git diff 3423822..HEAD -- server/betaMoves.ts server/betaMoves.test.ts` - reviewed.
+- `cat package.json` - reviewed available scripts.
+- `find . -maxdepth 3 -iname '*test*' -o -iname '*spec*'` - reviewed available tests/spec files.
+- `find . -maxdepth 3 -name 'pytest.ini' -o -name 'pyproject.toml' -o -name 'vitest.config.*' -o -name 'vite.config.*' -o -name 'tsconfig*.json'` - reviewed project validation config.
+- `npm run` - confirmed scripts are `dev`, `dev:server`, `dev:client`, `build`, `build:client`, `build:server`, and `test:server`; there is no `npm test`, lint, or separate typecheck script.
+- `rg -n "I/K|J/L|U/O" .` - reviewed; old mappings only remain as legacy/fallback documentation.
+- `rg -n "autoVexPositioning|vexPositioning" src server scripts tests` - reviewed; defaults remain off unless explicitly enabled.
+- `rg -n "leader.*keyboard|keyboard.*leader|staleLeader|leaderStale|activeArmHold|hold" src server scripts tests` - reviewed authority and hold paths.
+- `rg -n "ArrowUp|ArrowDown|ArrowLeft|ArrowRight|KeyO|KeyP|theta.vel|x.vel|y.vel" src server scripts tests` - reviewed keyboard/base mappings and tests.
+- `rg -n "TODO|FIXME|HACK|XXX|throw new Error|console.error|ReferenceError" src server scripts tests` - reviewed; no unsafe placeholders introduced.
+- `rg -n "Emergency|emergency|torque|safety|latch|temperature|current" src server scripts tests` - reviewed safety paths.
+- `npm run test:server` - passed, 21 tests.
+- `python3 -m unittest discover tests` - passed, 64 tests.
+- `python3 -m unittest tests.test_keyboard_teleop` - passed, 11 tests.
+- `python3 -m unittest tests.test_sensor_replay` - passed, 37 tests.
+- `python3 -m unittest tests.test_runtime_safety` - passed, 16 tests.
+- `python3 -m py_compile scripts/lekiwi_keyboard_teleop.py scripts/vex_base_bridge.py scripts/lekiwi_sensor_replay.py scripts/lekiwi_runtime.py` - passed.
+- `npm run build` - passed after fixing one temporary test fixture type error during this audit; final run passed Vite client build and server TypeScript compile.
+
+Browser validation:
+
+- Existing dev server found at `http://localhost:5173`; no new dev server was started.
+- In-app browser opened `http://localhost:5173`.
+- Browser console errors: none.
+- Desktop validation at `1440x900`:
+  - App loaded.
+  - Old navigation entries present: Overview, Recordings, Pinned Moves, Chain-link, Training, Settings, Logs.
+  - Beta navigation entries present: Pro Recording (beta), Game Builder (beta).
+  - Overview, Recordings, Pinned Moves, Chain-link, Training, Settings, and Logs each loaded their headings/panels.
+  - Chain-link builder/library rendered as its own tab.
+  - Pro Recording beta rendered 26 starter move tiles, selected a move without crashing, showed version controls, and kept advanced metadata collapsed by default.
+  - Game Builder beta rendered the favorite-only empty state without crashing and showed hotkey status controls.
+- Narrow validation at `390x844`:
+  - App loaded.
+  - Sidebar/navigation wrapped into two-column controls without horizontal overflow in the inspected snapshots.
+  - Chain-link, Pro Recording beta, and Game Builder beta remained reachable.
+  - Game Builder safety/status chips and Emergency Stop control area remained accessible in the vertical flow.
+  - Browser console errors: none.
+
+Remaining code-level risks:
+
+- No known code-level validation failures remain.
+- Leader sync and move-follower-to-leader flows remain intentionally disabled because their safe physical transition behavior is not implemented or robot-validated.
+- Runtime safety latch detection now reflects safety output logs/details, but it still depends on the runtime scripts emitting the expected safety markers.
+- UI coverage is browser-automation/manual; there is no dedicated frontend unit test harness in this repo.
+
+Physical robot validation checklist:
+
+- Verify `ArrowUp` drives forward and decreases Y distance.
+- Verify `ArrowDown` drives backward and increases Y distance.
+- Verify `ArrowLeft` strafes left and decreases X distance.
+- Verify `ArrowRight` strafes right and increases X distance.
+- Verify `O` and `P` rotate in opposite, documented directions.
+- Verify manual keyboard calibration signs affect manual keyboard control only, not sensor replay.
+- Verify VEX controller secondary control and deadband behavior.
+- Verify Drive/ECU/Crawl speed presets on real hardware.
+- Verify manual idle braking modes do not create jitter or drift.
+- Verify replay/preposition HOLD behavior on VEX motors.
+- Verify recording from hold returns to hold.
+- Verify replay and pinned moves return to hold when expected.
+- Verify keyboard arm does not resume after recording/replay while hold is active.
+- Verify leader stale state blocks unsafe leader-follower resume with physically separated leader/follower poses.
+- Verify gripper/claw movement marks leader stale on real follower motion.
+- Verify Emergency Stop + Torque Off disables follower torque and stops VEX base motion.
+- Verify temperature/current/stall safety latches stop unsafe behavior under real load.
+
+Final audit conclusion:
+
+- Code-level validation passed.
+- Physical robot validation is still required before claiming the robot works.
