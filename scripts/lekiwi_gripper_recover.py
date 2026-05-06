@@ -7,6 +7,8 @@ import sys
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from lekiwi_runtime import resolve_lekiwi_robot_port
+
 DEFAULT_GRIPPER_ID = 6
 DEFAULT_MAX_TORQUE_LIMIT = 400
 DEFAULT_TORQUE_LIMIT = 350
@@ -50,6 +52,13 @@ def read_registers(bus: FeetechMotorsBus, num_retry: int) -> dict[str, int | str
 
 def main() -> int:
     args = parse_args()
+    resolved_port = resolve_lekiwi_robot_port(args.robot_port)
+    if resolved_port != args.robot_port:
+        print(
+            f"Using detected LeKiwi robot port {resolved_port} instead of configured {args.robot_port}.",
+            flush=True,
+        )
+        args.robot_port = resolved_port
     motors = {
         "arm_gripper": Motor(args.gripper_id, "sts3215", MotorNormMode.RANGE_0_100),
     }

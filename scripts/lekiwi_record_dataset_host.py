@@ -201,7 +201,7 @@ def main() -> None:
     )
     safety_filter = ArmSafetyFilter(
         enabled=args.safer_servo_mode,
-        map_wrist_to_follower_start=args.capture_mode == "leader",
+        map_wrist_to_follower_start=False,
         absolute_position_limits=absolute_position_limits,
     )
     is_free_teach = args.capture_mode == "free-teach"

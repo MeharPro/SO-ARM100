@@ -13,6 +13,7 @@ from lekiwi_runtime import (
     ACTION_COMMAND_SOURCE_KEY,
     COMMAND_SOURCE_KEYBOARD,
     VEX_CONTROL_MODE_KEY,
+    VEX_PIN5_SERVO_POSITION_KEY,
     align_degrees_near_reference,
     parse_position_limits_json,
 )
@@ -53,6 +54,10 @@ ARM_SOURCE_NONE = "none"
 ARM_SOURCES = (ARM_SOURCE_LEADER, ARM_SOURCE_KEYBOARD, ARM_SOURCE_NONE)
 KEYBOARD_BASE_INITIAL_SPEED_RATIO = 0.25
 KEYBOARD_BASE_ACCELERATION_S = 2.5
+ENTER_DOUBLE_CLICK_MAX_GAP_S = 0.45
+ENTER_SINGLE_HOLD_DELAY_S = 0.12
+ENTER_CLOCKWISE_KEY = "enter_clockwise"
+ENTER_COUNTER_CLOCKWISE_KEY = "enter_counter_clockwise"
 LIMIT_LOCK_ERROR_DEG = 2.0
 LIMIT_LOCK_PROGRESS_EPSILON_DEG = 0.2
 LIMIT_LOCK_TIMEOUT_S = 0.3
@@ -78,6 +83,7 @@ MAC_VK_TO_KEY = {
     16: "y",
     17: "t",
     29: "0",
+    36: "enter",
     31: "o",
     32: "u",
     35: "p",
@@ -87,6 +93,7 @@ MAC_VK_TO_KEY = {
     40: "k",
     45: "n",
     53: "esc",
+    76: "enter",
     123: "arrow_left",
     124: "arrow_right",
     125: "arrow_down",
@@ -108,17 +115,33 @@ ARM_BINDINGS = (
     ("arm_elbow_flex.pos", ("e",), ("d",), 45.0, 0.0),
     ("arm_wrist_flex.pos", ("r", "y"), ("f", "h"), 60.0, 0.0),
     ("arm_wrist_roll.pos", ("t",), ("g",), 90.0, 0.0),
-    ("arm_gripper.pos", ("z", "c", "b"), ("x", "v", "n"), 80.0, 10.0),
+    ("arm_gripper.pos", ("z", "c"), ("x",), 80.0, 10.0),
 )
+
+VEX_PIN5_SERVO_KEY_BINDINGS = {
+    "n": "start",
+    "b": "up",
+    "v": "down",
+}
 
 BASE_BINDINGS = (
     ("x.vel", ("arrow_left", "l"), ("arrow_right", "j")),
     ("y.vel", ("arrow_up", "i"), ("arrow_down", "k")),
-    ("theta.vel", ("p",), ("o", "u")),
+    ("theta.vel", ("p", ENTER_CLOCKWISE_KEY), ("o", "u", ENTER_COUNTER_CLOCKWISE_KEY)),
 )
+BASE_CONTROL_KEYS = {
+    "0",
+    "enter",
+    *(
+        key
+        for _axis, positive_keys, negative_keys in BASE_BINDINGS
+        for key in (*positive_keys, *negative_keys)
+    ),
+}
 CONTROL_KEYS = {
     "esc",
     "0",
+    "enter",
     *(
         key
         for _joint, positive_keys, negative_keys, *_rest in ARM_BINDINGS
@@ -129,6 +152,7 @@ CONTROL_KEYS = {
         for _axis, positive_keys, negative_keys in BASE_BINDINGS
         for key in (*positive_keys, *negative_keys)
     ),
+    *VEX_PIN5_SERVO_KEY_BINDINGS.keys(),
 }
 
 
@@ -149,6 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--leader-id", default=os.getenv("LEKIWI_LEADER_ID", "leader"))
     parser.add_argument("--joint-limits-json", default="{}")
     parser.add_argument("--disable-arm-input", action="store_true")
+    parser.add_argument("--disable-base-input", action="store_true")
     parser.add_argument("--arm-source", choices=ARM_SOURCES, default=ARM_SOURCE_KEYBOARD)
     parser.add_argument("--vex-keyboard-calibration-json", default="{}")
     parser.add_argument("--print-every", type=int, default=10)
@@ -188,6 +213,46 @@ def finite_positive(value: float | None, fallback: float) -> float:
     return float(fallback)
 
 
+def configure_low_latency_zmq(robot: object) -> None:
+    zmq_module = getattr(robot, "_zmq", None)
+    if zmq_module is None:
+        return
+
+    sockets = (
+        (getattr(robot, "zmq_cmd_socket", None), ("CONFLATE", "LINGER", "SNDHWM", "IMMEDIATE")),
+        (getattr(robot, "zmq_observation_socket", None), ("CONFLATE", "LINGER", "RCVHWM")),
+    )
+    for socket, option_names in sockets:
+        if socket is None:
+            continue
+        for name in option_names:
+            option = getattr(zmq_module, name, None)
+            if option is None:
+                continue
+            value = 0 if name == "LINGER" else 1
+            try:
+                socket.setsockopt(option, value)
+            except Exception:
+                pass
+
+
+def send_latest_action(robot: object, action: dict[str, object]) -> bool:
+    zmq_module = getattr(robot, "_zmq", None)
+    socket = getattr(robot, "zmq_cmd_socket", None)
+    if zmq_module is None or socket is None:
+        getattr(robot, "send_action")(action)
+        return True
+
+    try:
+        socket.send_string(json.dumps(action), flags=getattr(zmq_module, "NOBLOCK", 0))
+        return True
+    except Exception as exc:
+        again_type = getattr(zmq_module, "Again", None)
+        if isinstance(again_type, type) and isinstance(exc, again_type):
+            return False
+        raise
+
+
 def _normalize_direction_sign(value: object) -> float:
     return -1.0 if value == -1 or value == -1.0 or value == "-1" else 1.0
 
@@ -212,6 +277,67 @@ def keyboard_arm_active(pressed: set[str]) -> bool:
         for _joint, positive_keys, negative_keys, *_rest in ARM_BINDINGS
         for key in (*positive_keys, *negative_keys)
     )
+
+
+def filter_base_control_keys(pressed: set[str]) -> set[str]:
+    return {key for key in pressed if key not in BASE_CONTROL_KEYS}
+
+
+class EnterRotationClickState:
+    def __init__(
+        self,
+        *,
+        double_click_max_gap_s: float = ENTER_DOUBLE_CLICK_MAX_GAP_S,
+        single_hold_delay_s: float = ENTER_SINGLE_HOLD_DELAY_S,
+    ) -> None:
+        self.double_click_max_gap_s = max(float(double_click_max_gap_s), 0.0)
+        self.single_hold_delay_s = max(float(single_hold_delay_s), 0.0)
+        self._enter_was_down = False
+        self._press_started_at: float | None = None
+        self._quick_tap_released_at: float | None = None
+        self._active_virtual_key: str | None = None
+
+    def update(self, pressed: set[str], now_s: float) -> set[str]:
+        next_pressed = set(pressed)
+        enter_down = "enter" in pressed
+
+        if (
+            self._quick_tap_released_at is not None
+            and now_s - self._quick_tap_released_at > self.double_click_max_gap_s
+        ):
+            self._quick_tap_released_at = None
+
+        if enter_down and not self._enter_was_down:
+            self._press_started_at = now_s
+            if (
+                self._quick_tap_released_at is not None
+                and now_s - self._quick_tap_released_at <= self.double_click_max_gap_s
+            ):
+                self._active_virtual_key = ENTER_COUNTER_CLOCKWISE_KEY
+                self._quick_tap_released_at = None
+            else:
+                self._active_virtual_key = None
+
+        if enter_down:
+            if (
+                self._active_virtual_key is None
+                and self._press_started_at is not None
+                and now_s - self._press_started_at >= self.single_hold_delay_s
+            ):
+                self._active_virtual_key = ENTER_CLOCKWISE_KEY
+            if self._active_virtual_key is not None:
+                next_pressed.add(self._active_virtual_key)
+        elif self._enter_was_down:
+            if self._active_virtual_key is None:
+                self._quick_tap_released_at = now_s
+            else:
+                self._quick_tap_released_at = None
+            self._press_started_at = None
+            self._active_virtual_key = None
+
+        self._enter_was_down = enter_down
+        next_pressed.discard("enter")
+        return next_pressed
 
 
 class VexControlModeState:
@@ -253,6 +379,19 @@ def _poll_quartz_pressed_keys() -> set[str]:
 
 def _normalize_key_symbols(key: object) -> tuple[str, ...]:
     symbols: list[str] = []
+    if pynput_keyboard is not None:
+        special_key_aliases = (
+            (getattr(pynput_keyboard.Key, "enter", None), "enter"),
+            (getattr(pynput_keyboard.Key, "esc", None), "esc"),
+            (getattr(pynput_keyboard.Key, "up", None), "arrow_up"),
+            (getattr(pynput_keyboard.Key, "down", None), "arrow_down"),
+            (getattr(pynput_keyboard.Key, "left", None), "arrow_left"),
+            (getattr(pynput_keyboard.Key, "right", None), "arrow_right"),
+        )
+        for special_key, alias in special_key_aliases:
+            if special_key is not None and key == special_key:
+                symbols.append(alias)
+
     char = getattr(key, "char", None)
     if isinstance(char, str) and char:
         symbols.append(char.lower())
@@ -685,36 +824,98 @@ def apply_arm_authority(
 
 
 def summarize_action(action: dict[str, float]) -> str:
-    arm_summary = " ".join(
+    arm_parts = [
         f"{joint.removeprefix('arm_')}={action[joint]:7.2f}"
         for joint, *_rest in ARM_BINDINGS
-    )
-    base_summary = " ".join(
+        if joint in action
+    ]
+    arm_summary = " ".join(arm_parts) if arm_parts else "arm=not-commanded"
+    base_parts = [
         f"{axis}={action[axis]:6.2f}"
         for axis, *_rest in BASE_BINDINGS
-    )
+        if axis in action
+    ]
+    base_summary = " ".join(base_parts) if base_parts else "base=not-commanded"
     return f"{arm_summary} | {base_summary}"
 
 
-def print_controls(leader_enabled: bool, mode: str, arm_input_enabled: bool = True) -> None:
-    label = "Leader arm + keyboard base teleop" if leader_enabled else "Keyboard teleop"
-    print(f"{label} is live. VEX base mode: {mode.upper()}.", flush=True)
+def vex_pin5_servo_position_from_keys(newly_pressed: set[str]) -> str | None:
+    for key, position in VEX_PIN5_SERVO_KEY_BINDINGS.items():
+        if key in newly_pressed:
+            return position
+    return None
+
+
+def should_send_arm_targets(configured_arm_source: str, leader_connected: bool) -> bool:
+    if configured_arm_source == ARM_SOURCE_KEYBOARD:
+        return True
+    if configured_arm_source == ARM_SOURCE_LEADER and leader_connected:
+        return True
+    return False
+
+
+def build_teleop_action(
+    arm_targets: dict[str, float],
+    base_action: dict[str, float],
+    *,
+    mode: str,
+    include_arm_targets: bool,
+    include_base_action: bool = True,
+    vex_pin5_servo_position: str | None = None,
+) -> dict[str, float | str]:
+    action: dict[str, float | str] = {}
+    if include_arm_targets:
+        action.update(arm_targets)
+    if include_base_action:
+        action.update(base_action)
+    action[ACTION_COMMAND_SOURCE_KEY] = COMMAND_SOURCE_KEYBOARD
+    if include_base_action:
+        action[VEX_CONTROL_MODE_KEY] = mode
+    if vex_pin5_servo_position is not None:
+        action[VEX_PIN5_SERVO_POSITION_KEY] = vex_pin5_servo_position
+    return action
+
+
+def print_controls(
+    leader_enabled: bool,
+    mode: str,
+    arm_input_enabled: bool = True,
+    base_input_enabled: bool = True,
+) -> None:
+    if leader_enabled:
+        label = "Leader arm + keyboard base teleop" if base_input_enabled else "Leader arm + VEX controller base teleop"
+    elif arm_input_enabled:
+        label = "Keyboard arm + keyboard base teleop" if base_input_enabled else "Keyboard arm + VEX controller base teleop"
+    else:
+        label = "Keyboard base teleop" if base_input_enabled else "VEX controller base teleop"
+    base_mode = f" VEX base mode: {mode.upper()}." if base_input_enabled else " Keyboard VEX base input is disabled."
+    print(f"{label} is live.{base_mode}", flush=True)
     if leader_enabled:
         print("Arm: leader arm owns the follower; keyboard arm keys are ignored.", flush=True)
     elif arm_input_enabled:
         print(
             "Arm: Q/A shoulder pan, W/S shoulder lift, E/D elbow, "
-            "R/F wrist flex (also Y/H), T/G wrist roll, Z/X gripper (also C/V and B/N).",
+            "R/F wrist flex (also Y/H), T/G wrist roll, Z/X gripper (also C).",
             flush=True,
         )
     else:
-        print("Arm: locked at the current target; keyboard arm keys are ignored.", flush=True)
-    print(
-        "Base: ArrowUp/ArrowDown forward-back (Y), ArrowLeft/ArrowRight strafe (X), O/P rotate. "
-        "Legacy I/K and J/L are fallback translation keys; U is legacy rotate-left. "
-        "Press 0 to toggle Drive/ECU speed, Esc to stop keyboard capture.",
-        flush=True,
-    )
+        print("Arm: not commanded by keyboard teleop; keyboard arm keys are ignored.", flush=True)
+    if base_input_enabled:
+        print(
+            "Base: ArrowUp/ArrowDown forward-back (Y), ArrowLeft/ArrowRight strafe (X), O/P rotate. "
+            "Enter hold rotates clockwise; quick Enter tap then hold rotates counter-clockwise. "
+            "Legacy I/K and J/L are fallback translation keys; U is legacy rotate-left. "
+            "VEX Pin 5 servo: N start, B -90 deg, V -180 deg. "
+            "Press 0 to toggle Drive/ECU speed, Esc to stop keyboard capture.",
+            flush=True,
+        )
+    else:
+        print(
+            "Base: keyboard VEX base keys are ignored; use the VEX controller for base motion. "
+            "VEX Pin 5 servo: N start, B -90 deg, V -180 deg. "
+            "Esc stops keyboard capture.",
+            flush=True,
+        )
 
 
 def main() -> None:
@@ -742,6 +943,7 @@ def main() -> None:
     mode_state = VexControlModeState(args.initial_vex_control_mode)
     configured_arm_source = ARM_SOURCE_NONE if args.disable_arm_input else args.arm_source
     keyboard_arm_input_enabled = configured_arm_source == ARM_SOURCE_KEYBOARD
+    keyboard_base_input_enabled = not args.disable_base_input
     leader_requested = (
         configured_arm_source == ARM_SOURCE_LEADER
         and str(args.leader_port or "off").strip().lower() != "off"
@@ -755,10 +957,14 @@ def main() -> None:
     last_pressed: set[str] = set()
     next_observation_poll_t = 0.0
     base_ramp = KeyboardBaseRamp()
+    enter_rotation = EnterRotationClickState()
+    dropped_send_count = 0
+    next_drop_log_t = 0.0
 
     try:
         print(f"Connecting to LeKiwi host at {args.remote_host}", flush=True)
         robot.connect()
+        configure_low_latency_zmq(robot)
         if leader_requested:
             try:
                 if SO100Leader is None or SO100LeaderConfig is None:
@@ -804,18 +1010,26 @@ def main() -> None:
         direction_limiter = JointDirectionLimiter(position_limits)
         direction_limiter.seed(observed_arm_positions)
         next_observation_poll_t = time.perf_counter()
-        print_controls(leader_connected, mode_state.mode, keyboard_arm_input_enabled)
+        print_controls(
+            leader_connected,
+            mode_state.mode,
+            keyboard_arm_input_enabled,
+            keyboard_base_input_enabled,
+        )
 
         while keyboard.is_connected or leader_connected:
             loop_start_t = time.perf_counter()
-            pressed = keyboard.get_pressed() if keyboard.is_connected else set()
+            raw_pressed = keyboard.get_pressed() if keyboard.is_connected else set()
+            if not keyboard_base_input_enabled:
+                raw_pressed = filter_base_control_keys(raw_pressed)
+            pressed = enter_rotation.update(raw_pressed, loop_start_t)
             newly_pressed = pressed - last_pressed
             last_pressed = pressed
             arm_pressed = pressed if keyboard_arm_input_enabled else set()
             arm_newly_pressed = newly_pressed if keyboard_arm_input_enabled else set()
             dt_s = max(loop_start_t - last_loop_t, 0.0)
             last_loop_t = loop_start_t
-            if mode_state.update(newly_pressed):
+            if keyboard_base_input_enabled and mode_state.update(newly_pressed):
                 print(f"VEX base mode switched to {mode_state.mode.upper()} speed.", flush=True)
 
             if loop_start_t >= next_observation_poll_t:
@@ -863,25 +1077,41 @@ def main() -> None:
                 ecu_linear_speed=ecu_linear_speed,
                 ecu_turn_speed=ecu_turn_speed,
             )
-            base_action = base_ramp.update(
-                pressed,
-                linear_speed=linear_speed,
-                turn_speed=turn_speed,
-                linear_speed_limit=linear_speed,
-                turn_speed_limit=turn_speed,
-                now_s=loop_start_t,
-                direction_signs=direction_signs,
+            if keyboard_base_input_enabled:
+                base_action = base_ramp.update(
+                    pressed,
+                    linear_speed=linear_speed,
+                    turn_speed=turn_speed,
+                    linear_speed_limit=linear_speed,
+                    turn_speed_limit=turn_speed,
+                    now_s=loop_start_t,
+                    direction_signs=direction_signs,
+                )
+            else:
+                base_ramp.update(
+                    set(),
+                    linear_speed=linear_speed,
+                    turn_speed=turn_speed,
+                    now_s=loop_start_t,
+                )
+                base_action = {}
+            vex_pin5_servo_position = vex_pin5_servo_position_from_keys(newly_pressed)
+            if vex_pin5_servo_position is not None:
+                print(f"VEX Pin 5 servo -> {vex_pin5_servo_position}.", flush=True)
+            include_arm_targets = should_send_arm_targets(configured_arm_source, leader_connected)
+            action = build_teleop_action(
+                arm_targets,
+                base_action,
+                mode=mode_state.mode,
+                include_arm_targets=include_arm_targets,
+                include_base_action=keyboard_base_input_enabled,
+                vex_pin5_servo_position=vex_pin5_servo_position,
             )
-            action = {
-                **arm_targets,
-                **base_action,
-                ACTION_COMMAND_SOURCE_KEY: COMMAND_SOURCE_KEYBOARD,
-                VEX_CONTROL_MODE_KEY: mode_state.mode,
-            }
-            arm_targets = {
-                joint: float(action[joint])
-                for joint, *_rest in ARM_BINDINGS
-            }
+            if include_arm_targets:
+                arm_targets = {
+                    joint: float(action[joint])
+                    for joint, *_rest in ARM_BINDINGS
+                }
 
             if loop_idx % args.print_every == 0:
                 active_keys = "".join(sorted(pressed)) or "-"
@@ -891,7 +1121,16 @@ def main() -> None:
                     flush=True,
                 )
 
-            robot.send_action(action)
+            if send_latest_action(robot, action):
+                dropped_send_count = 0
+            else:
+                dropped_send_count += 1
+                if loop_start_t >= next_drop_log_t:
+                    print(
+                        f"[network] command socket is full; dropped {dropped_send_count} stale frame(s).",
+                        flush=True,
+                    )
+                    next_drop_log_t = loop_start_t + 1.0
             loop_idx += 1
             precise_sleep(max(1.0 / args.fps - (time.perf_counter() - loop_start_t), 0.0))
     except KeyboardInterrupt:
@@ -899,14 +1138,13 @@ def main() -> None:
     finally:
         if arm_targets is not None and robot.is_connected:
             try:
-                robot.send_action(
-                    {
-                        **arm_targets,
-                        "x.vel": 0.0,
-                        "y.vel": 0.0,
-                        "theta.vel": 0.0,
-                    }
-                )
+                stop_action = {
+                }
+                if keyboard_base_input_enabled:
+                    stop_action.update({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+                if should_send_arm_targets(configured_arm_source, leader_connected):
+                    stop_action.update(arm_targets)
+                robot.send_action(stop_action)
             except Exception:
                 pass
         keyboard.disconnect()

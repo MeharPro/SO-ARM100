@@ -32,6 +32,7 @@ from lekiwi_runtime import (
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
+    resolve_lekiwi_robot_port,
     servo_protection_kwargs_from_args,
     stop_robot_base,
 )
@@ -91,6 +92,14 @@ def parse_bool(value: str) -> bool:
 
 def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
     fields = getattr(LeKiwiConfig, "__dataclass_fields__", {})
+    resolved_port = resolve_lekiwi_robot_port(args.robot_port)
+    if resolved_port != args.robot_port:
+        logger.warning(
+            "Using detected LeKiwi robot port %s instead of configured %s.",
+            resolved_port,
+            args.robot_port,
+        )
+        args.robot_port = resolved_port
     kwargs = {
         "id": args.robot_id,
         "port": args.robot_port,

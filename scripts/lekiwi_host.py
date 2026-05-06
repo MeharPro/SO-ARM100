@@ -8,6 +8,8 @@ import json
 import logging
 import math
 import runpy
+import select
+import sys
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -25,6 +27,8 @@ from lekiwi_runtime import (
     ServoProtectionSupervisor,
     TorqueLimitFileWatcher,
     VEX_CONTROL_MODE_KEY,
+    VEX_PIN5_SERVO_POSITION_KEY,
+    VEX_PIN5_SERVO_POSITIONS,
     apply_robot_action,
     add_servo_safety_args,
     add_torque_limit_args,
@@ -33,6 +37,7 @@ from lekiwi_runtime import (
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
+    resolve_lekiwi_robot_port,
     servo_protection_kwargs_from_args,
     stop_robot_base,
 )
@@ -69,6 +74,7 @@ ARM_STATE_KEYS = (
 )
 GRIPPER_STATE_KEY = "arm_gripper.pos"
 ARM_HOME_MOTION_KEYS = tuple(key for key in ARM_STATE_KEYS if key != GRIPPER_STATE_KEY)
+ARM_SYNC_MOTION_KEYS = ARM_STATE_KEYS
 BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
 VEX_POSITION_LOG_PREFIX = "[vex-position]"
 HOME_COMMAND_LOG_PREFIX = "[home-command]"
@@ -96,6 +102,14 @@ def parse_bool(value: str) -> bool:
 
 def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
     fields = getattr(LeKiwiConfig, "__dataclass_fields__", {})
+    resolved_port = resolve_lekiwi_robot_port(args.robot_port)
+    if resolved_port != args.robot_port:
+        logger.warning(
+            "Using detected LeKiwi robot port %s instead of configured %s.",
+            resolved_port,
+            args.robot_port,
+        )
+        args.robot_port = resolved_port
     kwargs = {
         "id": args.robot_id,
         "port": args.robot_port,
@@ -129,6 +143,7 @@ class UiCommandWatcher:
         self.last_mtime_ns: int | None = None
 
     def poll(self) -> dict[str, Any] | None:
+        self._ingest_stdin_command()
         if self.path is None:
             return None
 
@@ -359,6 +374,23 @@ class UiCommandWatcher:
         except OSError:
             return
 
+    def _ingest_stdin_command(self) -> None:
+        if self.path is None:
+            return
+        try:
+            while True:
+                readable, _, _ = select.select([sys.stdin], [], [], 0)
+                if not readable:
+                    return
+                line = sys.stdin.readline()
+                if not line:
+                    return
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(line)
+                self.last_mtime_ns = None
+        except Exception as exc:
+            print(f"[replay] error failed to read stdin command: {exc}", flush=True)
+
 
 def load_trajectory(path_str: str) -> tuple[Path, list[dict[str, Any]]]:
     path = Path(path_str).expanduser()
@@ -437,7 +469,7 @@ def home_motion_errors(
     home_position: dict[str, float],
 ) -> dict[str, float]:
     errors: dict[str, float] = {}
-    for key in ARM_HOME_MOTION_KEYS:
+    for key in ARM_SYNC_MOTION_KEYS:
         value = observation.get(key)
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             errors[key] = abs(float(value) - home_position[key])
@@ -449,6 +481,20 @@ def home_motion_errors(
 def max_home_motion_error(errors: dict[str, float]) -> float:
     finite_errors = [error for error in errors.values() if math.isfinite(error)]
     return max(finite_errors, default=float("inf"))
+
+
+def dual_ended_joint_batches(joint_keys: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    batches: list[tuple[str, ...]] = []
+    left = 0
+    right = len(joint_keys) - 1
+    while left <= right:
+        if left == right:
+            batches.append((joint_keys[left],))
+        else:
+            batches.append((joint_keys[left], joint_keys[right]))
+        left += 1
+        right -= 1
+    return tuple(batches)
 
 
 def format_home_motion_errors(errors: dict[str, float]) -> str:
@@ -533,6 +579,23 @@ def publish_observation(
     return observation
 
 
+def configure_latest_zmq_socket(socket: Any, *, receive: bool) -> None:
+    option_names = ["CONFLATE", "LINGER", "RCVHWM" if receive else "SNDHWM"]
+    if not receive:
+        option_names.append("IMMEDIATE")
+    for name in option_names:
+        option = getattr(zmq, name, None)
+        if option is None:
+            continue
+        value = 1
+        if name == "LINGER":
+            value = 0
+        try:
+            socket.setsockopt(option, value)
+        except Exception:
+            pass
+
+
 def stop_replay_motion(
     robot: LeKiwi,
     last_action: dict[str, float] | None,
@@ -590,6 +653,18 @@ def send_vex_live_base_motion(
                 vex_base_bridge.status_message,
             )
 
+    pin5_servo_position = str(action.get(VEX_PIN5_SERVO_POSITION_KEY, "")).strip().lower()
+    if pin5_servo_position in VEX_PIN5_SERVO_POSITIONS:
+        if vex_base_bridge.send_pin5_servo_position(pin5_servo_position):
+            logger.info("VEX Pin 5 servo set to %s during %s.", pin5_servo_position, context)
+        else:
+            logger.warning(
+                "VEX Pin 5 servo position %s was not accepted during %s: %s",
+                pin5_servo_position,
+                context,
+                vex_base_bridge.status_message,
+            )
+
     motion = {
         key: float(action.get(key, 0.0)) if isinstance(action.get(key, 0.0), (int, float)) else 0.0
         for key in BASE_STATE_KEYS
@@ -600,7 +675,7 @@ def send_vex_live_base_motion(
         sent = vex_base_bridge.send_motion(motion)
         setattr(vex_base_bridge, "_live_base_motion_active", sent)
     elif was_active:
-        sent = vex_base_bridge.send_motion(motion, ttl_ms=120)
+        sent = vex_base_bridge.send_motion(motion, ttl_ms=70)
         setattr(vex_base_bridge, "_live_base_motion_active", False)
     else:
         sent = True
@@ -612,6 +687,39 @@ def send_vex_live_base_motion(
             vex_base_bridge.status_message,
         )
     return sent
+
+
+def drain_latest_live_command(cmd_socket: Any, *, context: str) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    while True:
+        try:
+            msg = cmd_socket.recv_string(zmq.NOBLOCK)
+        except zmq.Again:
+            return latest
+        except Exception as exc:
+            logger.warning("Live command drain failed during %s: %s", context, exc)
+            return latest
+
+        try:
+            parsed = json.loads(msg)
+        except Exception as exc:
+            logger.warning("Live command parse failed during %s: %s", context, exc)
+            continue
+        if isinstance(parsed, dict):
+            latest = parsed
+
+
+def forward_live_base_command_during_replay(
+    cmd_socket: Any,
+    vex_base_bridge: VexBaseBridge | None,
+    *,
+    context: str,
+    enabled: bool,
+) -> None:
+    latest = drain_latest_live_command(cmd_socket, context=context)
+    if latest is None or not enabled or vex_base_bridge is None:
+        return
+    send_vex_live_base_motion(vex_base_bridge, latest, context=context)
 
 
 def print_vex_position_status(
@@ -722,52 +830,60 @@ def execute_go_home_command(
         current_position = extract_home_position(observation)
         safety_filter.seed_from_observation(observation)
 
-        max_steps = 1
-        for key in ARM_HOME_MOTION_KEYS:
-            target = home_position[key]
-            start_value = current_position[key]
-            step_limit = DEFAULT_SAFER_ARM_MAX_STEP.get(key, 8.0)
-            if step_limit > 0:
-                max_steps = max(max_steps, math.ceil(abs(target - start_value) / step_limit))
-        max_steps = max(1, min(600, max_steps))
         sleep_step_s = 1.0 / max(loop_hz, 1.0)
         last_action: dict[str, float] | None = None
         final_errors: dict[str, float] = {}
+        motion_position = dict(current_position)
 
-        for step_index in range(1, max_steps + 1):
-            if should_stop is not None and should_stop():
-                raise RuntimeError("go-home stopped by user")
-            progress = step_index / max_steps
-            target_action = {
-                key: current_position[key] + (home_position[key] - current_position[key]) * progress
-                for key in ARM_HOME_MOTION_KEYS
+        for joint_batch in dual_ended_joint_batches(ARM_SYNC_MOTION_KEYS):
+            batch_starts = {
+                joint_key: motion_position[joint_key]
+                for joint_key in joint_batch
             }
-            target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
-            torque_watcher.poll(robot)
-            action = safety_filter.normalize(target_action)
-            action = servo_protection.limit_action(action)
-            sent_action = apply_robot_action(
-                robot,
-                action,
-                allow_legacy_base=allow_legacy_base,
-            )
-            safety_filter.update(sent_action)
-            servo_protection.record_command(sent_action)
-            last_action = sent_action
-            if vex_base_bridge is not None:
-                vex_base_bridge.send_hold()
-            power_logger.maybe_sample()
-            observation = publish_observation(
-                observation_reader,
-                obs_socket,
-                vex_base_bridge,
-                sensor_status_emitter,
-                servo_protection,
-                sensor_status_source=source,
-            )
-            if observation is not None and servo_protection.observe(observation, power_logger.last_sample):
-                raise RuntimeError("arm safety latch tripped during go-home")
-            precise_sleep(sleep_step_s)
+            batch_steps = []
+            for joint_key in joint_batch:
+                start_value = batch_starts[joint_key]
+                target = home_position[joint_key]
+                step_limit = DEFAULT_SAFER_ARM_MAX_STEP.get(joint_key, 8.0)
+                if step_limit > 0:
+                    batch_steps.append(math.ceil(abs(target - start_value) / step_limit))
+            max_steps = max(1, min(600, max(batch_steps, default=1)))
+
+            for step_index in range(1, max_steps + 1):
+                if should_stop is not None and should_stop():
+                    raise RuntimeError("go-home stopped by user")
+                progress = step_index / max_steps
+                for joint_key in joint_batch:
+                    start_value = batch_starts[joint_key]
+                    target = home_position[joint_key]
+                    motion_position[joint_key] = start_value + (target - start_value) * progress
+                target_action = {key: motion_position[key] for key in ARM_STATE_KEYS}
+                target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
+                torque_watcher.poll(robot)
+                action = safety_filter.normalize(target_action)
+                action = servo_protection.limit_action(action)
+                sent_action = apply_robot_action(
+                    robot,
+                    action,
+                    allow_legacy_base=allow_legacy_base,
+                )
+                safety_filter.update(sent_action)
+                servo_protection.record_command(sent_action)
+                last_action = sent_action
+                if vex_base_bridge is not None:
+                    vex_base_bridge.send_hold()
+                power_logger.maybe_sample()
+                observation = publish_observation(
+                    observation_reader,
+                    obs_socket,
+                    vex_base_bridge,
+                    sensor_status_emitter,
+                    servo_protection,
+                    sensor_status_source=source,
+                )
+                if observation is not None and servo_protection.observe(observation, power_logger.last_sample):
+                    raise RuntimeError("arm safety latch tripped during go-home")
+                precise_sleep(sleep_step_s)
 
         settle_deadline = time.perf_counter() + HOME_SETTLE_TIMEOUT_S
         while True:
@@ -784,7 +900,7 @@ def execute_go_home_command(
             if should_stop is not None and should_stop():
                 raise RuntimeError("go-home stopped by user")
 
-            target_action = {key: home_position[key] for key in ARM_HOME_MOTION_KEYS}
+            target_action = {key: home_position[key] for key in ARM_STATE_KEYS}
             target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
             torque_watcher.poll(robot)
             action = safety_filter.normalize(target_action)
@@ -819,7 +935,7 @@ def execute_go_home_command(
                     request_id,
                     success=True,
                     status=(
-                        "Arm moved to saved home position without commanding the gripper "
+                        "Arm moved to saved home position in dual-ended joint order "
                         f"(max joint error {max_home_motion_error(final_errors):.2f}deg)."
                     ),
                     positions=home_position,
@@ -857,6 +973,7 @@ def execute_replay(
     vex_telemetry_program_name: str,
     loop_hz: float,
     allow_legacy_base: bool,
+    vex_live_base_control_ready: bool,
 ) -> dict[str, Any] | None:
     if servo_protection.latched:
         print("[replay] ignored because the arm safety latch is active. Restart the Pi host after inspection.", flush=True)
@@ -900,6 +1017,11 @@ def execute_replay(
     replay_samples = samples[start_index:]
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
     replay_to_vex_base = include_base and not allow_legacy_base
+    allow_live_base_during_replay = (
+        vex_live_base_control_ready
+        and not replay_to_vex_base
+        and not allow_legacy_base
+    )
     start_state = samples[0]["state"] if samples and isinstance(samples[0], dict) else None
     auto_positioning_available = (
         not allow_legacy_base
@@ -1073,6 +1195,22 @@ def execute_replay(
     drain_command_socket(cmd_socket)
     start = time.perf_counter()
 
+    def forward_live_base(context: str) -> None:
+        forward_live_base_command_during_replay(
+            cmd_socket,
+            vex_base_bridge,
+            context=context,
+            enabled=allow_live_base_during_replay,
+        )
+
+    def sleep_until_replay_time(target_t: float, context: str) -> None:
+        while True:
+            remaining_s = target_t - (time.perf_counter() - start)
+            if remaining_s <= 0:
+                return
+            forward_live_base(context)
+            precise_sleep(min(max(remaining_s, 0.0), sleep_step_s))
+
     try:
         for index, sample in enumerate(replay_samples, start=start_index + 1):
             next_command = ui_command_watcher.poll()
@@ -1102,7 +1240,7 @@ def execute_replay(
 
             sample_t_s = float(raw_t_s)
             target_t = max(sample_t_s - start_time_s, 0.0) / speed
-            precise_sleep(max(target_t - (time.perf_counter() - start), 0.0))
+            sleep_until_replay_time(target_t, "live base during arm replay")
             torque_watcher.poll(robot)
             action = replay_filter.normalize(build_replay_action(state, include_base=include_base))
             action = servo_protection.limit_action(action)
@@ -1135,6 +1273,8 @@ def execute_replay(
                 else:
                     vex_base_bridge.send_motion(base_command.motion)
                 last_base_command_at = command_now
+            else:
+                forward_live_base("live base during arm replay")
             observation = publish_observation(
                 observation_reader,
                 obs_socket,
@@ -1152,6 +1292,7 @@ def execute_replay(
             if replay_to_vex_base and vex_base_bridge is not None:
                 vex_base_bridge.send_hold()
             while time.perf_counter() < hold_until:
+                forward_live_base("live base during replay hold")
                 next_command = ui_command_watcher.poll()
                 if next_command is not None:
                     if next_command["command"] == "stop-replay":
@@ -1257,6 +1398,7 @@ def parse_args() -> argparse.Namespace:
     add_vex_base_args(parser)
     parser.add_argument("--vex-live-base-control", type=parse_bool, default=False)
     parser.add_argument("--require-vex-live-base-control", type=parse_bool, default=False)
+    parser.add_argument("--release-vex-controller-base", type=parse_bool, default=False)
     add_power_monitor_args(parser)
     return parser.parse_args()
 
@@ -1292,7 +1434,7 @@ def main() -> None:
     ui_command_watcher = UiCommandWatcher(args.ui_command_path)
     live_safety_filter = ArmSafetyFilter(
         enabled=args.safer_servo_mode,
-        map_wrist_to_follower_start=True,
+        map_wrist_to_follower_start=False,
         absolute_position_limits=absolute_position_limits,
         skip_step_limit_sources=(COMMAND_SOURCE_KEYBOARD,),
     )
@@ -1336,6 +1478,11 @@ def main() -> None:
     print(vex_base_bridge.status_message, flush=True)
     print(vex_base_telemetry.status_message, flush=True)
     vex_live_base_control_ready = False
+    if args.release_vex_controller_base:
+        if vex_base_bridge.release_control():
+            print("VEX controller base released from Pi keyboard control.", flush=True)
+        else:
+            print(f"Warning: VEX controller base release was not accepted. {vex_base_bridge.status_message}", flush=True)
     if args.vex_live_base_control and not args.enable_base:
         vex_live_base_control_ready = ensure_vex_command_stream(
             vex_base_bridge,
@@ -1366,15 +1513,16 @@ def main() -> None:
 
     ctx = zmq.Context()
     cmd_socket = ctx.socket(zmq.PULL)
-    cmd_socket.setsockopt(zmq.CONFLATE, 1)
+    configure_latest_zmq_socket(cmd_socket, receive=True)
     cmd_socket.bind(f"tcp://*:{args.port_zmq_cmd}")
 
     obs_socket = ctx.socket(zmq.PUSH)
-    obs_socket.setsockopt(zmq.CONFLATE, 1)
+    configure_latest_zmq_socket(obs_socket, receive=False)
     obs_socket.bind(f"tcp://*:{args.port_zmq_observations}")
 
     last_cmd_time = time.time()
     watchdog_active = False
+    no_command_logged = False
     pending_ui_command: dict[str, Any] | None = None
 
     print(
@@ -1414,6 +1562,7 @@ def main() -> None:
                         args.vex_telemetry_program_name,
                         args.loop_hz,
                         args.enable_base,
+                        vex_live_base_control_ready,
                     )
                 elif pending_ui_command["command"] == "zero-vex-gyro":
                     execute_zero_vex_gyro_command(pending_ui_command, vex_base_bridge)
@@ -1448,30 +1597,34 @@ def main() -> None:
                     pending_ui_command = None
                 last_cmd_time = time.time()
                 watchdog_active = False
+                no_command_logged = False
                 continue
 
-            try:
-                msg = cmd_socket.recv_string(zmq.NOBLOCK)
-                if not servo_protection.latched:
-                    action = live_safety_filter.normalize(dict(json.loads(msg)))
-                    action = servo_protection.limit_action(action)
-                    sent_action = apply_robot_action(
-                        robot,
-                        action,
-                        allow_legacy_base=args.enable_base,
-                    )
-                    if vex_live_base_control_ready:
-                        send_vex_live_base_motion(vex_base_bridge, sent_action, context="live control")
-                    live_safety_filter.update(sent_action)
-                    replay_safety_filter.update(sent_action)
-                    servo_protection.record_command(sent_action)
-                last_cmd_time = time.time()
-                watchdog_active = False
-            except zmq.Again:
-                if not watchdog_active:
+            action_payload = drain_latest_live_command(cmd_socket, context="live control")
+            if action_payload is not None:
+                try:
+                    if not servo_protection.latched:
+                        action = live_safety_filter.normalize(action_payload)
+                        action = servo_protection.limit_action(action)
+                        sent_action = apply_robot_action(
+                            robot,
+                            action,
+                            allow_legacy_base=args.enable_base,
+                        )
+                        if vex_live_base_control_ready:
+                            send_vex_live_base_motion(vex_base_bridge, sent_action, context="live control")
+                        live_safety_filter.update(sent_action)
+                        replay_safety_filter.update(sent_action)
+                        servo_protection.record_command(sent_action)
+                    last_cmd_time = time.time()
+                    watchdog_active = False
+                    no_command_logged = False
+                except Exception as exc:
+                    logger.warning("Message handling failed during live control: %s", exc)
+            else:
+                if not watchdog_active and not no_command_logged:
                     logger.warning("No command available")
-            except Exception as exc:
-                logger.warning("Message fetching failed: %s", exc)
+                    no_command_logged = True
 
             now = time.time()
             if (now - last_cmd_time > args.watchdog_timeout_ms / 1000.0) and not watchdog_active:

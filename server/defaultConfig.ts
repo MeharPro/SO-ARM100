@@ -90,6 +90,9 @@ export const defaultConfig: StoredConfig = {
         calibratedAtIso: null,
         notes: "",
       },
+      pin5Servo: {
+        startPositionDeg: 0,
+      },
       manualIdleStoppingMode: "hold",
     },
   },

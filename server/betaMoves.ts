@@ -326,8 +326,7 @@ function normalizeRecordingType(value: unknown, fallback: BetaRecordingType): Be
   return value === "keyboardControl" ||
     value === "leaderArm" ||
     value === "followerHandGuide" ||
-    value === "keyboardFromActiveHold" ||
-    value === "leaderFromSyncedHold"
+    value === "keyboardFromActiveHold"
     ? value
     : fallback;
 }

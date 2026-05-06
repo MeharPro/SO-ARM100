@@ -20,9 +20,11 @@ from lekiwi_runtime import (
     COMMAND_SOURCE_KEYBOARD,
     ServoProtectionSupervisor,
     VEX_CONTROL_MODE_KEY,
+    VEX_PIN5_SERVO_POSITION_KEY,
     apply_robot_action,
     build_normalized_arm_position_limits,
     clamp_safe_arm_torque_limits,
+    resolve_lekiwi_robot_port,
 )
 
 
@@ -90,6 +92,32 @@ class FakeLimitRobot:
         )
 
 
+class LeKiwiRobotPortDetectionTest(unittest.TestCase):
+    def test_resolve_lekiwi_robot_port_uses_stable_by_id_when_configured_tty_is_missing(self) -> None:
+        stable_port = "/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0"
+
+        with mock.patch("lekiwi_runtime.glob.glob") as glob_mock, mock.patch(
+            "lekiwi_runtime.os.path.exists"
+        ) as exists_mock:
+            glob_mock.side_effect = lambda pattern: [stable_port] if pattern == "/dev/serial/by-id/*" else []
+            exists_mock.side_effect = lambda path: path == stable_port
+
+            self.assertEqual(resolve_lekiwi_robot_port("/dev/ttyACM0"), stable_port)
+
+    def test_resolve_lekiwi_robot_port_excludes_vex_brain_and_prefers_follower_adapter(self) -> None:
+        follower_port = "/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0"
+        vex_port = "/dev/serial/by-id/usb-VEX_Robotics_V5_Brain-if00"
+
+        with mock.patch("lekiwi_runtime.glob.glob") as glob_mock, mock.patch(
+            "lekiwi_runtime.os.path.exists", return_value=True
+        ):
+            glob_mock.side_effect = lambda pattern: (
+                [vex_port, follower_port] if pattern == "/dev/serial/by-id/*" else []
+            )
+
+            self.assertEqual(resolve_lekiwi_robot_port("auto"), follower_port)
+
+
 def build_observation(elbow: float = -95.0) -> dict[str, float]:
     return {
         "arm_shoulder_pan.pos": -85.0,
@@ -149,6 +177,25 @@ class RuntimeSafetyTests(unittest.TestCase):
 
         self.assertNotIn(VEX_CONTROL_MODE_KEY, sent)
 
+    def test_apply_robot_action_preserves_valid_vex_pin5_servo_metadata(self) -> None:
+        robot = FakeRobot()
+
+        sent = apply_robot_action(
+            robot,
+            {
+                "arm_shoulder_pan.pos": 12.0,
+                "x.vel": 0.0,
+                "y.vel": 0.0,
+                "theta.vel": 0.0,
+                VEX_PIN5_SERVO_POSITION_KEY: "up",
+            },
+            allow_legacy_base=False,
+        )
+
+        self.assertEqual(robot.bus.goal_writes, [{"arm_shoulder_pan": 12.0}])
+        self.assertEqual(sent[VEX_PIN5_SERVO_POSITION_KEY], "up")
+        self.assertNotIn(VEX_PIN5_SERVO_POSITION_KEY, robot.bus.goal_writes[0])
+
     def test_build_normalized_arm_position_limits_uses_robot_calibration(self) -> None:
         limits = build_normalized_arm_position_limits(
             FakeLimitRobot(),
@@ -190,6 +237,25 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(keyboard["arm_shoulder_pan.pos"], 18.0)
         self.assertEqual(hard_stop["arm_shoulder_pan.pos"], 20.0)
 
+    def test_arm_safety_filter_can_command_absolute_leader_wrist_pose(self) -> None:
+        safety_filter = ArmSafetyFilter(
+            enabled=True,
+            map_wrist_to_follower_start=False,
+            skip_step_limit_sources={COMMAND_SOURCE_KEYBOARD},
+        )
+        observation = build_observation()
+        observation["arm_wrist_roll.pos"] = 10.0
+        safety_filter.seed_from_observation(observation)
+
+        command = safety_filter.normalize(
+            {
+                "arm_wrist_roll.pos": 80.0,
+                ACTION_COMMAND_SOURCE_KEY: COMMAND_SOURCE_KEYBOARD,
+            }
+        )
+
+        self.assertEqual(command["arm_wrist_roll.pos"], 80.0)
+
     def test_clamp_safe_arm_torque_limits_caps_unsafe_values(self) -> None:
         clamped, capped = clamp_safe_arm_torque_limits(
             {
@@ -208,7 +274,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertIn("arm_shoulder_lift=970->870", capped)
         self.assertIn("arm_wrist_roll=980->850", capped)
 
-    def test_servo_protection_latches_on_persistent_stall(self) -> None:
+    def test_servo_protection_does_not_latch_on_persistent_stall(self) -> None:
         robot = FakeRobot()
         supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
         observation = build_observation()
@@ -220,11 +286,10 @@ class RuntimeSafetyTests(unittest.TestCase):
         with mock.patch("lekiwi_runtime.time.monotonic", return_value=0.6):
             tripped = supervisor.observe(observation)
 
-        self.assertTrue(tripped)
-        self.assertTrue(supervisor.latched)
-        self.assertIsNotNone(supervisor.fault)
-        self.assertEqual(supervisor.fault["motor"], "arm_elbow_flex")
-        self.assertEqual(robot.bus.disabled_calls[-1], ALL_MOTORS)
+        self.assertFalse(tripped)
+        self.assertFalse(supervisor.latched)
+        self.assertIsNone(supervisor.fault)
+        self.assertEqual(robot.bus.disabled_calls, [])
 
     def test_shoulder_lift_low_current_position_lag_does_not_latch(self) -> None:
         robot = FakeRobot()
@@ -288,7 +353,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertFalse(supervisor.latched)
         self.assertEqual(robot.bus.disabled_calls, [])
 
-    def test_wrist_flex_high_current_stall_still_latches(self) -> None:
+    def test_wrist_flex_high_current_stall_does_not_latch(self) -> None:
         robot = FakeRobot()
         supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
         observation = build_observation()
@@ -315,10 +380,10 @@ class RuntimeSafetyTests(unittest.TestCase):
                 },
             )
 
-        self.assertTrue(tripped)
-        self.assertTrue(supervisor.latched)
-        self.assertEqual(supervisor.fault["motor"], "arm_wrist_flex")
-        self.assertIn("current 700mA >= 450mA", supervisor.fault["reason"])
+        self.assertFalse(tripped)
+        self.assertFalse(supervisor.latched)
+        self.assertIsNone(supervisor.fault)
+        self.assertEqual(robot.bus.disabled_calls, [])
 
     def test_gripper_closing_stall_enters_force_limited_hold(self) -> None:
         robot = FakeRobot()
@@ -443,7 +508,7 @@ class RuntimeSafetyTests(unittest.TestCase):
         self.assertTrue(supervisor.gripper_force_limit.active)
         self.assertIn("current reached 650mA", supervisor.gripper_force_limit.reason)
 
-    def test_gripper_opening_high_current_stall_still_latches(self) -> None:
+    def test_gripper_opening_high_current_stall_does_not_latch(self) -> None:
         robot = FakeRobot()
         supervisor = ServoProtectionSupervisor(robot, logging.getLogger("runtime-safety-test"))
         observation = build_observation()
@@ -469,10 +534,10 @@ class RuntimeSafetyTests(unittest.TestCase):
                 },
             )
 
-        self.assertTrue(tripped)
-        self.assertTrue(supervisor.latched)
-        self.assertEqual(supervisor.fault["motor"], "arm_gripper")
-        self.assertEqual(robot.bus.disabled_calls[-1], ALL_MOTORS)
+        self.assertFalse(tripped)
+        self.assertFalse(supervisor.latched)
+        self.assertIsNone(supervisor.fault)
+        self.assertEqual(robot.bus.disabled_calls, [])
 
     def test_servo_protection_can_disable_stall_detection_for_free_teach(self) -> None:
         robot = FakeRobot()

@@ -69,6 +69,10 @@ export interface VexKeyboardDirectionCalibration {
   notes: string;
 }
 
+export interface VexPin5ServoSettings {
+  startPositionDeg: number;
+}
+
 export interface VexInertialSettings {
   port: number;
 }
@@ -89,6 +93,7 @@ export interface VexSettings {
   controls: VexDriveControls;
   tuning: VexDriveTuning;
   keyboardCalibration: VexKeyboardDirectionCalibration;
+  pin5Servo: VexPin5ServoSettings;
   manualIdleStoppingMode: VexManualIdleStoppingMode;
 }
 
@@ -198,8 +203,7 @@ export type BetaRecordingType =
   | "keyboardControl"
   | "leaderArm"
   | "followerHandGuide"
-  | "keyboardFromActiveHold"
-  | "leaderFromSyncedHold";
+  | "keyboardFromActiveHold";
 
 export interface MoveDefinition {
   id: string;
@@ -406,7 +410,6 @@ export interface StartControlRequest {
 
 export type LeaderStaleTransitionAction =
   | "discardLeaderAuthority"
-  | "syncLeaderToFollowerPose"
   | "moveFollowerToLeaderPose";
 
 export interface ResolveLeaderStaleRequest {
@@ -501,7 +504,8 @@ export interface ActiveArmHold {
   name: string;
   trajectoryPath: string;
   activatedAt: string;
-  homePosition: ArmHomePosition;
+  homePosition: ArmHomePosition | null;
+  restoreArmSource?: "leader" | "keyboard" | "none" | null;
 }
 
 export type ArmAuthority =
@@ -544,6 +548,7 @@ export interface DashboardState {
   chainLinks: ChainLink[];
   homePosition: ArmHomePosition | null;
   activeArmHold: ActiveArmHold | null;
+  keyboardOverrideArmHold: ActiveArmHold | null;
   controlAuthority: ControlAuthorityState;
   recordingReplayOptions: Record<string, RecordingReplayOptions>;
   moveDefinitions: MoveDefinition[];

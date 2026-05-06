@@ -123,6 +123,59 @@ class KeyboardTeleopTests(unittest.TestCase):
         )
         self.assertEqual(turn_right, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": turn_limit})
 
+    def test_enter_hold_rotates_clockwise_after_short_hold_delay(self) -> None:
+        enter = keyboard_teleop.EnterRotationClickState()
+
+        initial = enter.update({"enter"}, 10.0)
+        held = enter.update(
+            {"enter"},
+            10.0 + keyboard_teleop.ENTER_SINGLE_HOLD_DELAY_S + 0.01,
+        )
+        action = keyboard_teleop.build_base_action(
+            held,
+            linear_speed=0.04,
+            turn_speed=12.0,
+        )
+
+        self.assertNotIn(keyboard_teleop.ENTER_CLOCKWISE_KEY, initial)
+        self.assertEqual(action, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 12.0})
+        released = enter.update(set(), 10.5)
+        self.assertEqual(released, set())
+
+    def test_enter_double_click_and_hold_rotates_counter_clockwise(self) -> None:
+        enter = keyboard_teleop.EnterRotationClickState()
+
+        self.assertEqual(enter.update({"enter"}, 10.0), set())
+        self.assertEqual(enter.update(set(), 10.05), set())
+        held = enter.update({"enter"}, 10.20)
+        action = keyboard_teleop.build_base_action(
+            held,
+            linear_speed=0.04,
+            turn_speed=12.0,
+        )
+
+        self.assertIn(keyboard_teleop.ENTER_COUNTER_CLOCKWISE_KEY, held)
+        self.assertEqual(action, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": -12.0})
+
+    def test_enter_double_click_window_expires_before_clockwise_hold(self) -> None:
+        enter = keyboard_teleop.EnterRotationClickState()
+
+        self.assertEqual(enter.update({"enter"}, 10.0), set())
+        self.assertEqual(enter.update(set(), 10.05), set())
+        second_press_at = 10.05 + keyboard_teleop.ENTER_DOUBLE_CLICK_MAX_GAP_S + 0.01
+        self.assertEqual(enter.update({"enter"}, second_press_at), set())
+        held = enter.update(
+            {"enter"},
+            second_press_at + keyboard_teleop.ENTER_SINGLE_HOLD_DELAY_S + 0.01,
+        )
+        action = keyboard_teleop.build_base_action(
+            held,
+            linear_speed=0.04,
+            turn_speed=12.0,
+        )
+
+        self.assertEqual(action, {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 12.0})
+
     def test_base_keyboard_ramp_accelerates_held_key_slowly(self) -> None:
         ramp = keyboard_teleop.KeyboardBaseRamp()
         linear_limit = keyboard_teleop.KEYBOARD_BASE_LINEAR_SPEED_LIMIT_MPS
@@ -293,6 +346,99 @@ class KeyboardTeleopTests(unittest.TestCase):
         )
 
         self.assertEqual(next_targets[joint], 7.0)
+
+    def test_base_only_action_does_not_command_arm_targets(self) -> None:
+        action = keyboard_teleop.build_teleop_action(
+            build_targets(**{"arm_shoulder_pan.pos": 42.0}),
+            {"x.vel": 0.0, "y.vel": 0.05, "theta.vel": 0.0},
+            mode="drive",
+            include_arm_targets=False,
+        )
+
+        self.assertNotIn("arm_shoulder_pan.pos", action)
+        self.assertEqual(action["y.vel"], 0.05)
+        self.assertEqual(action[keyboard_teleop.VEX_CONTROL_MODE_KEY], "drive")
+
+    def test_disabled_base_input_filters_vex_base_keys(self) -> None:
+        filtered = keyboard_teleop.filter_base_control_keys(
+            {"arrow_up", "p", "0", "enter", "q", "n"}
+        )
+
+        self.assertEqual(filtered, {"q", "n"})
+
+    def test_controller_base_action_does_not_command_vex_base_or_mode(self) -> None:
+        action = keyboard_teleop.build_teleop_action(
+            build_targets(**{"arm_shoulder_pan.pos": 42.0}),
+            {"x.vel": 0.0, "y.vel": 0.05, "theta.vel": 0.0},
+            mode="drive",
+            include_arm_targets=True,
+            include_base_action=False,
+        )
+
+        self.assertEqual(action["arm_shoulder_pan.pos"], 42.0)
+        self.assertNotIn("x.vel", action)
+        self.assertNotIn(keyboard_teleop.VEX_CONTROL_MODE_KEY, action)
+
+    def test_send_latest_action_uses_nonblocking_socket(self) -> None:
+        class FakeAgain(Exception):
+            pass
+
+        class FakeZmq:
+            NOBLOCK = 7
+            Again = FakeAgain
+
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.sent: list[tuple[str, int]] = []
+
+            def send_string(self, payload: str, flags: int = 0) -> None:
+                self.sent.append((payload, flags))
+
+        class FakeRobot:
+            _zmq = FakeZmq
+
+            def __init__(self) -> None:
+                self.zmq_cmd_socket = FakeSocket()
+
+        robot = FakeRobot()
+
+        self.assertTrue(keyboard_teleop.send_latest_action(robot, {"x.vel": 1.0}))
+        self.assertEqual(robot.zmq_cmd_socket.sent[0][1], FakeZmq.NOBLOCK)
+        self.assertIn('"x.vel"', robot.zmq_cmd_socket.sent[0][0])
+
+    def test_send_latest_action_drops_when_socket_is_full(self) -> None:
+        class FakeAgain(Exception):
+            pass
+
+        class FakeZmq:
+            NOBLOCK = 7
+            Again = FakeAgain
+
+        class FakeSocket:
+            def send_string(self, _payload: str, flags: int = 0) -> None:
+                raise FakeAgain()
+
+        class FakeRobot:
+            _zmq = FakeZmq
+            zmq_cmd_socket = FakeSocket()
+
+        self.assertFalse(keyboard_teleop.send_latest_action(FakeRobot(), {"x.vel": 1.0}))
+
+    def test_vex_pin5_servo_keys_map_to_discrete_positions(self) -> None:
+        self.assertEqual(keyboard_teleop.vex_pin5_servo_position_from_keys({"n"}), "start")
+        self.assertEqual(keyboard_teleop.vex_pin5_servo_position_from_keys({"b"}), "up")
+        self.assertEqual(keyboard_teleop.vex_pin5_servo_position_from_keys({"v"}), "down")
+        self.assertIsNone(keyboard_teleop.vex_pin5_servo_position_from_keys({"z"}))
+
+    def test_vex_pin5_servo_keys_are_not_gripper_aliases(self) -> None:
+        gripper_binding = next(
+            binding
+            for binding in keyboard_teleop.ARM_BINDINGS
+            if binding[0] == "arm_gripper.pos"
+        )
+
+        self.assertEqual(gripper_binding[1], ("z", "c"))
+        self.assertEqual(gripper_binding[2], ("x",))
 
     def test_direction_lock_blocks_outward_motion_but_allows_reverse(self) -> None:
         joint = "arm_shoulder_lift.pos"

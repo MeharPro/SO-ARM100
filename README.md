@@ -1,256 +1,583 @@
-<div align="center">
-
-   <h1>Standard Open SO-100 & SO-101 Arms</h1>
-   <div style="display: flex; gap: 1rem; justify-content: center; align-items: center;" >
-   <img
-      src="media/SO101_Follower.webp?raw=true"
-      alt="SO-101 follower arm"
-      title="SO-101 follower arm"
-      style="width: 40%;"
-    />
-   <img
-      src="media/SO101_Leader.webp?raw=true"
-      alt="SO-101 leader arm"
-      title="SO-101 leader arm"
-      style="width: 40%;"
-    />
-</div>
-
-<h2>
-    <p>Build Your Own SO-101 Robot!</p>
-</h2>
-
-The SO‑101 is the next‑generation version of the SO‑100 robot arm, originally designed by the [RobotStudio](https://www.therobotstudio.com) in collaboration with [Hugging Face](https://huggingface.co/lerobot). It has improved wiring, is easier to assemble (no gear removal) and uses updated motors for the leader arm.
-
-These arms are designed to work seamlessly with the open‑source 🤗 LeRobot library. Join our community on [Discord](https://discord.gg/ggrqhPTsMe) to collaborate on both hardware and software, and help make end‑to‑end AI for robotics more accessible.
-
-</div>
-
-### Documentation 📖
-- For the SO‑101 docs, follow this page further.
-- Here you can find the [SO‑100 docs](SO100.md) which is deprecated.
-
-### Getting Your Own SO‑101 
-You have two options:
-- **Build it Yourself**
-   - Source the components from the [Bill of Materials](#sourcing-parts).
-   - 3D print the parts (or order the 3D printed parts), explained in [Printing the Parts](#printing-the-parts).
-   - Follow our [Assembly Guide](https://huggingface.co/docs/lerobot/so101).
-- **Buy a Kit**
-   - Buy assembled arms or a parts kit from one of the vendors [here](#kits).
-   - Optionally follow our [Assembly Guide](https://huggingface.co/docs/lerobot/so101).
-
-### Setup with LeRobot 🤗
-After sourcing all parts you can setup your SO-101 with LeRobot [tutorial](https://huggingface.co/docs/lerobot/so101). 
-
-### Optional Hardware 🔧
-This repository also includes a range of optional hardware designs such as a raised leader base and different camera mounts. Here you can explore the [full list](#optional-hardware).
-
-
-## Kits
-
-You can find all optional for SO-100/SO-101 kits here:
-
-- from PartaBot :us: [US](https://partabot.com) (They include **assembled** versions, and also sell LeKiwi and Koch robots)
-- from Seeed studio :earth_africa: [International](https://www.seeedstudio.com/SO-ARM100-Low-Cost-AI-Arm-Kit.html) or :cn: [China](https://item.taobao.com/item.htm?id=878010637397&skuId=5915703371829&spm=a213gs.v2success.0.0.4cbf4831mkqWLn) or :jp: [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g131169/) or [Aliexpress](https://www.aliexpress.com/item/3256808696884714.html?gatewayAdapt=4itemAdapt) (They include **3d printed kits**)
-- from WowRobo :earth_africa: [International](https://shop.wowrobo.com/products/so-arm101-diy-kit-assembled-version-1) or :cn: [China](https://item.taobao.com/item.htm?ft=t&id=860171734711) (They include **assembled** versions)
-- from Sudoremove :kr: [South Korea](https://smartstore.naver.com/sudoremove/products/12022333117)
-- from NeoBot :cn: [China](https://item.taobao.com/item.htm?ft=t&id=957685951340)
-- from Autodiscovery :eu: [EU](https://autodiscovery.eu/en/products/so-101-kit??utm_source=hf&utm_medium=shop&utm_content=web)
-
-Additionally you can find SO-100 follower arm kit (without leader arm) on [Phospho](https://robots.phospho.ai). It can be especially useful if you own a VR headset.
-
-## Sourcing Parts
-
-The follower and leader arm for this teleoperation setup will almost the same off the shelf parts (except for the motors). If you plan on creating the classic teleoperation set up to be used with the `LeRobot` library please buy from the Parts for Two Arms below. 
-
-We only have links for US, EU, CN, and JP for now. If you find links for other countries, please create an issue or PR so that we add them to the list. Note that prices and items may vary depending on geographic location.
-
-> [!IMPORTANT]  
-> The STS3215 motors for the follower arm comes in two sizes. The 7.4V has a stall torque of 16.5kg.cm at 6V (and likely slightly less for a 5V power supply). The 12V version has a stall torque of 30kg.cm. While we found the 7.4V to be sufficient, if you would like more powerful motors you can buy the 12V version [here](https://www.alibaba.com/product-detail/6PCS-12V-30KG-STS3215-High-Torque_1601216757543.html). Note if you do this, you will also have to buy a 12V 5A+ power supply instead of a 5V one. The leader arm is always 7.4V for the SO101.
-
-#### Parts For Two Arms (Follower and Leader Setup):
-
-| Part                                        | Amount | Unit Cost (US) | Buy US                                                                                                    | Unit Cost (EU) | Buy EU                                                                                            | Unit Cost (RMB) | Buy CN                                                                          | Unit Cost (JPY) | Buy JP                                                                          |
-| ------------------------------------------- | ------ | -------------- | --------------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------- |
-| STS3215 Servo 7.4V, 1/345 gear (C001) **<sup>[2](#leaderbundle)</sup>  | 7     | $13.89            | [Alibaba](https://www.alibaba.com/product-detail/Top-Seller-Low-Cost-Feetech-STS3215_1600999461525.html)         | €12.2           | [Alibaba](https://www.alibaba.com/product-detail/Top-Seller-Low-Cost-Feetech-STS3215_1600999461525.html) | ￥97.72         | [TaoBao](https://item.taobao.com/item.htm?id=712179366565&skuId=5268252241438)  | ￥2,980         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g116312/)  |
-| STS3215 Servo 7.4V, 1/191 gear (C044) **<sup>[2](#leaderbundle)</sup>   | 2     | $13.89            | [Alibaba](https://www.alibaba.com/product-detail/Feetech-STS3215-SO-ARM101-Servo-7_1601430747897.html?spm=a2747.product_manager.0.0.59a371d2W4e0SR)         | €12.2           | [Alibaba](https://www.alibaba.com/product-detail/Feetech-STS3215-SO-ARM101-Servo-7_1601430747897.html?spm=a2747.product_manager.0.0.59a371d2W4e0SR) | ￥97.72         | -  | ￥2,980         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g131131/)  |
-| STS3215 Servo 7.4V, 1/147 gear (C046) **<sup>[2](#leaderbundle)</sup>    | 3     | $13.89            | [Alibaba](https://www.alibaba.com/product-detail/Feetech-STS3215-SO-ARM101-Servo-7_1601430760797.html?spm=a2747.product_manager.0.0.167371d25QeX3F)         | €12.2           | [Alibaba](https://www.alibaba.com/product-detail/Feetech-STS3215-SO-ARM101-Servo-7_1601430760797.html?spm=a2747.product_manager.0.0.167371d25QeX3F) | ￥97.72         | -  | ￥2,980         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g131132/)  |
-| Motor Control Board                         | 2      | $10.6           | [Amazon](https://www.amazon.com/Waveshare-Integrates-Control-Circuit-Supports/dp/B0CTMM4LWK/)             | €11.4            | [Amazon](https://www.amazon.fr/-/en/dp/B0CJ6TP3TP/)                                               | ￥27            | [TaoBao](https://detail.tmall.com/item.htm?id=738817173460&skuId=5096283384143) | ￥980         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g131227/)  |
-| USB-C Cable 2 pcs                           | 1      | $7             | [Amazon](https://www.amazon.com/Charging-etguuds-Charger-Braided-Compatible/dp/B0B8NWLLW2/?th=1)          | €7             | [Amazon](https://www.amazon.fr/dp/B07BNF842T/)                                                    | ￥23.9\*2       | [TaoBao](https://detail.tmall.com/item.htm?id=44425281296&skuId=5611379016222)  | ￥1,498         | [Amazon](https://www.amazon.co.jp/dp/B0C3H9L6KZ)  |
-| Power Supply    | 2      | $10            | [Amazon](https://www.amazon.com/Facmogu-Switching-Transformer-Compatible-5-5x2-1mm/dp/B087LY41PV/)        | €15.7            | [Amazon](https://www.amazon.fr/-/en/dp/B01HRR9GY4/)                                               | ￥22.31         | [TaoBao](https://item.taobao.com/item.htm?id=544824248494&skuId=4974994129990)  | ￥1,550         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g106238/)  |
-| Table Clamp 4pcs                            | 1      | $9             | [Amazon](https://www.amazon.com/TAODAN-Trigger-Ratchet-Woodworking-Processes/dp/B0DJNXF8WH?rps=1&sr=1-18) | €9.7 | [Amazon](https://www.amazon.fr/Connex-COXT865210-Lot-Serre-joints-bricolage/dp/B00NA3T2CQ)      | ￥5.2*4 | [TaoBao](https://detail.tmall.com/item.htm?id=801399113134&skuId=5633627126649)                   | ￥2,200         | [Amazon](https://www.amazon.co.jp/dp/B0DJNXF8WH)  |
-| Screwdriver Set<sup>[1](#myfootnote1)</sup> | 1      | $6             | [Amazon](https://www.amazon.com/Precision-Phillips-Screwdriver-Electronics-Computer/dp/B0DB227RTH)        | €9            | [Amazon](https://www.amazon.fr/Vinabo-Magnétique-Electronique-Réparation-Informatique/dp/B0BNQBNFFJ)                                                    | ￥14.9          | [TaoBao](https://detail.tmall.com/item.htm?id=675684600845&skuId=4856851392176) | ￥500         | [Amazon](https://www.amazon.co.jp/dp/B01MDNJVMN)  |
-| Total                                       | ---    | $229.88           | ---                                                                                                       | €226.3           | ---                                                                                               | ￥1343.16       | ---                                                                             | ￥44,530         | ---                                                                             |
-
-<a name="leaderbundle">2</a>: You can buy **all six STS3215 servos needed for the SO-101 leader arm**  
-(3 × 1/147 gear (C046), 2 × 1/191 gear (C044), 1 × 1/345 gear (C001)) in a single bundle on [Alibaba](https://www.alibaba.com/product-detail/6PCS-7-4V-STS3215-Servos-for_1601428584027.html?spm=a2747.product_manager.0.0.757c2c3clU7uH3).
-
-#### Parts for One Follower Arm:
-
-| Part                                        | Amount | Unit Cost (US) | Buy US                                                                                                                                                | Unit Cost (EU) | Buy EU                                                                                                                                                | Unit Cost (RMB) | Buy CN                                                                          | Unit Cost (JPY) | Buy JP                                                                          |
-| ------------------------------------------- | ------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------- |
-| STS3215 Servo 7.4V, 1/345 gear (C001)    | 6      | $13.89            | [Alibaba](https://www.alibaba.com/product-detail/Top-Seller-Low-Cost-Feetech-STS3215_1600999461525.html?spm=a2747.product_manager.0.0.11be71d2ARQb82) | €12.2            | [Alibaba](https://www.alibaba.com/product-detail/Top-Seller-Low-Cost-Feetech-STS3215_1600999461525.html?spm=a2747.product_manager.0.0.11be71d2ARQb82) | ￥97.72         | [TaoBao](https://item.taobao.com/item.htm?id=712179366565&skuId=5268252241438)  | ￥2,980         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g116312/)  |
-| Motor Control Board                         | 1      | $10.6            | [Amazon](https://www.amazon.com/Waveshare-Integrates-Control-Circuit-Supports/dp/B0CTMM4LWK/)                                                         | €11.4            | [Amazon](https://www.amazon.fr/-/en/dp/B0CJ6TP3TP/)                                                                                                   | ￥27            | [TaoBao](https://detail.tmall.com/item.htm?id=738817173460&skuId=5096283384143) | ￥980         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g131227/)  |
-| USB-C Cable 2 pcs                           | 1      | $7             | [Amazon](https://www.amazon.com/Charging-etguuds-Charger-Braided-Compatible/dp/B0B8NWLLW2/?th=1)                                                      | €7             | [Amazon](https://www.amazon.fr/dp/B07BNF842T/)                                                                                                        | ￥23.9          | [TaoBao](https://detail.tmall.com/item.htm?id=44425281296&skuId=5611379016222)  | ￥1,498         | [Amazon](https://www.amazon.co.jp/dp/B0C3H9L6KZ)  |
-| Power Supply    | 1      | $10            | [Amazon](https://www.amazon.com/Facmogu-Switching-Transformer-Compatible-5-5x2-1mm/dp/B087LY41PV/)                                                    | €15.7            | [Amazon](https://www.amazon.fr/-/en/dp/B01HRR9GY4/)                                                                                                   | ￥22.31         | [TaoBao](https://item.taobao.com/item.htm?id=544824248494&skuId=4974994129990)  | ￥1,550         | [Akizuki Denshi](https://akizukidenshi.com/catalog/g/g106238/)  |
-| Table Clamp 2pcs                            | 1      | $5             | [Amazon](https://www.amazon.com/Mr-Pen-Carpenter-Clamp-6inch/dp/B092L925J4/)                                                                          | €8             | [Amazon](https://www.amazon.fr/-/en/dp/B08HZ1QRBF/)                                                                                                   | ￥7.8           | [TaoBao](https://detail.tmall.com/item.htm?id=738636473238&skuId=5505939904942) | ￥2,200         | [Amazon](https://www.amazon.co.jp/dp/B0DJNXF8WH)  |
-| Screwdriver Set<sup>[1](#myfootnote1)</sup> | 1      | $6             | [Amazon](https://www.amazon.com/Precision-Phillips-Screwdriver-Electronics-Computer/dp/B0DB227RTH)                                                    | €9            | [Amazon](https://www.amazon.fr/Vinabo-Magnétique-Electronique-Réparation-Informatique/dp/B0BNQBNFFJ)                                                                                                        | ￥14.9          | [TaoBao](https://detail.tmall.com/item.htm?id=675684600845&skuId=4856851392176) | ￥500         | [Amazon](https://www.amazon.co.jp/dp/B01MDNJVMN)  |
-| Total                                       | ---    | $121.94           | ---                                                                                                                                                   | €124.3        | ---                                                                                                                                                   | ￥682.23        | ---                                                                             | ￥24,414        | ---                                                                             |
-
-<a name="myfootnote1">1</a>: You do not need to use this exact screwdriver set, but it is highly recommended to have phillips head screw driver sizes #0 and #1 for easiest screw installation and removal. These are both standard sizes which will likely appear in most small screwdriver sets.
-
-## Printing the Parts
-
-A variety of 3D printers are acceptable to print the parts necessary of the follower and leader arm. Follow the steps below to ensure a good print.
-
-### Step 1: Choose a Printer
-The STL files provided are ready to print on many FDM printers. Below are the tested and suggested settings though others may work.
-   1. Material: PLA+
-   2. Nozzle Diameter and Precision: 0.4mm nozzle diameter at 0.2mm layer height or 0.6mm nozzle at 0.4mm layer height.
-   3. Infill Density: 15%
-   4. Sample Printers: [Prusa MINI+](https://www.prusa3d.com/product/original-prusa-mini-semi-assembled-3d-printer-4/), [UP Plus 2](https://shop.tiertime.com/product/tiertime-up-plus-2-3d-printer/), [Creality Ender 3](https://www.amazon.com/Comgrow-Creality-Ender-Aluminum-220x220x250mm/dp/B07BR3F9N6/), [Bambu Lab A/P/X-series](https://bambulab.com)
-
-### Step 2: Set up the Printer
-   1. Ensure that the printer is calibrated and the bed level is correctly set using the printer specific instructions.
-   2. Clean the print bed, making sure it is free from dust, or grease. If cleaning the bed using water, or other liquid, dry the bed.
-   3. If your printer recommends it, use a standard glue stick and apply a thin, even layer of glue across the print area of the bed. Avoid clumping or uneven application.
-   4. Load the printer filament using printer specific instructions.
-   5. Ensure the printer settings match the ones suggested above (most printers have multiple settings so choose the ones that most closely match).
-   6. Set for supports everywhere but ignore slopes greater than 45 degrees to the horizontal.
-   7. There should be no supports in the screw holes with horizontal axes.
-### Step 3: Check Printer Accuracy
-   1. In the [Gauges](STL/Gauges) folder, there are two types of gauges, one to check the size of print against a standard 4x2 lego block and one against a STS3215 servo.
-      1. If you have a STS3215 servo, print:
-         1. [Gauge Zero](STL/Gauges/Gauge_0.STL)
-         2. [Gauge Tight](STL/Gauges/Gauge_tight_1.STL)
-      2. If you have a standard lego block, print:
-         1. [Gauge Zero](STL/Gauges/Lego_Size_Test_02_zero.STL)
-         2. [Gauge -0.1](STL/Gauges/Lego_Size_Test_02_minuspoint1.STL)
-   2. Test the gauge 0 against your given object (Lego or Servo). The fit should be similar to this [tutorial](https://youtu.be/dss8E3DG2rA).
-   3. If the fit is appropriate, go onto Step 4, otherwise, change your printer settings and try again or create an issue.
-### Step 4: Print the Parts
-All the parts for the leader or follower are for easy 3D printing already contained in a **single file**, correctly orientated for z upwards to minimize supports.
-   1. For printer bed sizes of 220mmx220mm (such as the Ender), print these files:
-      - [Follower](STL/SO101/Follower/Ender_Follower_SO101.stl)
-      - [Leader](STL/SO101/Leader/Ender_Leader_SO101.stl)
-   2. For printer bed sizes of 205mm x 250mm (such as the Prusa/Up):
-      1. [Follower](STL/SO101/Follower/Prusa_Follower_SO101.stl)
-      2. [Leader](STL/SO101/Leader/Prusa_Leader_SO101.stl)
-
-This table contains all individual files:
-<details>
-<summary>Individual Part Files</summary>
-
-#### Common Parts
-
-| Part                                | Link                                                             |
-|-------------------------------------|------------------------------------------------------------------|
-| Base_motor_holder_SO101.stl         | [Base_motor_holder_SO101.stl](STL/SO101/Individual/Base_motor_holder_SO101.stl)       |
-| Base_SO101.stl                      | [Base_SO101.stl](STL/SO101/Individual/Base_SO101.stl)                                 |
-| Motor_holder_SO101_Base.stl         | [Motor_holder_SO101_Base.stl](STL/SO101/Individual/Motor_holder_SO101_Base.stl)       |
-| Motor_holder_SO101_Wrist.stl        | [Motor_holder_SO101_Wrist.stl](STL/SO101/Individual/Motor_holder_SO101_Wrist.stl)     |
-| Under_arm_SO101.stl                 | [Under_arm_SO101.stl](STL/SO101/Individual/Under_arm_SO101.stl)                       |
-| Upper_arm_SO101.stl                 | [Upper_arm_SO101.stl](STL/SO101/Individual/Upper_arm_SO101.stl)                       |
-| Rotation_Pitch_SO101.stl            | [Rotation_Pitch_SO101.stl](STL/SO101/Individual/Rotation_Pitch_SO101.stl)             |
-| Wrist_Roll_Pitch_SO101.stl          | [Wrist_Roll_Pitch_SO101.stl](STL/SO101/Individual/Wrist_Roll_Pitch_SO101.stl)         |
-| WaveShare_Mounting_Plate_SO101.stl  | [WaveShare_Mounting_Plate_SO101.stl](STL/SO101/Individual/WaveShare_Mounting_Plate_SO101.stl) |
-
-#### Leader‑Specific Parts
-
-| Part                  | Link                                     |
-|-----------------------|------------------------------------------|
-| Handle_SO101.stl      | [Handle_SO101.stl](STL/SO101/Individual/Handle_SO101.stl)     |
-| Trigger_SO101.stl     | [Trigger_SO101.stl](STL/SO101/Individual/Trigger_SO101.stl)   |
-| Wrist_Roll_SO101.stl  | [Wrist_Roll_SO101.stl](STL/SO101/Individual/Wrist_Roll_SO101.stl) |
-
-#### Follower‑Specific Parts
-
-| Part                            | Link                                                         |
-|---------------------------------|--------------------------------------------------------------|
-| Moving_Jaw_SO101.stl            | [Moving_Jaw_SO101.stl](STL/SO101/Individual/Moving_Jaw_SO101.stl)                 |
-| Wrist_Roll_Follower_SO101.stl   | [Wrist_Roll_Follower_SO101.stl](STL/SO101/Individual/Wrist_Roll_Follower_SO101.stl) |
-</details>
-
-### Step 5: Remove Supports
-   1. After the print is done, use a putty knife to scrape the the parts off the print bed.
-   2. Remove any support material from parts.
-
-### Don't Own a 3D printer?
-Go here: [Printing services](./3DPRINT.md)
-
-## Optional Hardware
-<!--Note: no hardware emoji here so links work correctly-->
-Extend your SO‑100/SO‑101 with these add-ons.
-<details>
-<summary>Add‑ons</summary>
-
-#### 0. XLeRobot
-
-A dual-arm mobile robot for daily use, with 2x SO101 arms, 1x Lekiwi base, 1x 300Wh Anker Battery, 2x wrist RGB cameras, 1x head depth camera (with a 2-dof neck). Total cost 660$.
-
-<img width="1725" height="1140" alt="82c2b72eab7c716b90fafac0a9caf895" src="https://github.com/user-attachments/assets/10819ef0-80a2-4cfe-be81-7daa8918cca1" />
-
-
-[→ Full Documentation](https://xlerobot.readthedocs.io/en/latest/index.html), with detailed BOM, 3D printing models, assembly guide, simulation, and teleop guide.
-
-
-#### 1. Mount Helper  
-Print the handy mount jig for easier alignment during assembly.  
-
-[→ View README](Optional/Mount_Helper/README.md)
-
-<img src="media/mount_helper.png" alt="Mount Helper" width="150">
-
-#### 2. Overhead Camera Mount 
-
-For bird’s‑eye views in single or bi‑manual setups.  
-(SO100/101)
-
-| Webcam  | 32×32 Cam Module |
-|:---------------------:|:-------------------:|
-<img src="https://github.com/user-attachments/assets/a652e133-8672-448d-baa0-bdd494a0a515" height="200"> | <img src="media/overhead_cam_two_followers.png" height="200"> 
-| [Instructions](Optional/Overhead_Cam_Mount_Webcam/README.md) | [Instructions](Optional/Overhead_Cam_Mount_32x32_UVC_Module/README.md) 
-
-#### 3. Base Mounts
-
-| Raised Leader Base | 4040 Aluminum Profile Mount |
-|:-------------------:|:---------------------------:|
-<img src="media/Raised_Base.jpeg" height="150"> | <img src="media/4040_base_mount.jpg" height="150">  
-[Download STL](Optional/Raised_Base/Raised_Base_Extension.stl) | [Instructions](Optional/4040_Base_Mount/README.md)
-
-#### 4. Tactile Sensing (AnySkin)  
-Add touch sensing to your gripper.  
-
-[→ Find on WOWROBO](https://shop.wowrobo.com/products/enhanced-anyskin-premium-crafted-editionwowskin)
-
-<img src="media/tactile_sensor_anyskin.png" alt="AnySkin Sensor" width="150">
-
-
-#### 5. Wrist‑Mount Cameras
-
-| 32×32 UVC Hex Nut (SO101) | 32×32 UVC Integrated (SO100/101) | 32×32 UVC Plug‑on | RealSense D405 | RealSense D435/D435I | Webcam (Vinmooog) |
-| --- | --- | --- | --- | --- | --- |
-| <img src="media/UVC_cam_mount_so101.jpg" height="100"> | <img src="media/Wrist_Cam_Mount_32x32_UVC_module_1.jpg" height="100"> | <img src="media/UVC_cam_mount_plugin.jpg" height="100"> | <img src="media/d405_mount.jpg" height="100"> | <img src="media/d435_mount.jpg" height="100"> | <img src="media/cam_mount2.jpg" height="100"> |
-| [Instructions](Optional/SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module) | [Instructions](Optional/Wrist_Cam_Mount_32x32_UVC_Module/README.md) | [Instructions](Optional/Wrist_Cam_Plug_Mount_32x32_UVC_Module) | [Instructions](Optional/Wrist_Cam_Mount_RealSense_D405) | [Instructions](Optional/Wrist_Cam_Mount_RealSense_D435) | [Instructions](Optional/Wrist_Cam_Mount_Vinmooog_Webcam) |
-
-
-
-#### 6. Compliant Gripper
-Add some flexibility to your gripper by downloading the compliant gripper parts and printing them using a flexible filament like TPU 95A. 
-
-[→ View README](Optional/Compliant_Gripper/README.md). 
-
-<img src="https://github.com/user-attachments/assets/26de0b8c-8bd6-4651-867f-1358532e2cc6" width="150">
-
-#### 7. Compliant Gripper (new)
-Printed with TPU 95A for the finger and PLA for the base. 
-Better structure and better grasp (both precision and power). No need to print support for the TPU finger. Requires 2 additional M3 screws, optional 3M gripper tape for higher friction.
-![d2e57534a9e55a3d4dc0d644242cd044](https://github.com/user-attachments/assets/e814ed0a-72ce-43ad-80bf-5f03b7f16b90)
-
-[→ Find on XLeRobot](https://github.com/Vector-Wangel/XLeRobot/tree/main/hardware)
-</details>
-
-## Debugging Motors
-For debugging, any Windows PC can connect over USB to program the servos and to debug or do tests. To do so download [Feetech Software](https://www.feetechrc.com/software.html). For Ubuntu, you can use [FT_SCServo_Debug_Qt](https://github.com/Kotakku/FT_SCServo_Debug_Qt). Note: This step is not necessary as motors can be configured using the LeRobot Library, but this can be helpful for debugging.
-
+# Robot Arm V2
+
+Robot Arm V2 is a competition-focused control stack for an SO-101/LeKiwi-style
+follower arm, an optional SO leader arm, a Raspberry Pi robot host, and a VEX V5
+mobile base. It turns this repository into a local Mac dashboard that can start
+live control, switch arm/base authority, record trajectories, replay saved
+moves, hold arm poses, build chained routines, and capture training data.
+
+The original SO-100/SO-101 hardware files are still in this repository. This
+README is the practical guide for taking the repo, setting up your own robot,
+and getting the dashboard working.
+
+## What This Repository Contains
+
+- A React dashboard in `src/App.tsx`.
+- An Express backend in `server/index.ts`.
+- Robot orchestration in `server/robotController.ts`.
+- Pi-side helpers in `scripts/`, uploaded automatically to the Pi.
+- SO-101 STL/STEP hardware files in `STL/`, `STEP/`, `Optional/`, and `media/`.
+- Competition workflow documentation in `ROBOT_COMPETITION_CONTROL_SPEC.md`.
+- Recovery and fallback notes in `LEKIWI_FALLBACK.md` and
+  `LEKIWI_RECOVERY_LOG_2026-03-27.md`.
+- Optional power and compliance diagrams in `output/diagrams/`.
+
+## System Overview
+
+The control stack has four active pieces:
+
+1. Mac dashboard:
+   - Runs the web UI and backend.
+   - Starts local keyboard/leader teleop helpers.
+   - Opens SSH/SFTP connections to the Pi.
+   - Stores local dashboard settings in `.lekiwi-ui/config.json`.
+
+2. Raspberry Pi:
+   - Runs LeRobot and connects to the follower arm motor bus.
+   - Runs `scripts/lekiwi_host.py` for live arm control and warm replay.
+   - Stores recordings in `/home/pi/lekiwi-trajectories`.
+   - Talks to the VEX Brain over USB serial when the base bridge is enabled.
+
+3. SO follower arm:
+   - The powered arm on the robot.
+   - Receives commands from leader arm, keyboard arm control, replay, home, or
+     hold pose logic.
+
+4. VEX V5 base:
+   - Can be driven locally by the VEX handheld controller.
+   - Can also accept Pi-side keyboard/replay/preposition commands when enabled.
+   - For a crowded competition arena, VEX controller base control is preferred
+     because it avoids Mac-to-Wi-Fi-to-Pi base latency.
+
+## Hardware You Need
+
+Minimum for arm-only use:
+
+- Mac computer.
+- Raspberry Pi with Wi-Fi or Ethernet.
+- SO-101 follower arm.
+- Feetech/Waveshare motor controller board.
+- STS3215 follower servos.
+- Correct power supply for your servo chain.
+- USB cable from Pi to follower motor controller.
+
+Recommended for competition teleop:
+
+- SO leader arm connected to the Mac over USB.
+- VEX V5 Brain.
+- VEX V5 Controller.
+- VEX omni or mecanum base.
+- USB from Pi to VEX Brain.
+- VEX inertial sensor.
+- Optional ultrasonic sensors for base prepositioning.
+
+Useful hardware docs already in this repo:
+
+- `SO101_BUILD_RUNBOOK.md` for print, assembly, and LeRobot setup notes.
+- `SO101_BOM_Leader_Follower_Other_ALL.md` for leader/follower parts.
+- `SO101_BOM_Milton_ON_CA.md` for a localized BOM.
+- `3DPRINT.md` for print service notes.
+- `Optional/VEX_V5_Base_Brain/README.md` for VEX base notes.
+- `output/diagrams/robot-power-compliance-wiring.svg` for wiring guidance.
+- `output/diagrams/robot-power-inspection-summary.svg` for inspection notes.
+
+## Important Safety Notes
+
+This project can move real hardware. Treat it like robot control software, not
+a demo app.
+
+- Keep a physical power switch or battery disconnect within reach.
+- Start with the arm clear of people and objects.
+- Use conservative torque limits until every joint is verified.
+- Do not mix 7.4 V and 12 V servos on the same powered chain.
+- If a servo overheats or disappears from the bus, stop and inspect the
+  mechanical joint before retrying.
+- If the dashboard safety latch trips, inspect the robot before restarting live
+  control.
+- Do not rely on Wi-Fi for emergency stop. Use physical power removal for
+  immediate safety.
+
+The runtime safety layer includes torque caps, temperature/stall checks,
+gripper force limiting, and strict latching behavior. Those checks are meant to
+interrupt convenience when the robot looks unsafe.
+
+## Default Network And Paths
+
+The dashboard defaults are defined in `server/defaultConfig.ts`.
+
+| Setting | Default |
+| --- | --- |
+| Hotspot SSID | `rawr-hotspot` |
+| Pi hostname | `rawr.local` |
+| Pi fallback IP | `10.42.0.1` |
+| Pi user | `pi` |
+| Pi password | `password` |
+| Pi LeRobot checkout | `/home/pi/lerobot` |
+| Pi conda script | `/home/pi/miniforge3/etc/profile.d/conda.sh` |
+| Pi helper directory | `/home/pi/.lekiwi-ui` |
+| Pi recording directory | `/home/pi/lekiwi-trajectories` |
+| Mac LeRobot checkout | `/Users/meharkhanna/lerobot` |
+| Mac conda script | `/Users/meharkhanna/miniforge3/etc/profile.d/conda.sh` |
+| Follower robot ID | `follow-mobile` |
+| Follower robot port | `/dev/ttyACM0` |
+
+Change these from the dashboard Settings panel for your own machine. The local
+settings file is intentionally ignored by git because it can contain the Pi
+password.
+
+## VEX Base Defaults
+
+| VEX setting | Default |
+| --- | --- |
+| Telemetry program slot | `8` |
+| Replay program slot | `7` |
+| Telemetry program name | `Base Telemetry` |
+| Inertial sensor port | `4` |
+| Front right motor | port `1`, reversed |
+| Front left motor | port `2` |
+| Rear right motor | port `9`, reversed |
+| Rear left motor | port `10` |
+| Forward/back axis | `axis3` |
+| Strafe axis | `axis4` |
+| Turn axis | `axis1` |
+| Deadband | `5%` |
+| Max linear speed | `0.35 m/s` |
+| Max turn speed | `90 deg/s` |
+
+The dashboard has a `Keyboard base listener` toggle:
+
+- Off: VEX controller owns the base. This is the recommended competition mode.
+- On: Mac keyboard commands are forwarded through Wi-Fi and the Pi to the VEX
+  base.
+
+When the toggle is off, the Pi host releases VEX base control and the Mac
+keyboard teleop filters out base keys. This prevents the old conflict where the
+keyboard path could send hold/zero commands while the controller tried to move.
+
+## Install The Dashboard
+
+Install Node.js 20 or newer, then from the repo root:
+
+```bash
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:5173
+```
+
+For a production-style local run:
+
+```bash
+npm run build
+npm start
+```
+
+Open:
+
+```text
+http://localhost:4318
+```
+
+Useful scripts:
+
+```bash
+npm run dev
+npm run build
+npm run build:client
+npm run build:server
+npm run test:server
+```
+
+## Install LeRobot On The Mac
+
+The Mac runs leader-arm calibration, local teleop, optional local replay, and
+training.
+
+Recommended path on macOS:
+
+```bash
+cd /tmp
+curl -L -o Miniforge3-Darwin-arm64.sh \
+  https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Darwin-arm64.sh
+bash Miniforge3-Darwin-arm64.sh
+```
+
+Open a new shell, then:
+
+```bash
+source ~/miniforge3/etc/profile.d/conda.sh
+conda create -y -n lerobot python=3.12
+conda activate lerobot
+conda install -y ffmpeg=7.1.1 -c conda-forge
+mkdir -p ~/src
+cd ~/src
+git clone https://github.com/huggingface/lerobot.git
+cd lerobot
+pip install -e ".[lekiwi]"
+```
+
+If your checkout is somewhere other than `/Users/meharkhanna/lerobot`, update
+the Mac project path in Settings.
+
+## Install LeRobot On The Pi
+
+On the Pi:
+
+```bash
+source ~/miniforge3/etc/profile.d/conda.sh
+conda create -y -n lerobot python=3.12
+conda activate lerobot
+conda install -y ffmpeg=7.1.1 -c conda-forge
+cd ~
+git clone https://github.com/huggingface/lerobot.git
+cd ~/lerobot
+pip install -e ".[lekiwi]"
+```
+
+Make sure SSH is enabled and the Mac can reach the Pi:
+
+```bash
+ssh pi@rawr.local
+ssh pi@10.42.0.1
+```
+
+The dashboard uploads helper scripts to `/home/pi/.lekiwi-ui` automatically, so
+you normally do not need to copy files by hand.
+
+## Prepare The SO-101 Arms
+
+1. Print and assemble the follower arm.
+2. Optional: print and assemble the leader arm.
+3. Wire servos from base to gripper in logical order.
+4. Power the servo bus with the correct voltage/current supply.
+5. Connect the follower motor controller to the Pi.
+6. Connect the leader motor controller to the Mac.
+7. Run LeRobot port discovery:
+
+```bash
+conda activate lerobot
+lerobot-find-port
+```
+
+8. Calibrate the follower on the Pi and the leader on the Mac using the current
+   LeRobot calibration commands for your installed version.
+
+The dashboard can detect a different leader serial port and use it instead of
+the old hardcoded port, but calibration must still exist for the leader ID.
+
+## Prepare The VEX Base
+
+1. Build the VEX base with the motor ports listed above, or update Settings.
+2. Connect the VEX Brain to the Pi over USB.
+3. Put the inertial sensor on port `4`, or update Settings.
+4. Use the dashboard `Sync VEX Telemetry` action to upload/sync the telemetry
+   program.
+5. Confirm the dashboard reports VEX telemetry as active before relying on
+   base replay or prepositioning.
+
+For competition driving, keep `Keyboard base listener` off and use the VEX
+controller for base motion.
+
+## Start Live Control
+
+1. Join the Mac to the robot network, normally `rawr-hotspot`.
+2. Start the dashboard:
+
+```bash
+npm run dev
+```
+
+3. Open `http://localhost:5173`.
+4. Check Settings:
+   - Pi host and fallback host.
+   - Pi username/password.
+   - Mac and Pi LeRobot paths.
+   - Follower robot port.
+   - VEX ports and reversals.
+5. Choose arm source:
+   - Leader arm.
+   - Keyboard arm.
+   - None.
+6. Choose base source:
+   - VEX controller.
+   - Keyboard base listener.
+7. Click `Start Control`.
+
+The backend will:
+
+- Reset old Pi SSH/SFTP sessions.
+- Probe `rawr.local` and `10.42.0.1`.
+- Detect the leader arm port.
+- Upload helper scripts if changed.
+- Start the Pi host over SSH.
+- Start the Mac-side keyboard/leader teleop helper.
+- Wait for host ports before reporting live control ready.
+
+## Keyboard Controls
+
+Arm keyboard controls:
+
+| Keys | Joint |
+| --- | --- |
+| `Q` / `A` | shoulder pan |
+| `W` / `S` | shoulder lift |
+| `E` / `D` | elbow flex |
+| `R` / `F`, `Y` / `H` | wrist flex |
+| `T` / `G` | wrist roll |
+| `Z` / `X`, `C` | gripper |
+
+Base keyboard controls, only when `Keyboard base listener` is on:
+
+| Keys | Base motion |
+| --- | --- |
+| Arrow up/down or `I`/`K` | forward/back |
+| Arrow left/right or `J`/`L` | strafe |
+| `O` / `P`, `U`, Enter hold modes | turn |
+| `0` | toggle drive/ECU speed |
+
+VEX Pin 5 servo helper keys:
+
+| Key | Servo position |
+| --- | --- |
+| `N` | start |
+| `B` | up |
+| `V` | down |
+
+## Recording And Replay
+
+Recordings are JSON trajectory files on the Pi:
+
+```text
+/home/pi/lekiwi-trajectories
+```
+
+Dashboard recording modes include:
+
+- Leader arm recording.
+- Keyboard recording.
+- Free-teach / hand-guide style capture.
+- Pro Recording beta flows.
+
+Replay options include:
+
+- Target Pi follower arm.
+- Target Mac-connected leader arm.
+- Replay speed.
+- Hold final pose duration.
+- Include or exclude VEX base motion.
+- Optional VEX start prepositioning.
+- Home mode: none, start, end, or both.
+
+Large recording details are downloaded over SFTP before parsing locally. This
+avoids truncated SSH stdout JSON failures such as:
+
+```text
+Unterminated string in JSON at position 32768
+```
+
+If that error still appears after this change, the recording file itself is
+likely partial or corrupt. Delete it or record again.
+
+## Pinned Moves, Holds, And Chain-links
+
+Pinned moves let you turn a recording into a dashboard button and optional
+hotkey. They are useful for repeated competition actions.
+
+A hold pin is a pinned recording whose final arm pose becomes the active hold.
+While an arm hold is active:
+
+- The arm stays at the hold pose.
+- The VEX controller can still drive the base.
+- Other arm-only Pi replays can return to the held pose afterwards.
+- Keyboard arm override can temporarily take over and then return to the hold.
+
+Chain-links are ordered sequences of recordings. They can run straight through
+or ask for confirmation between steps.
+
+## Training Workflows
+
+The Training panel supports ACT-style local workflows:
+
+- Capture datasets on the Pi.
+- Capture leader-as-follower datasets on the Mac.
+- Sync dataset metadata.
+- Run local training.
+- Deploy checkpoints to the Pi.
+- Benchmark deployed policies.
+- Run policy eval.
+
+Default training paths:
+
+| Path | Default |
+| --- | --- |
+| Pi dataset | `/home/pi/lerobot-datasets/<task>` |
+| Mac dataset | `output/training-datasets/<task>` |
+| Mac training run | `output/training-runs/<task>` |
+| Pi deployed policy | `/home/pi/lerobot-training/<task>/deployed-policy` |
+| Pi eval dataset | `/home/pi/lerobot-eval/<task>` |
+
+The default profile is `Wood Pick`. Update the task text and paths in the
+Training panel before collecting serious data.
+
+## Low-Latency Competition Notes
+
+Arena Wi-Fi can be slow because many robots share RF space. The code now does
+these things to reduce perceived latency:
+
+- Background SSH polling is skipped while the live Pi host owns the robot.
+- Live ZMQ sockets are configured with latest-message behavior.
+- The Mac teleop helper sends commands nonblocking.
+- If Wi-Fi stalls, stale commands are dropped instead of queued.
+- The Pi host drains queued live commands and executes only the newest command.
+- Recording timeline JSON is fetched by SFTP instead of large SSH stdout.
+
+Still, software cannot remove RF congestion. Best competition setup:
+
+- Use VEX controller base control when possible.
+- Keep `Keyboard base listener` off unless keyboard base control is required.
+- Keep the Mac physically close to the robot access point.
+- Avoid streaming cameras during critical control if you do not need them.
+- Prefer Ethernet for setup, debugging, sync, and training transfers.
+- Do not run training, dataset sync, or large downloads while live driving.
+
+## Emergency And Recovery
+
+Use the dashboard `Emergency Stop + Torque Off` first for normal software
+shutdown.
+
+If a Pi process is stuck, reset connections in the dashboard or SSH to the Pi
+and kill LeKiwi helper processes. See:
+
+```text
+LEKIWI_FALLBACK.md
+LEKIWI_RECOVERY_LOG_2026-03-27.md
+```
+
+Gripper overheat recovery is documented in `LEKIWI_FALLBACK.md`. Treat gripper
+overheat as a mechanical binding or hard-stop issue until proven otherwise.
+
+## Troubleshooting
+
+Pi is not reachable:
+
+- Confirm the Mac is on `rawr-hotspot`.
+- Try `ssh pi@10.42.0.1`.
+- Try `ssh pi@rawr.local`.
+- Check Settings for username/password/host.
+- Use Ethernet if Wi-Fi was disabled or overloaded.
+
+Leader arm port mismatch:
+
+- Run `lerobot-find-port`.
+- Recalibrate the leader using the detected port.
+- The dashboard can use a detected port at runtime, but calibration must exist.
+
+VEX controller and keyboard base conflict:
+
+- Turn `Keyboard base listener` off.
+- Start live control again.
+- The command line should include `--release-vex-controller-base true`.
+- It should not include `--vex-live-base-control true`.
+
+Recording JSON parse error at 32768 or 196608:
+
+- This used to happen when large JSON came back truncated over SSH stdout.
+- The current code downloads recording detail by SFTP.
+- If the error remains, the recording file is probably incomplete. Re-record.
+
+No command available:
+
+- This can be normal while the host is waiting for live commands.
+- If motion is delayed, check Wi-Fi quality and whether command drops are
+  logged.
+
+Servo safety latch:
+
+- Stop and inspect the arm.
+- Check temperature, wiring, power, and mechanical binding.
+- Restart live control only after the cause is clear.
+
+## Development Notes
+
+Source layout:
+
+| Path | Purpose |
+| --- | --- |
+| `src/App.tsx` | React dashboard |
+| `src/styles.css` | Dashboard styles |
+| `src/types.ts` | Client-side shared types |
+| `server/index.ts` | Express API routes |
+| `server/robotController.ts` | Main orchestration logic |
+| `server/defaultConfig.ts` | Default settings |
+| `server/configStore.ts` | Local config persistence |
+| `scripts/lekiwi_host.py` | Pi live host and warm replay |
+| `scripts/lekiwi_keyboard_teleop.py` | Mac keyboard/leader live teleop |
+| `scripts/lekiwi_record_trajectory.py` | Pi recording helper |
+| `scripts/lekiwi_replay_trajectory.py` | Pi replay helper |
+| `scripts/lekiwi_runtime.py` | Safety, torque, sensor, runtime utilities |
+| `scripts/vex_base_bridge.py` | VEX Brain bridge and VEX program generation |
+| `tests/` | Python helper tests |
+| `server/*.test.ts` | Backend tests |
+
+Run verification before pushing:
+
+```bash
+python3 -m py_compile scripts/lekiwi_keyboard_teleop.py scripts/lekiwi_host.py
+python3 -m unittest tests/test_keyboard_teleop.py
+npm run build:client
+npm run build:server
+npm run test:server
+```
+
+Do not commit these local artifacts:
+
+- `.lekiwi-ui/config.json`
+- `.tmp/`
+- `scripts/__pycache__/`
+- `.playwright-mcp/*.log`
+- `dist/`
+- `node_modules/`
+
+## Making This Work On Your Own Robot
+
+Use this checklist from a fresh clone:
+
+1. Build or buy the SO-101 follower arm.
+2. Optional: build the SO leader arm.
+3. Build the VEX base and wire it to the default ports, or update Settings.
+4. Install LeRobot on the Mac and Pi.
+5. Confirm SSH from Mac to Pi.
+6. Confirm follower motor controller appears on the Pi.
+7. Confirm leader motor controller appears on the Mac.
+8. Calibrate follower and leader.
+9. Start the dashboard with `npm run dev`.
+10. Update Settings for your paths, ports, Pi credentials, and VEX layout.
+11. Run `Sync VEX Telemetry` if using the VEX base.
+12. Start live control with VEX controller base mode first.
+13. Test one joint at a time at low torque.
+14. Test base driving from the VEX controller.
+15. Record a short trajectory.
+16. Replay it with base motion disabled.
+17. Add pinned moves and holds only after the basic path is reliable.
+
+## Related Documents
+
+- `ROBOT_COMPETITION_CONTROL_SPEC.md`: source of truth for authority and
+  contest behavior.
+- `CONTROL_UI.md`: older UI behavior notes.
+- `SO101_BUILD_RUNBOOK.md`: SO-101 build and LeRobot setup notes.
+- `LEKIWI_FALLBACK.md`: fallback hosts and recovery commands.
+- `LEKIWI_RECOVERY_LOG_2026-03-27.md`: debugging history and known-good
+  recovery steps.
+- `LEKIWI_WOODEN_PICK_AUTONOMY.md`: wood pick autonomy notes.
+- `CHAINLINK_VALIDATE_TEST_REPORT.md`: Chain-link validation report.
+
+## License
+
+This repository inherits the upstream SO-ARM100/SO-101 license file included in
+`LICENSE`. Check third-party dependencies and VEX/LeRobot licensing before
+redistributing a bundled robot image.

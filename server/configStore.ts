@@ -264,6 +264,10 @@ export class ConfigStore {
             ...this.defaults.settings.vex.keyboardCalibration,
             ...raw.settings?.vex?.keyboardCalibration,
           },
+          pin5Servo: {
+            ...this.defaults.settings.vex.pin5Servo,
+            ...raw.settings?.vex?.pin5Servo,
+          },
           manualIdleStoppingMode:
             raw.settings?.vex?.manualIdleStoppingMode ??
             this.defaults.settings.vex.manualIdleStoppingMode,
@@ -578,6 +582,13 @@ export class ConfigStore {
       }
       return Math.min(8, Math.max(1, numeric));
     };
+    const clampServoPosition = (value: number, fallback: number) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) {
+        return fallback;
+      }
+      return Math.min(100000, Math.max(-100000, numeric));
+    };
     const validAxes = new Set(["axis1", "axis2", "axis3", "axis4"]);
 
     return {
@@ -655,6 +666,12 @@ export class ConfigStore {
             typeof normalized.vex.keyboardCalibration?.notes === "string"
               ? normalized.vex.keyboardCalibration.notes.slice(0, 500)
               : "",
+        },
+        pin5Servo: {
+          startPositionDeg: clampServoPosition(
+            normalized.vex.pin5Servo?.startPositionDeg,
+            this.defaults.settings.vex.pin5Servo.startPositionDeg,
+          ),
         },
         manualIdleStoppingMode: this.normalizeManualIdleStoppingMode(
           normalized.vex.manualIdleStoppingMode,

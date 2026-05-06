@@ -28,7 +28,7 @@ FPS = 30
 def main():
     # Create the robot and teleoperator configurations
     robot_config = LeKiwiClientConfig(remote_ip="10.42.0.1", id="follow-mobile")
-    teleop_arm_config = SO100LeaderConfig(port="/dev/tty.usbmodem5AE60840411", id="leader")
+    teleop_arm_config = SO100LeaderConfig(port="/dev/tty.usbmodem5B140320431", id="leader")
     keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
 
     # Initialize the robot and teleoperator

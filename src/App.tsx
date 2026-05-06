@@ -15,6 +15,7 @@ import type {
   GamePlanStep,
   GamePlanStepTransitionPolicy,
   LiveArmSource,
+  LiveBaseSource,
   MarkRecordingGyroZeroRequest,
   MoveCategory,
   MoveDefinition,
@@ -49,6 +50,7 @@ import type {
 } from "./types";
 
 const POLL_MS = 2500;
+const ACTIVE_POLL_MS = 400;
 const SECTIONS = [
   { key: "overview", label: "Overview" },
   { key: "recordings", label: "Recordings" },
@@ -123,12 +125,23 @@ const MOVE_CATEGORY_LABELS: Record<MoveCategory, string> = {
   boardCollection: "Circuit Board collection",
   boardTransfer: "Circuit Board removal/insertion",
 };
+
+function shouldUseFastStatePoll(state: DashboardState | null): boolean {
+  if (!state) {
+    return true;
+  }
+  if (state.controlAuthority.safetyLatched) {
+    return true;
+  }
+  return Object.values(state.services).some((service) =>
+    service.state === "starting" || service.state === "running" || service.state === "stopping"
+  );
+}
 const BETA_RECORDING_TYPE_LABELS: Record<BetaRecordingType, string> = {
   keyboardControl: "Keyboard control",
   leaderArm: "Leader arm",
   followerHandGuide: "Follower hand-guide",
   keyboardFromActiveHold: "Keyboard from active hold",
-  leaderFromSyncedHold: "Leader from synced hold",
 };
 const GAME_BUILDER_TRANSITION_OPTIONS: Array<{ value: GamePlanStepTransitionPolicy; label: string }> = [
   { value: "returnToActiveHoldFirst", label: "Return to active hold first" },
@@ -159,6 +172,15 @@ const MIN_VEX_POSITIONING_XY_TOLERANCE_M = 0.001;
 const MAX_VEX_POSITIONING_XY_TOLERANCE_M = 2;
 const MIN_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 0.1;
 const MAX_VEX_POSITIONING_HEADING_TOLERANCE_DEG = 90;
+const LIVE_BASE_SOURCE_STORAGE_KEY = "robotArm.liveBaseSource";
+
+function initialLiveBaseSource(): LiveBaseSource {
+  if (typeof window === "undefined") {
+    return "vexController";
+  }
+  const stored = window.localStorage.getItem(LIVE_BASE_SOURCE_STORAGE_KEY);
+  return stored === "keyboard" || stored === "vexController" ? stored : "vexController";
+}
 
 type ChainRunPhase = "starting" | "running" | "waiting-confirmation";
 
@@ -396,6 +418,60 @@ function normalizeKeyboardEvent(event: KeyboardEvent): string {
 
   parts.push(key);
   return parts.join("+");
+}
+
+const ARM_KEYBOARD_OVERRIDE_KEYS = new Set([
+  "Q",
+  "A",
+  "W",
+  "S",
+  "E",
+  "D",
+  "R",
+  "F",
+  "Y",
+  "H",
+  "T",
+  "G",
+  "Z",
+  "X",
+  "C",
+]);
+const RETURN_TO_KEYBOARD_OVERRIDE_HOLD_KEYS = new Set(["ENTER", "NUMENTER"]);
+
+function isPlainRobotKeyEvent(event: KeyboardEvent): boolean {
+  return !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+}
+
+function isArmKeyboardOverrideKeyEvent(event: KeyboardEvent): boolean {
+  return isPlainRobotKeyEvent(event) && ARM_KEYBOARD_OVERRIDE_KEYS.has(keyboardEventPrimaryKey(event));
+}
+
+function isReturnToKeyboardOverrideHoldKeyEvent(event: KeyboardEvent): boolean {
+  return (
+    isPlainRobotKeyEvent(event) &&
+    RETURN_TO_KEYBOARD_OVERRIDE_HOLD_KEYS.has(keyboardEventPrimaryKey(event))
+  );
+}
+
+function isEditableHotkeyTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  const tagName = element?.tagName?.toLowerCase();
+  return Boolean(
+    element?.isContentEditable ||
+      tagName === "input" ||
+      tagName === "textarea" ||
+      tagName === "select",
+  );
+}
+
+function isArrowKeyEvent(event: KeyboardEvent): boolean {
+  return (
+    event.key === "ArrowUp" ||
+    event.key === "ArrowDown" ||
+    event.key === "ArrowLeft" ||
+    event.key === "ArrowRight"
+  );
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -889,7 +965,7 @@ function signLabel(sign: VexDirectionSign): string {
 }
 
 function betaRecordingTypeToInputMode(recordingType: BetaRecordingType): RecordingInputMode {
-  if (recordingType === "leaderArm" || recordingType === "leaderFromSyncedHold") {
+  if (recordingType === "leaderArm") {
     return "leader";
   }
   if (recordingType === "followerHandGuide") {
@@ -1866,6 +1942,7 @@ export default function App() {
   const [recordLabel, setRecordLabel] = useState("");
   const [recordInputMode, setRecordInputMode] = useState<RecordingInputMode>("auto");
   const [liveArmSource, setLiveArmSource] = useState<LiveArmSource>("leader");
+  const [liveBaseSource, setLiveBaseSource] = useState<LiveBaseSource>(initialLiveBaseSource);
   const [proMoveCategory, setProMoveCategory] = useState<MoveCategory | "all">("all");
   const [selectedProMoveId, setSelectedProMoveId] = useState("");
   const [selectedProVersionId, setSelectedProVersionId] = useState("");
@@ -1938,7 +2015,9 @@ export default function App() {
   const torqueTimers = useRef<Record<string, number>>({});
   const playbackAnchorRef = useRef<{ startedAtMs: number; baseTimeS: number } | null>(null);
   const stateRequestController = useRef<AbortController | null>(null);
+  const latestStateRef = useRef<DashboardState | null>(null);
   const mutationSequenceRef = useRef(0);
+  const pendingMutationLabelsRef = useRef(new Set<string>());
   const chainRunCancelledRef = useRef(false);
   const gameRunCancelledRef = useRef(false);
   const gameRunTokenRef = useRef(0);
@@ -1957,6 +2036,7 @@ export default function App() {
         return;
       }
       setBackendError("");
+      latestStateRef.current = next;
       setState(next);
       if (!settingsDirty || !settingsDraft) {
         setSettingsDraft(next.settings);
@@ -1977,15 +2057,35 @@ export default function App() {
   };
 
   useEffect(() => {
-    void loadState();
-    const interval = window.setInterval(() => {
-      void loadState().catch(() => undefined);
-    }, POLL_MS);
+    let stopped = false;
+    let timer: number | null = null;
+    const schedule = () => {
+      if (stopped) {
+        return;
+      }
+      const delay = shouldUseFastStatePoll(latestStateRef.current) ? ACTIVE_POLL_MS : POLL_MS;
+      timer = window.setTimeout(() => {
+        void loadState().finally(schedule);
+      }, delay);
+    };
+
+    void loadState().finally(schedule);
     return () => {
-      window.clearInterval(interval);
+      stopped = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
       stateRequestController.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    latestStateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    window.localStorage.setItem(LIVE_BASE_SOURCE_STORAGE_KEY, liveBaseSource);
+  }, [liveBaseSource]);
 
   useEffect(() => {
     return () => {
@@ -2104,22 +2204,41 @@ export default function App() {
       if (activeSection === "game-builder" && gameBuilderMode === "play") {
         return;
       }
-      if (!state?.pinnedMoves.length) {
+
+      if (isEditableHotkeyTarget(event.target)) {
         return;
       }
 
-      const target = event.target as HTMLElement | null;
-      const tagName = target?.tagName?.toLowerCase();
-      if (
-        target?.isContentEditable ||
-        tagName === "input" ||
-        tagName === "textarea" ||
-        tagName === "select"
-      ) {
+      if (state?.keyboardOverrideArmHold && isReturnToKeyboardOverrideHoldKeyEvent(event)) {
+        event.preventDefault();
+        if (!event.repeat) {
+          void handleReturnToKeyboardOverrideHold();
+        }
+        return;
+      }
+
+      if (state?.activeArmHold && isArmKeyboardOverrideKeyEvent(event)) {
+        event.preventDefault();
+        if (!event.repeat) {
+          void handleOverrideActiveArmHoldWithKeyboard();
+        }
         return;
       }
 
       const normalized = normalizeKeyboardEvent(event);
+      if (normalized === "DELETE" && isReplayServiceActive(state?.services.replay)) {
+        event.preventDefault();
+        void handleStopReplay();
+        return;
+      }
+
+      if (!state?.pinnedMoves.length) {
+        return;
+      }
+      if (event.repeat) {
+        return;
+      }
+
       const match = state.pinnedMoves.find(
         (item) => normalizeHotkeyText(item.keyBinding) === normalized,
       );
@@ -2163,14 +2282,7 @@ export default function App() {
       if (activeSection !== "game-builder" || gameBuilderMode !== "play") {
         return;
       }
-      const target = event.target as HTMLElement | null;
-      const tagName = target?.tagName?.toLowerCase();
-      if (
-        target?.isContentEditable ||
-        tagName === "input" ||
-        tagName === "textarea" ||
-        tagName === "select"
-      ) {
+      if (isEditableHotkeyTarget(event.target)) {
         return;
       }
       const normalized = normalizeGameBuilderHotkey(normalizeKeyboardEvent(event));
@@ -2724,12 +2836,18 @@ export default function App() {
     [state],
   );
   const hotkeysArmed =
-    state?.services.host.state === "running" && state.services.host.mode === "keyboard-control";
-  const keyboardBackupActive =
-    state?.services.teleop.state === "running" && state.services.teleop.mode === "keyboard-control";
-  const warmReplayReady =
     state?.services.host.state === "running" &&
     (state.services.host.mode === "control" || state.services.host.mode === "keyboard-control");
+  const keyboardBackupActive =
+    state?.services.teleop.state === "running" && state.services.teleop.mode === "keyboard-control";
+  const liveControlActive = Boolean(
+    state &&
+      ((state.services.host.state === "running" &&
+        (state.services.host.mode === "control" || state.services.host.mode === "keyboard-control")) ||
+        (state.services.teleop.state === "running" &&
+          (state.services.teleop.mode === "control" || state.services.teleop.mode === "keyboard-control"))),
+  );
+  const warmReplayReady = hotkeysArmed;
   const warmReplayFromControl =
     state?.services.host.state === "running" && state.services.host.mode === "control";
   const hasArmHomePosition = Boolean(state?.homePosition);
@@ -2737,11 +2855,39 @@ export default function App() {
   const controlAuthority = state?.controlAuthority;
   const safetyLocked = Boolean(controlAuthority?.safetyLatched);
   const effectiveLiveArmSource: LiveArmSource = state?.activeArmHold ? "none" : liveArmSource;
+  const baseKeyboardControlActive =
+    controlAuthority?.base === "keyboard" ||
+    (liveBaseSource === "keyboard" &&
+      (pendingAction === "start-control" ||
+        pendingAction === "start-keyboard-control" ||
+        pendingAction === "start-again" ||
+        pendingAction === "set-base-source"));
 
   const activeSectionMeta = useMemo(
     () => SECTIONS.find((section) => section.key === activeSection) ?? SECTIONS[0],
     [activeSection],
   );
+
+  useEffect(() => {
+    if (!liveControlActive) {
+      return;
+    }
+    if (controlAuthority?.base === "keyboard" || controlAuthority?.base === "vexController") {
+      setLiveBaseSource(controlAuthority.base);
+    }
+  }, [controlAuthority?.base, liveControlActive]);
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if (!baseKeyboardControlActive || !isArrowKeyEvent(event) || isEditableHotkeyTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+    };
+
+    window.addEventListener("keydown", listener, { passive: false });
+    return () => window.removeEventListener("keydown", listener);
+  }, [baseKeyboardControlActive]);
 
   useEffect(() => {
     if (!serviceSnapshots.length) {
@@ -2899,6 +3045,10 @@ export default function App() {
     url: string,
     init?: RequestInit,
   ): Promise<DashboardState | null> => {
+    if (pendingMutationLabelsRef.current.has(label)) {
+      return null;
+    }
+    pendingMutationLabelsRef.current.add(label);
     const mutationId = mutationSequenceRef.current + 1;
     mutationSequenceRef.current = mutationId;
     try {
@@ -2906,6 +3056,7 @@ export default function App() {
       const next = await request<DashboardState>(url, init);
       if (mutationSequenceRef.current === mutationId) {
         setBackendError("");
+        latestStateRef.current = next;
         setState(next);
         if (!settingsDirty) {
           setSettingsDraft(next.settings);
@@ -2918,6 +3069,7 @@ export default function App() {
       }
       return null;
     } finally {
+      pendingMutationLabelsRef.current.delete(label);
       if (mutationSequenceRef.current === mutationId) {
         setPendingAction(null);
       }
@@ -3013,11 +3165,23 @@ export default function App() {
     }
   };
 
-  const handleStartLiveControl = async (endpoint: "start-control" | "start-keyboard-control") => {
-    const armSource = state?.activeArmHold ? "none" : liveArmSource;
+  const handleLeaderMimicHold = async () => {
+    const next = await mutate("leader-mimic-hold", "/api/recordings/leader-mimic-hold", {
+      method: "POST",
+    });
+    if (next) {
+      flashToast("Leader mimicked active hold.");
+    }
+  };
+
+  const handleStartLiveControl = async (
+    endpoint: "start-control" | "start-keyboard-control",
+    armSourceOverride?: LiveArmSource,
+  ) => {
+    const armSource = state?.activeArmHold ? "none" : armSourceOverride ?? liveArmSource;
     const payload: StartControlRequest = {
       armSource,
-      baseSource: "keyboard",
+      baseSource: liveBaseSource,
     };
     const next = await mutate(endpoint, `/api/robot/${endpoint}`, {
       method: "POST",
@@ -3026,10 +3190,68 @@ export default function App() {
     if (next) {
       flashToast(
         armSource === "leader"
-          ? "Leader arm and keyboard base control started."
+          ? liveBaseSource === "keyboard"
+            ? "Leader arm and keyboard base control started."
+            : "Leader arm started; VEX controller owns the base."
           : armSource === "keyboard"
-            ? "Keyboard arm and keyboard base control started."
-            : "Base-only keyboard control started while arm input stays disabled.",
+            ? liveBaseSource === "keyboard"
+              ? "Keyboard arm and keyboard base control started."
+              : "Keyboard arm started; VEX controller owns the base."
+            : liveBaseSource === "keyboard"
+              ? "Base-only keyboard control started while arm input stays disabled."
+              : "Arm input disabled; VEX controller owns the base.",
+      );
+    }
+  };
+
+  const handleStartAgain = async () => {
+    const payload: StartControlRequest = {
+      armSource: state?.activeArmHold ? "none" : liveArmSource,
+      baseSource: liveBaseSource,
+    };
+    const next = await mutate("start-again", "/api/robot/start-again", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (next) {
+      flashToast("Manual control restarted.");
+    }
+  };
+
+  const handleToggleLiveBaseSource = async () => {
+    const nextBaseSource: LiveBaseSource = liveBaseSource === "keyboard" ? "vexController" : "keyboard";
+    setLiveBaseSource(nextBaseSource);
+    if (!liveControlActive) {
+      flashToast(
+        nextBaseSource === "keyboard"
+          ? "Keyboard VEX base enabled for the next start."
+          : "VEX controller base enabled for the next start.",
+      );
+      return;
+    }
+
+    const currentArmSource: LiveArmSource =
+      state?.activeArmHold
+        ? "none"
+        : controlAuthority?.arm === "leader" || controlAuthority?.arm === "keyboard"
+          ? controlAuthority.arm
+          : liveArmSource;
+    const endpoint =
+      state?.services.host.mode === "keyboard-control" || state?.services.teleop.mode === "keyboard-control"
+        ? "start-keyboard-control"
+        : "start-control";
+    const next = await mutate("set-base-source", `/api/robot/${endpoint}`, {
+      method: "POST",
+      body: JSON.stringify({
+        armSource: currentArmSource,
+        baseSource: nextBaseSource,
+      } satisfies StartControlRequest),
+    });
+    if (next) {
+      flashToast(
+        nextBaseSource === "keyboard"
+          ? "Keyboard VEX base control enabled."
+          : "Keyboard VEX base control disabled; VEX controller owns the base.",
       );
     }
   };
@@ -3045,7 +3267,7 @@ export default function App() {
     if (next) {
       if (action === "discardLeaderAuthority") {
         setLiveArmSource("keyboard");
-        flashToast("Keyboard/follower mode selected; leader arm remains blocked until sync.");
+        flashToast("Keyboard/follower mode selected.");
       } else {
         flashToast("Leader stale state resolved.");
       }
@@ -3147,7 +3369,7 @@ export default function App() {
       trajectoryPath: version.trajectoryPath,
       target: "pi",
       vexReplayMode: move.defaultVexReplaySetting.replayMode,
-      homeMode: state?.activeArmHold ? "end" : "none",
+      homeMode: "none",
       speed: version.playbackSpeed,
       autoVexPositioning: version.autoVexPositioningEnabled,
       vexPositioningSpeed: DEFAULT_VEX_POSITIONING_SPEED,
@@ -3276,7 +3498,7 @@ export default function App() {
       trajectoryPath: version.trajectoryPath,
       target: "pi",
       vexReplayMode: move.defaultVexReplaySetting.replayMode,
-      homeMode: step.returnToActiveHold || state?.activeArmHold ? "end" : "none",
+      homeMode: step.returnToActiveHold && !state?.activeArmHold ? "end" : "none",
       speed: step.playbackSpeedOverride ?? version.playbackSpeed,
       autoVexPositioning: step.autoVexPositioning,
       vexPositioningSpeed: DEFAULT_VEX_POSITIONING_SPEED,
@@ -3532,6 +3754,26 @@ export default function App() {
     }
   };
 
+  const handleOverrideActiveArmHoldWithKeyboard = async () => {
+    const holdName = state?.activeArmHold?.name ?? "held arm pose";
+    const next = await mutate("arm-hold-keyboard-override", "/api/arm-hold/keyboard-override", {
+      method: "POST",
+    });
+    if (next?.keyboardOverrideArmHold) {
+      flashToast(`Released ${holdName}; keyboard arm control enabled.`);
+    }
+  };
+
+  const handleReturnToKeyboardOverrideHold = async () => {
+    const holdName = state?.keyboardOverrideArmHold?.name ?? "held arm pose";
+    const next = await mutate("arm-hold-return", "/api/arm-hold/return", {
+      method: "POST",
+    });
+    if (next?.activeArmHold) {
+      flashToast(`Returning to ${holdName}.`);
+    }
+  };
+
   const handleTriggerPinnedMove = async (move: PinnedMove) => {
     if (isDummyRecordingPath(move.trajectoryPath)) {
       flashToast("Dummy pinned moves are for offline UI testing. Connect the Pi to run real moves.");
@@ -3548,7 +3790,9 @@ export default function App() {
         flashToast(
           next.activeArmHold?.pinnedMoveId === move.id
             ? `Holding ${move.name}.`
-            : `Stopped holding ${move.name}.`,
+            : next.controlAuthority.arm === "leader"
+              ? `Released ${move.name}; leader control restored.`
+              : `Released ${move.name}.`,
         );
       } else {
         flashToast(`Triggered ${move.name}.`);
@@ -4443,7 +4687,18 @@ export default function App() {
         ) : null}
         {safetyLocked ? (
           <div className="alert-banner">
-            <strong>Runtime arm safety latch active:</strong> robot-start actions are blocked until the arm is inspected and Pi connections are reset.
+            <div>
+              <strong>Runtime arm safety latch active:</strong> inspect the arm, then restart manual control.
+            </div>
+            <div className="button-cluster inline">
+              <button
+                className="primary"
+                disabled={pendingAction === "start-again"}
+                onClick={() => void handleStartAgain()}
+              >
+                Start Again
+              </button>
+            </div>
           </div>
         ) : null}
 
@@ -4473,10 +4728,24 @@ export default function App() {
                     <option value="none">Base only / held arm</option>
                   </select>
                 </label>
-                <label>
-                  Base authority
-                  <input value="Keyboard VEX base (arrow keys + O/P)" readOnly />
-                </label>
+                <div className="switch-field">
+                  Keyboard base listener
+                  <button
+                    type="button"
+                    className={`toggle-switch ${liveBaseSource === "keyboard" ? "active" : ""}`}
+                    role="switch"
+                    aria-checked={liveBaseSource === "keyboard"}
+                    disabled={robotCommandDisabled}
+                    onClick={() => void handleToggleLiveBaseSource()}
+                  >
+                    <span className="toggle-switch-track">
+                      <span className="toggle-switch-thumb" />
+                    </span>
+                    <span className="toggle-switch-text">
+                      {liveBaseSource === "keyboard" ? "On - keyboard drives base" : "Off - VEX controller drives base"}
+                    </span>
+                  </button>
+                </div>
               </div>
 
               <div className="button-cluster">
@@ -4494,7 +4763,7 @@ export default function App() {
                   Stop Control
                 </button>
                 <button
-                  disabled={pendingAction === "reset-pi-connections"}
+                  disabled={disabled}
                   onClick={() =>
                     void mutate("reset-pi-connections", "/api/robot/reset-pi-connections", {
                       method: "POST",
@@ -4507,7 +4776,7 @@ export default function App() {
                   disabled={robotCommandDisabled || keyboardBackupActive}
                   onClick={() => void handleStartLiveControl("start-keyboard-control")}
                 >
-                  Start Keyboard/Base Control
+                  {liveBaseSource === "keyboard" ? "Start Keyboard/Base Control" : "Start Keyboard Arm + VEX Base"}
                 </button>
                 <button
                   disabled={robotCommandDisabled || hotkeysArmed}
@@ -4578,7 +4847,7 @@ export default function App() {
                   <span className="status-pill warn">leader stale</span>
                   <div className="stale-actions">
                     <p className="card-note">
-                      Leader arm control is blocked until the leader is physically synced. Keyboard/follower mode keeps the leader blocked.
+                      Leader and follower are not physically matched. Starting leader control will command the follower to the leader's current pose.
                     </p>
                     <div className="button-cluster inline">
                       <button
@@ -4587,11 +4856,15 @@ export default function App() {
                       >
                         Stay Keyboard/Follower
                       </button>
-                      <button disabled title="Requires implementation and physical robot validation.">
-                        Sync Leader to Follower
-                      </button>
-                      <button disabled title="Requires implementation and physical robot validation.">
-                        Move Follower to Leader
+                      <button
+                        className="primary"
+                        disabled={robotCommandDisabled || Boolean(state?.activeArmHold) || !state?.leader.connected}
+                        onClick={() => {
+                          setLiveArmSource("leader");
+                          void handleStartLiveControl("start-control", "leader");
+                        }}
+                      >
+                        Use Leader Now
                       </button>
                     </div>
                   </div>
@@ -4602,7 +4875,15 @@ export default function App() {
                   {keyboardBackupActive ? "keyboard capture live" : "keyboard capture off"}
                 </span>
                 <p className="card-note">
-                  One arm source is active at a time. Keyboard arm keys: <code>Q/A</code>, <code>W/S</code>, <code>E/D</code>, <code>R/F</code>, <code>T/G</code>, <code>Z/X</code>. Contest base: <code>ArrowUp/ArrowDown</code> forward/back, <code>ArrowLeft/ArrowRight</code> strafe, <code>O/P</code> rotate, <code>0</code> toggles speed, <code>Esc</code> stops keyboard capture.
+                  One arm source is active at a time. Keyboard arm keys: <code>Q/A</code>, <code>W/S</code>, <code>E/D</code>, <code>R/F</code>, <code>T/G</code>, <code>Z/X</code>. {liveBaseSource === "keyboard" ? (
+                    <>
+                      Contest base: <code>ArrowUp/ArrowDown</code> forward/back, <code>ArrowLeft/ArrowRight</code> strafe, <code>O/P</code> rotate, <code>0</code> toggles speed, <code>Esc</code> stops keyboard capture.
+                    </>
+                  ) : (
+                    <>
+                      Keyboard VEX base keys are ignored; the VEX controller owns base motion. <code>Esc</code> stops keyboard capture.
+                    </>
+                  )}
                 </p>
               </div>
               <div className="mode-strip">
@@ -4610,7 +4891,7 @@ export default function App() {
                   {hotkeysArmed ? "hotkeys armed" : "hotkeys disarmed"}
                 </span>
                 <p className="card-note">
-                  Arm hotkeys keeps the Pi host live without teleop so pinned Pi replays can start immediately.
+                  Hotkeys use the running Pi host, including during live control, so pinned Pi replays can override live input immediately.
                 </p>
               </div>
               <div className="mode-strip">
@@ -4627,7 +4908,7 @@ export default function App() {
                   <p className="card-kicker">Calibration</p>
                   <h3>Calibrate Arm and Leader</h3>
                   <p className="card-note">
-                    Use the live console prompts. Send <code>c</code> to force a fresh full-arm follower calibration, then Enter at each step. Individual follower servos can also be started from the cards below.
+                    Use the live console prompts. Send <code>c</code> to force a fresh full-arm follower or leader calibration, then Enter at each step. Individual follower servos can also be started from the cards below.
                   </p>
                 </div>
                 <div className="calibration-grid">
@@ -4967,6 +5248,13 @@ export default function App() {
                     onClick={() => void mutate("stop-recording", "/api/recordings/stop", { method: "POST" })}
                   >
                     Stop Recording
+                  </button>
+                  <button
+                    disabled={robotCommandDisabled || !state?.activeArmHold || !state?.leader.connected}
+                    title="Move the leader arm to the active hold pose, then release leader torque."
+                    onClick={() => void handleLeaderMimicHold()}
+                  >
+                    Leader Mimic
                   </button>
                   <button onClick={() => void handleZeroVexGyro()}>
                     Zero VEX Gyro
@@ -5495,12 +5783,12 @@ export default function App() {
                           disabled={!selectedRecordingEntry || replayTarget !== "pi"}
                           onChange={(event) => setPinHoldArmPose(event.target.checked)}
                         />
-                        <span>Hold arm pose toggle</span>
+                        <span>Hold final arm pose</span>
                       </label>
                     </div>
                     {pinHoldArmPose ? (
                       <p className="card-note">
-                        This hotkey toggles an arm-only hold. Other Pi pinned moves return to this recording's final arm pose until the hold is toggled off.
+                        This hotkey replays the follower arm to this recording's final pose and keeps it held while base control remains available.
                       </p>
                     ) : null}
                     <button
@@ -5554,7 +5842,7 @@ export default function App() {
                 </div>
               </div>
               <p className="card-note">
-                Hotkeys fire when the page is focused and you are not typing in a field. Arm hotkeys to keep the Pi ready for fast pinned-move launches.
+                Hotkeys fire when the page is focused and you are not typing in a field. Press Delete while a replay is active to interrupt it and return to live control.
               </p>
               <div className="chain-link-panel">
                 <div className="chain-link-editor">
@@ -5912,7 +6200,7 @@ export default function App() {
 	                      </div>
 	                      <ReplayOptionChecks options={move} />
 	                      <p className="pin-meta">
-	                        {move.holdArmPose ? "Hold arm pose toggle • " : ""}{replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} •{" "}
+	                        {move.holdArmPose ? "Arm hold • " : ""}{replayTargetLabel(move.target)} • Speed {move.speed} • Hold {move.holdFinalS}s • {homeModeLabel(move.homeMode)} •{" "}
                         {move.includeBase
                           ? `VEX base + arm (${vexReplayModeLabel(move.vexReplayMode)})`
                           : "Arm only"}
@@ -5967,7 +6255,7 @@ export default function App() {
                                   })
                                 }
                               />
-                              <span>Hold arm pose toggle</span>
+                              <span>Hold final arm pose</span>
                             </label>
 	                        </div>
 	                      ) : null}
@@ -5977,7 +6265,7 @@ export default function App() {
 	                          disabled={robotCommandDisabled || isDummyRecordingPath(move.trajectoryPath)}
 	                          onClick={() => void handleTriggerPinnedMove(move)}
 	                        >
-                          {move.holdArmPose ? (holdActive ? "Turn Off" : "Turn On") : "Run"}
+                          {move.holdArmPose ? (holdActive ? "Release" : "Hold") : "Run"}
                         </button>
                         <button
                           disabled={disabled}
@@ -6202,6 +6490,13 @@ export default function App() {
                           onClick={() => void handleStopProRecording()}
                         >
                           {state?.activeArmHold ? "Stop and Return to Hold" : "Stop Recording"}
+                        </button>
+                        <button
+                          disabled={robotCommandDisabled || !state?.activeArmHold || !state?.leader.connected}
+                          title="Move the leader arm to the active hold pose, then release leader torque."
+                          onClick={() => void handleLeaderMimicHold()}
+                        >
+                          Leader Mimic
                         </button>
                         <button disabled={disabled || !selectedRecordingEntry} onClick={() => void handleCreateProVersionFromSelectedRecording(false)}>
                           Save as New Version

@@ -117,6 +117,13 @@ app.post(
 );
 
 app.post(
+  "/api/robot/start-again",
+  asyncRoute(async (req, res) => {
+    res.json(await controller.startAgain(req.body as StartControlRequest));
+  }),
+);
+
+app.post(
   "/api/robot/emergency-stop",
   asyncRoute(async (_req, res) => {
     res.json(await controller.emergencyStop());
@@ -229,6 +236,13 @@ app.post(
   "/api/recordings/stop",
   asyncRoute(async (_req, res) => {
     res.json(await controller.stopRecording());
+  }),
+);
+
+app.post(
+  "/api/recordings/leader-mimic-hold",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.mimicLeaderToActiveHold());
   }),
 );
 
@@ -377,6 +391,20 @@ app.post(
   asyncRoute(async (req, res) => {
     const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     res.json(await controller.triggerPinnedMove(id));
+  }),
+);
+
+app.post(
+  "/api/arm-hold/keyboard-override",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.overrideActiveArmHoldWithKeyboard());
+  }),
+);
+
+app.post(
+  "/api/arm-hold/return",
+  asyncRoute(async (_req, res) => {
+    res.json(await controller.returnToKeyboardOverrideArmHold());
   }),
 );
 

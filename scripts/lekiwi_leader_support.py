@@ -104,9 +104,6 @@ def connect_leader_noninteractive(leader, calibrate_hint: str) -> None:
         )
 
     leader.connect(calibrate=False)
-    if leader.is_calibrated:
-        return
-
     print(f"Applying cached leader calibration from {leader.calibration_fpath}.", flush=True)
     leader.bus.write_calibration(leader.calibration)
     leader.configure()

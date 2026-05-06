@@ -11,6 +11,7 @@ from pathlib import Path
 import cv2
 import zmq
 
+from lekiwi_runtime import resolve_lekiwi_robot_port
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
 
 logging.basicConfig(level=logging.WARNING)
@@ -75,6 +76,14 @@ def extract_base_action(action: dict[str, float]) -> dict[str, float]:
 def main() -> None:
     args = parse_args()
 
+    resolved_port = resolve_lekiwi_robot_port(args.robot_port)
+    if resolved_port != args.robot_port:
+        logger.warning(
+            "Using detected LeKiwi robot port %s instead of configured %s.",
+            resolved_port,
+            args.robot_port,
+        )
+        args.robot_port = resolved_port
     robot_config = LeKiwiConfig(id=args.robot_id, port=args.robot_port)
     configure_cameras(robot_config, args.robot_cameras_json)
     robot = LeKiwi(robot_config)

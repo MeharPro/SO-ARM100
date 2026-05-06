@@ -26,6 +26,7 @@ from lekiwi_runtime import (
     configure_wrist_roll_mode,
     disconnect_robot,
     parse_torque_limits_json,
+    resolve_lekiwi_robot_port,
     servo_protection_kwargs_from_args,
     stop_robot_base,
     ULTRASONIC_MAX_DISTANCE_M,
@@ -74,6 +75,7 @@ ARM_STATE_KEYS = (
 )
 GRIPPER_STATE_KEY = "arm_gripper.pos"
 ARM_HOME_MOTION_KEYS = tuple(key for key in ARM_STATE_KEYS if key != GRIPPER_STATE_KEY)
+ARM_SYNC_MOTION_KEYS = ARM_STATE_KEYS
 BASE_STATE_KEYS = ("x.vel", "y.vel", "theta.vel")
 VEX_POSITION_LOG_PREFIX = "[vex-position]"
 HOME_POSITION_TOLERANCE_DEG = 3.0
@@ -99,6 +101,14 @@ def parse_bool(value: str) -> bool:
 
 def build_robot_config(args: argparse.Namespace) -> LeKiwiConfig:
     fields = getattr(LeKiwiConfig, "__dataclass_fields__", {})
+    resolved_port = resolve_lekiwi_robot_port(args.robot_port)
+    if resolved_port != args.robot_port:
+        logger.warning(
+            "Using detected LeKiwi robot port %s instead of configured %s.",
+            resolved_port,
+            args.robot_port,
+        )
+        args.robot_port = resolved_port
     kwargs = {
         "id": args.robot_id,
         "port": args.robot_port,
@@ -416,7 +426,7 @@ def home_motion_errors(
     home_position: dict[str, float],
 ) -> dict[str, float]:
     errors: dict[str, float] = {}
-    for key in ARM_HOME_MOTION_KEYS:
+    for key in ARM_SYNC_MOTION_KEYS:
         value = observation.get(key)
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             errors[key] = abs(float(value) - home_position[key])
@@ -462,51 +472,52 @@ def move_arm_to_home(
     observation = observation_reader.get_observation()
     current_position = extract_home_position(observation)
     safety_filter.seed_from_observation(observation)
-    max_steps = 1
-    for key in ARM_HOME_MOTION_KEYS:
-        target = home_position[key]
-        step_limit = DEFAULT_SAFER_ARM_MAX_STEP.get(key, 8.0)
-        if step_limit > 0:
-            max_steps = max(max_steps, math.ceil(abs(target - current_position[key]) / step_limit))
-    max_steps = max(1, min(600, max_steps))
     sleep_step_s = 1.0 / max(loop_hz, 1.0)
     last_action: dict[str, float] | None = None
     final_errors: dict[str, float] = {}
+    motion_position = dict(current_position)
 
-    for step_index in range(1, max_steps + 1):
-        progress = step_index / max_steps
-        target_action = {
-            key: current_position[key] + (home_position[key] - current_position[key]) * progress
-            for key in ARM_HOME_MOTION_KEYS
-        }
-        target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
-        torque_watcher.poll(robot)
-        action = safety_filter.normalize(target_action)
-        action = servo_protection.limit_action(action)
-        sent_action = apply_robot_action(
-            robot,
-            action,
-            allow_legacy_base=allow_legacy_base,
-        )
-        safety_filter.update(sent_action)
-        servo_protection.record_command(sent_action)
-        last_action = sent_action
-        vex_base_bridge.send_hold()
-        if hasattr(power_logger, "maybe_sample"):
-            power_logger.maybe_sample()
-        observation = observation_reader.get_observation()
-        observation = vex_base_bridge.merge_observation(observation)
-        observation = servo_protection.enrich_observation(observation)
-        sensor_status_emitter.emit(
-            observation_reader,
-            observation,
-            source="replay-home",
-            vex_base_bridge=vex_base_bridge,
-        )
-        if servo_protection.observe(observation, getattr(power_logger, "last_sample", None)):
-            print("Go-home stopped because the arm safety latch tripped.", flush=True)
-            return None
-        precise_sleep(sleep_step_s)
+    for joint_key in ARM_SYNC_MOTION_KEYS:
+        start_value = motion_position[joint_key]
+        target = home_position[joint_key]
+        step_limit = DEFAULT_SAFER_ARM_MAX_STEP.get(joint_key, 8.0)
+        max_steps = 1
+        if step_limit > 0:
+            max_steps = max(max_steps, math.ceil(abs(target - start_value) / step_limit))
+        max_steps = max(1, min(600, max_steps))
+
+        for step_index in range(1, max_steps + 1):
+            progress = step_index / max_steps
+            motion_position[joint_key] = start_value + (target - start_value) * progress
+            target_action = {key: motion_position[key] for key in ARM_STATE_KEYS}
+            target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
+            torque_watcher.poll(robot)
+            action = safety_filter.normalize(target_action)
+            action = servo_protection.limit_action(action)
+            sent_action = apply_robot_action(
+                robot,
+                action,
+                allow_legacy_base=allow_legacy_base,
+            )
+            safety_filter.update(sent_action)
+            servo_protection.record_command(sent_action)
+            last_action = sent_action
+            vex_base_bridge.send_hold()
+            if hasattr(power_logger, "maybe_sample"):
+                power_logger.maybe_sample()
+            observation = observation_reader.get_observation()
+            observation = vex_base_bridge.merge_observation(observation)
+            observation = servo_protection.enrich_observation(observation)
+            sensor_status_emitter.emit(
+                observation_reader,
+                observation,
+                source="replay-home",
+                vex_base_bridge=vex_base_bridge,
+            )
+            if servo_protection.observe(observation, getattr(power_logger, "last_sample", None)):
+                print("Go-home stopped because the arm safety latch tripped.", flush=True)
+                return None
+            precise_sleep(sleep_step_s)
 
     settle_deadline = time.perf_counter() + HOME_SETTLE_TIMEOUT_S
     while True:
@@ -522,7 +533,7 @@ def move_arm_to_home(
             )
             return None
 
-        target_action = {key: home_position[key] for key in ARM_HOME_MOTION_KEYS}
+        target_action = {key: home_position[key] for key in ARM_STATE_KEYS}
         target_action.update(dict.fromkeys(BASE_STATE_KEYS, 0.0))
         torque_watcher.poll(robot)
         action = safety_filter.normalize(target_action)
@@ -553,7 +564,7 @@ def move_arm_to_home(
         precise_sleep(sleep_step_s)
 
     print(
-        f"Go-home reached saved arm pose without commanding the gripper (max joint error {max_home_motion_error(final_errors):.2f}deg).",
+        f"Go-home reached saved arm pose in forward joint order (max joint error {max_home_motion_error(final_errors):.2f}deg).",
         flush=True,
     )
     return last_action

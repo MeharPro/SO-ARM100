@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">
+  <defs>
+    <style>
+      .bg { fill: #fafaf8; }
+      .card { fill: #ffffff; stroke: #111827; stroke-width: 2; }
+      .orange { fill: #fff7ed; stroke: #c2410c; stroke-width: 3; }
+      .green { fill: #ecfdf5; stroke: #047857; stroke-width: 3; }
+      .blue { fill: #eff6ff; stroke: #1d4ed8; stroke-width: 3; }
+      .purple { fill: #f5f3ff; stroke: #6d28d9; stroke-width: 3; }
+      .note { fill: #fffbeb; stroke: #b45309; stroke-width: 2; }
+      .line { fill: none; stroke: #111827; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+      .dashed { fill: none; stroke: #6d28d9; stroke-width: 4; stroke-dasharray: 12 10; stroke-linecap: round; stroke-linejoin: round; }
+      .text { font-family: Arial, Helvetica, sans-serif; fill: #111827; }
+      .title { font-size: 42px; font-weight: 700; }
+      .subtitle { font-size: 22px; fill: #374151; }
+      .h2 { font-size: 26px; font-weight: 700; }
+      .body { font-size: 22px; }
+      .small { font-size: 18px; fill: #374151; }
+      .tiny { font-size: 16px; fill: #4b5563; }
+      .ok { fill: #047857; font-weight: 700; }
+      .warn { fill: #b45309; font-weight: 700; }
+    </style>
+    <marker id="arrow2" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 14 7 L 0 14 z" fill="#111827" />
+    </marker>
+    <marker id="purpleArrow2" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 14 7 L 0 14 z" fill="#6d28d9" />
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1200" height="1600" />
+
+  <text x="70" y="80" class="text title">Power Protection Summary</text>
+  <text x="70" y="118" class="text subtitle">Ontario Skills Team of 4 Robotics inspection packet</text>
+
+  <rect x="70" y="155" width="1060" height="135" rx="14" class="note" />
+  <text x="100" y="195" class="text h2">Compliance claim</text>
+  <text x="100" y="230" class="text body">All battery-fed branches are routed through documented built-in protection or a known commercial VEX V5 protected system.</text>
+  <text x="100" y="262" class="text body">Software virtual fuse is backup evidence, not the only protection layer.</text>
+
+  <!-- Branch A -->
+  <text x="70" y="350" class="text h2">Branch A: CITYORK battery to Raspberry Pi 5</text>
+  <rect x="70" y="380" width="300" height="155" rx="14" class="orange" />
+  <text x="95" y="420" class="text h2">CITYORK Battery</text>
+  <text x="95" y="458" class="text body">12V rechargeable pack</text>
+  <text x="95" y="490" class="text body">7900mAh / 99.54Wh</text>
+  <text x="95" y="520" class="text small">Commercial sealed lithium pack</text>
+
+  <rect x="450" y="380" width="300" height="155" rx="14" class="green" />
+  <text x="475" y="420" class="text h2">Built-in Protection</text>
+  <text x="475" y="458" class="text body">Protection circuit board</text>
+  <text x="475" y="490" class="text body">OVP / short-circuit</text>
+  <text x="475" y="520" class="text small">Printed Amazon product page</text>
+
+  <rect x="830" y="380" width="300" height="155" rx="14" class="blue" />
+  <text x="855" y="420" class="text h2">Pi 5 Power Input</text>
+  <text x="855" y="458" class="text body">USB-C power path</text>
+  <text x="855" y="490" class="text body">Known protected board input</text>
+  <text x="855" y="520" class="text small">Do not power through 5V GPIO</text>
+
+  <path d="M 370 458 L 450 458" class="line" marker-end="url(#arrow2)" />
+  <path d="M 750 458 L 830 458" class="line" marker-end="url(#arrow2)" />
+
+  <!-- Branch B -->
+  <text x="70" y="625" class="text h2">Branch B: VEX base power system</text>
+  <rect x="70" y="655" width="300" height="155" rx="14" class="orange" />
+  <text x="95" y="695" class="text h2">VEX V5 Battery</text>
+  <text x="95" y="733" class="text body">Commercial VEX pack</text>
+  <text x="95" y="765" class="text body">12.8V VEX system</text>
+  <text x="95" y="795" class="text small">Known documented system</text>
+
+  <rect x="450" y="655" width="300" height="155" rx="14" class="green" />
+  <text x="475" y="695" class="text h2">VEX V5 Brain</text>
+  <text x="475" y="733" class="text body">Built-in protection</text>
+  <text x="475" y="765" class="text body">Current telemetry available</text>
+  <text x="475" y="795" class="text small">Printed VEX documentation</text>
+
+  <rect x="830" y="655" width="300" height="155" rx="14" class="blue" />
+  <text x="855" y="695" class="text h2">VEX Smart Motors</text>
+  <text x="855" y="733" class="text body">Powered by V5 Brain</text>
+  <text x="855" y="765" class="text body">No raw battery branch</text>
+  <text x="855" y="795" class="text small">Pi link is control-only</text>
+
+  <path d="M 370 733 L 450 733" class="line" marker-end="url(#arrow2)" />
+  <path d="M 750 733 L 830 733" class="line" marker-end="url(#arrow2)" />
+
+  <!-- Software backup -->
+  <text x="70" y="900" class="text h2">Backup layer: virtual fuse</text>
+  <rect x="70" y="930" width="500" height="180" rx="14" class="purple" />
+  <text x="100" y="970" class="text h2">Runtime Safety Supervisor</text>
+  <text x="100" y="1010" class="text body">Monitors motor current, power, voltage, and temperature.</text>
+  <text x="100" y="1045" class="text body">Clamps commands and latches fault.</text>
+  <text x="100" y="1080" class="text body">Disables motor torque / stops robot on trip.</text>
+
+  <rect x="630" y="930" width="500" height="180" rx="14" class="purple" />
+  <text x="660" y="970" class="text h2">Inspection wording</text>
+  <text x="660" y="1010" class="text body">“The virtual fuse is secondary.</text>
+  <text x="660" y="1045" class="text body">The physical branches are protected by</text>
+  <text x="660" y="1080" class="text body">documented commercial systems.”</text>
+
+  <path d="M 600 1020 L 630 1020" class="dashed" marker-end="url(#purpleArrow2)" />
+
+  <!-- Checklist -->
+  <rect x="70" y="1190" width="1060" height="270" rx="14" class="card" />
+  <text x="100" y="1235" class="text h2">Print and bring</text>
+  <text x="110" y="1285" class="text body"><tspan class="ok">✓</tspan> Amazon CITYORK listing showing 12V, 99.54Wh, 1-3A max, built-in protection circuit board.</text>
+  <text x="110" y="1335" class="text body"><tspan class="ok">✓</tspan> Raspberry Pi 5 documentation showing USB-C power requirements and board compliance.</text>
+  <text x="110" y="1385" class="text body"><tspan class="ok">✓</tspan> VEX V5 battery / V5 Brain documentation showing known commercial control system.</text>
+  <text x="110" y="1435" class="text body"><tspan class="ok">✓</tspan> Robot software test output showing virtual fuse trips on current, stall, and over-temperature.</text>
+
+  <rect x="70" y="1500" width="1060" height="60" rx="12" class="note" />
+  <text x="100" y="1538" class="text body"><tspan class="warn">Field rule:</tspan> Any new raw branch from a battery gets its own inline fuse before competition.</text>
+</svg>

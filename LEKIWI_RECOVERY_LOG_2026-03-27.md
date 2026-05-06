@@ -35,7 +35,7 @@ python examples/lekiwi/teleoperate.py
 Mac teleop assumptions:
 
 - Pi IP: `192.168.40.135`
-- Leader port: `/dev/tty.usbmodem5AE60840411`
+- Leader port: `/dev/tty.usbmodem5B140320431`
 
 ## Machines And Paths
 
@@ -98,7 +98,7 @@ cd /Users/meharkhanna/lerobot
 
 lerobot-calibrate \
   --teleop.type=so101_leader \
-  --teleop.port=/dev/tty.usbmodem5AE60840411 \
+  --teleop.port=/dev/tty.usbmodem5B140320431 \
   --teleop.id=leader
 ```
 

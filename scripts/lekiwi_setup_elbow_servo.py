@@ -36,6 +36,7 @@ def ensure_lerobot_on_path() -> None:
 
 ensure_lerobot_on_path()
 
+from lekiwi_runtime import resolve_lekiwi_robot_port
 from lerobot.motors.feetech import OperatingMode
 from lerobot.robots.lekiwi import LeKiwi, LeKiwiConfig
 
@@ -71,6 +72,13 @@ def parse_args() -> argparse.Namespace:
 
 def build_robot(args: argparse.Namespace) -> LeKiwi:
     fields = getattr(LeKiwiConfig, "__dataclass_fields__", {})
+    resolved_port = resolve_lekiwi_robot_port(args.robot_port)
+    if resolved_port != args.robot_port:
+        print(
+            f"Using detected LeKiwi robot port {resolved_port} instead of configured {args.robot_port}.",
+            flush=True,
+        )
+        args.robot_port = resolved_port
     kwargs = {
         "id": args.robot_id,
         "port": args.robot_port,

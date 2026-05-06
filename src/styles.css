@@ -303,6 +303,10 @@ code {
 }
 
 .alert-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
   border-color: #fecaca;
   background: var(--danger-soft);
   color: #7f1d1d;
@@ -1612,6 +1616,62 @@ label {
   color: var(--ink-soft);
   font-size: 0.9rem;
   font-weight: 750;
+}
+
+.switch-field {
+  display: grid;
+  gap: 0.42rem;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  font-weight: 750;
+}
+
+.toggle-switch {
+  width: 100%;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.7rem;
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  white-space: normal;
+}
+
+.toggle-switch-track {
+  position: relative;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  transition: background 120ms ease;
+}
+
+.toggle-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 1px 4px rgba(23, 23, 23, 0.22);
+  transition: transform 120ms ease;
+}
+
+.toggle-switch.active .toggle-switch-track {
+  background: var(--accent);
+}
+
+.toggle-switch.active .toggle-switch-thumb {
+  transform: translateX(20px);
+}
+
+.toggle-switch-text {
+  min-width: 0;
+  color: var(--ink);
+  font-weight: 850;
 }
 
 .checkbox-row {

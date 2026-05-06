@@ -12,7 +12,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from lekiwi_runtime import BASE_STATE_KEYS, iso_timestamp_from_epoch
+from lekiwi_runtime import (
+    BASE_STATE_KEYS,
+    VEX_PIN5_SERVO_POSITIONS,
+    iso_timestamp_from_epoch,
+)
 
 try:
     import serial
@@ -22,10 +26,10 @@ except Exception:  # pragma: no cover - resolved at runtime on the Pi
 VEX_PORT_GLOB = "/dev/serial/by-id/*VEX_Robotics_V5_Brain*"
 VEX_PREFERRED_SUFFIXES = ("if02", "if00")
 VEX_COMM_SUFFIXES = ("if00", "if01")
-DEFAULT_COMMAND_TIMEOUT_S = 0.35
+DEFAULT_COMMAND_TIMEOUT_S = 0.20
 DEFAULT_TELEMETRY_SLOT = 8
 DEFAULT_REPLAY_SLOT = 7
-REQUIRED_VEX_MIXER_VERSION = 8
+REQUIRED_VEX_MIXER_VERSION = 16
 VEX_IDLE_MOTION_EPSILON = 1e-4
 VEX_CONTROL_MODE_KEY = "__vex_control_mode__"
 VEX_DRIVE_CONTROL_MODE = "drive"
@@ -49,6 +53,10 @@ VEX_MOTOR_STATE_KEYS = (
     "vex_rear_right.pos",
     "vex_rear_left.pos",
 )
+VEX_PIN5_SERVO_STATE_KEYS = (
+    "vex_pin5_servo.pos",
+    "vex_pin5_servo_start.pos",
+)
 VEX_INERTIAL_STATE_KEYS = (
     "vex_inertial_rotation.deg",
     "vex_inertial_heading.deg",
@@ -63,6 +71,14 @@ VEX_MOTOR_STATE_ALIASES = {
     "vex_front_left.pos": ("vex_front_left.pos", "frontLeft.pos", "front_left.pos"),
     "vex_rear_right.pos": ("vex_rear_right.pos", "rearRight.pos", "rear_right.pos"),
     "vex_rear_left.pos": ("vex_rear_left.pos", "rearLeft.pos", "rear_left.pos"),
+}
+VEX_PIN5_SERVO_STATE_ALIASES = {
+    "vex_pin5_servo.pos": ("vex_pin5_servo.pos", "pin5Servo.pos", "pin5_servo.pos"),
+    "vex_pin5_servo_start.pos": (
+        "vex_pin5_servo_start.pos",
+        "pin5Servo.start_pos",
+        "pin5_servo.start_pos",
+    ),
 }
 VEX_INERTIAL_STATE_ALIASES = {
     "vex_inertial_rotation.deg": (
@@ -117,6 +133,9 @@ DEFAULT_VEX_CONTROL_CONFIG = {
         "thetaSign": 1,
         "calibratedAtIso": None,
         "notes": "",
+    },
+    "pin5Servo": {
+        "startPositionDeg": 0.0,
     },
     "manualIdleStoppingMode": "hold",
 }
@@ -276,6 +295,7 @@ def normalize_vex_control_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     controls = payload.get("controls") if isinstance(payload.get("controls"), dict) else {}
     tuning = payload.get("tuning") if isinstance(payload.get("tuning"), dict) else {}
     keyboard_calibration = payload.get("keyboardCalibration") if isinstance(payload.get("keyboardCalibration"), dict) else {}
+    pin5_servo = payload.get("pin5Servo") if isinstance(payload.get("pin5Servo"), dict) else {}
 
     def port_value(group: dict[str, Any], key: str, fallback: int) -> int:
         candidate = group.get(key)
@@ -400,6 +420,15 @@ def normalize_vex_control_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             if isinstance(keyboard_calibration.get("notes"), str)
             else defaults["keyboardCalibration"]["notes"],
         },
+        "pin5Servo": {
+            "startPositionDeg": float_value(
+                pin5_servo,
+                "startPositionDeg",
+                defaults["pin5Servo"]["startPositionDeg"],
+                -100000.0,
+                100000.0,
+            ),
+        },
         "manualIdleStoppingMode": stopping_mode_value(
             payload.get("manualIdleStoppingMode"),
             defaults["manualIdleStoppingMode"],
@@ -415,6 +444,7 @@ def _motor_definition_lines(config: dict[str, Any]) -> str:
             f'front_left = Motor(Ports.PORT{motors["frontLeft"]["port"]}, GearSetting.RATIO_18_1, {str(bool(motors["frontLeft"]["reversed"]))})',
             f'rear_right = Motor(Ports.PORT{motors["rearRight"]["port"]}, GearSetting.RATIO_18_1, {str(bool(motors["rearRight"]["reversed"]))})',
             f'rear_left = Motor(Ports.PORT{motors["rearLeft"]["port"]}, GearSetting.RATIO_18_1, {str(bool(motors["rearLeft"]["reversed"]))})',
+            "pin5_servo = Motor(Ports.PORT5, GearSetting.RATIO_36_1, False)",
         ]
     )
 
@@ -458,6 +488,7 @@ def build_vex_telemetry_program_source(control_config: dict[str, Any] | None) ->
     config = normalize_vex_control_config(control_config)
     tuning = config["tuning"]
     controls = config["controls"]
+    pin5_servo = config["pin5Servo"]
     motor_lines = _motor_definition_lines(config)
     inertial_lines = _inertial_definition_lines(config)
     forward_expr = _axis_expression(controls["forwardAxis"], bool(controls["invertForward"]))
@@ -481,12 +512,17 @@ VEX_MIXER_VERSION = {REQUIRED_VEX_MIXER_VERSION}
 DEADBAND_PERCENT = {int(tuning["deadbandPercent"])}
 TELEMETRY_INTERVAL_MS = 50
 SCREEN_KEEPALIVE_INTERVAL_MS = 1000
+COMMAND_LOOP_INTERVAL_MS = 10
 REMOTE_COMMAND_MIN_TTL_MS = 50
 ECU_IDLE_TOLERANCE_DEG = 0.75
 ECU_COMMAND_TOLERANCE_DEG = 0.25
 ECU_MIN_SPEED_DPS = 30.0
 ECU_MAX_SPEED_DPS = 360.0
 REMOTE_HOLD_TTL_MS = 1200
+PIN5_SERVO_DRIVE_SPEED_DPS = 180.0
+PIN5_SERVO_ECU_SPEED_DPS = 30.0
+PIN5_SERVO_START_POSITION_DEG = {float(pin5_servo["startPositionDeg"]):.4f}
+PIN5_SERVO_OFFSETS_DEG = {{"start": 0.0, "up": -90.0, "down": -180.0}}
 
 MOTOR_ORDER = (
     ("vex_front_right.pos", front_right),
@@ -507,6 +543,14 @@ controller_control_mode = "{VEX_DRIVE_CONTROL_MODE}"
 serial_command_lines = []
 serial_reader_thread = None
 base_released = False
+telemetry_enabled = True
+telemetry_shutdown_requested = False
+program_running = True
+pin5_servo_start_position = PIN5_SERVO_START_POSITION_DEG
+pin5_servo_speed_dps = PIN5_SERVO_DRIVE_SPEED_DPS
+last_control_mode_toggle_pressed = False
+last_pin5_servo_button_states = {{"start": False, "up": False, "down": False}}
+pin5_servo_jog_active = False
 
 
 def clamp(value, low, high):
@@ -542,6 +586,35 @@ def controller_motion():
         "y.vel": (forward_pct / 100.0) * linear_speed,
         "theta.vel": (turn_pct / 100.0) * turn_speed,
     }}
+
+
+def pin5_servo_speed_for_mode(mode):
+    return PIN5_SERVO_ECU_SPEED_DPS if mode == "{VEX_ECU_CONTROL_MODE}" else PIN5_SERVO_DRIVE_SPEED_DPS
+
+
+def set_controller_control_mode(mode):
+    global controller_control_mode
+    global pin5_servo_speed_dps
+    if mode in ("{VEX_DRIVE_CONTROL_MODE}", "{VEX_ECU_CONTROL_MODE}"):
+        controller_control_mode = mode
+        pin5_servo_speed_dps = pin5_servo_speed_for_mode(mode)
+        return True
+    return False
+
+
+def toggle_controller_control_mode():
+    if controller_control_mode == "{VEX_ECU_CONTROL_MODE}":
+        set_controller_control_mode("{VEX_DRIVE_CONTROL_MODE}")
+    else:
+        set_controller_control_mode("{VEX_ECU_CONTROL_MODE}")
+
+
+def handle_controller_control_mode_button():
+    global last_control_mode_toggle_pressed
+    pressed = controller_1.buttonL1.pressing()
+    if pressed and not last_control_mode_toggle_pressed:
+        toggle_controller_control_mode()
+    last_control_mode_toggle_pressed = pressed
 
 
 def motion_to_percent(motion):
@@ -600,6 +673,54 @@ def coast_drive():
     rear_right.stop(COAST)
 
 
+def display_telemetry_off():
+    try:
+        brain.screen.clear_screen()
+        brain.screen.set_cursor(1, 1)
+        brain.screen.print("Base Telemetry OFF")
+        brain.screen.set_cursor(2, 1)
+        brain.screen.print("Emergency cutoff")
+    except Exception:
+        pass
+
+
+def move_pin5_servo(position_name):
+    offset = PIN5_SERVO_OFFSETS_DEG.get(position_name)
+    if offset is None:
+        return False
+    target = pin5_servo_start_position + offset
+    pin5_servo.set_stopping(HOLD)
+    pin5_servo.spin_to_position(target, DEGREES, pin5_servo_speed_dps, VelocityUnits.DPS, wait=False)
+    return True
+
+
+def handle_pin5_servo_controller_buttons():
+    global last_pin5_servo_button_states
+    global pin5_servo_jog_active
+    clockwise_pressed = controller_1.buttonR2.pressing()
+    counterclockwise_pressed = controller_1.buttonR1.pressing()
+    if clockwise_pressed != counterclockwise_pressed:
+        pin5_servo.set_stopping(HOLD)
+        pin5_servo.set_velocity(pin5_servo_speed_dps, VelocityUnits.DPS)
+        pin5_servo.spin(FORWARD if clockwise_pressed else REVERSE)
+        pin5_servo_jog_active = True
+        return
+    if pin5_servo_jog_active:
+        pin5_servo.stop(HOLD)
+    pin5_servo_jog_active = False
+
+    button_states = (
+        ("start", controller_1.buttonA.pressing()),
+        ("up", controller_1.buttonB.pressing()),
+        ("down", controller_1.buttonY.pressing()),
+    )
+    for position_name, pressed in button_states:
+        was_pressed = last_pin5_servo_button_states.get(position_name, False)
+        if pressed and not was_pressed:
+            move_pin5_servo(position_name)
+        last_pin5_servo_button_states[position_name] = pressed
+
+
 def parse_float(token, fallback=0.0):
     try:
         return float(token)
@@ -649,8 +770,10 @@ def handle_command_line(line):
     global remote_dt_ms
     global remote_expires_ms
     global last_targets
-    global controller_control_mode
     global base_released
+    global telemetry_enabled
+    global telemetry_shutdown_requested
+    global program_running
 
     if not line:
         return
@@ -667,14 +790,44 @@ def handle_command_line(line):
     command = parts[0]
     if command == "!mode" and len(parts) >= 2:
         requested_mode = parts[1].strip().lower()
-        if requested_mode in ("{VEX_DRIVE_CONTROL_MODE}", "{VEX_ECU_CONTROL_MODE}"):
-            controller_control_mode = requested_mode
+        set_controller_control_mode(requested_mode)
         return
 
     if command == "!release":
         clear_remote_command(release_controller=True)
         base_released = True
         coast_drive()
+        return
+
+    if command == "!telemetry" and len(parts) >= 2:
+        requested_state = parts[1].strip().lower()
+        if requested_state == "off":
+            telemetry_enabled = False
+            telemetry_shutdown_requested = True
+            program_running = False
+            base_released = True
+            remote_takeover = True
+            remote_mode = "telemetry-off"
+            remote_motion = zero_motion()
+            remote_targets = {{}}
+            remote_dt_ms = 20
+            remote_expires_ms = now_ms + 86400000
+            last_targets = {{}}
+            coast_drive()
+            display_telemetry_off()
+        elif requested_state == "on":
+            telemetry_enabled = True
+            telemetry_shutdown_requested = False
+            program_running = True
+            base_released = False
+            remote_takeover = True
+            remote_mode = "hold"
+            remote_motion = zero_motion()
+            remote_targets = read_motor_positions()
+            remote_dt_ms = 20
+            remote_expires_ms = now_ms + REMOTE_HOLD_TTL_MS
+            last_targets = dict(remote_targets)
+            hold_drive()
         return
 
     if command == "!hold":
@@ -706,6 +859,10 @@ def handle_command_line(line):
         last_targets = dict(remote_targets)
         set_pose_origin()
         hold_drive()
+        return
+
+    if command == "!servo5" and len(parts) >= 2:
+        move_pin5_servo(parts[1].strip().lower())
         return
 
     if command == "!velocity" and len(parts) >= 5:
@@ -749,7 +906,7 @@ def remote_command_active(now_ms):
 
 def serial_command_reader():
     serial_buffer = ""
-    while True:
+    while program_running:
         try:
             chunk = sys.stdin.read(1)
         except Exception:
@@ -820,7 +977,7 @@ def print_motion(motion, source):
     inertial_state = read_inertial_state()
     theta_vel = inertial_state["vex_inertial_rate_z.dps"] if inertial_available() else motion["theta.vel"]
     print(
-        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"vex_front_right.pos":%.4f,"vex_front_left.pos":%.4f,"vex_rear_right.pos":%.4f,"vex_rear_left.pos":%.4f,"vex_inertial_rotation.deg":%.4f,"vex_inertial_heading.deg":%.4f,"vex_inertial_rate_z.dps":%.4f,"vex_pose_epoch":%d,"vex_mixer_version":%d,"vex_control_mode":"%s","source":"%s"}}'
+        '{{"x.vel":%.4f,"y.vel":%.4f,"theta.vel":%.4f,"vex_front_right.pos":%.4f,"vex_front_left.pos":%.4f,"vex_rear_right.pos":%.4f,"vex_rear_left.pos":%.4f,"vex_pin5_servo.pos":%.4f,"vex_pin5_servo_start.pos":%.4f,"vex_inertial_rotation.deg":%.4f,"vex_inertial_heading.deg":%.4f,"vex_inertial_rate_z.dps":%.4f,"vex_pose_epoch":%d,"vex_mixer_version":%d,"vex_control_mode":"%s","source":"%s"}}'
         % (
             motion["x.vel"],
             motion["y.vel"],
@@ -829,6 +986,8 @@ def print_motion(motion, source):
             positions["vex_front_left.pos"],
             positions["vex_rear_right.pos"],
             positions["vex_rear_left.pos"],
+            pin5_servo.position(DEGREES),
+            pin5_servo_start_position,
             inertial_state["vex_inertial_rotation.deg"],
             inertial_state["vex_inertial_heading.deg"],
             inertial_state["vex_inertial_rate_z.dps"],
@@ -850,9 +1009,9 @@ def display_keepalive(source):
         brain.screen.set_cursor(3, 1)
         brain.screen.print("Src: " + source)
         brain.screen.set_cursor(4, 1)
-        brain.screen.print("Hold power button to shut down")
+        brain.screen.print("Servo5: " + str(int(pin5_servo_speed_dps)) + " dps")
         brain.screen.set_cursor(5, 1)
-        brain.screen.print("Uptime ms: " + str(brain.timer.system()))
+        brain.screen.print("Hold power button to shut down")
     except Exception:
         pass
 
@@ -869,6 +1028,20 @@ def main():
     while True:
         now_ms = brain.timer.system()
         poll_serial_commands()
+        handle_controller_control_mode_button()
+        handle_pin5_servo_controller_buttons()
+        if telemetry_shutdown_requested:
+            coast_drive()
+            display_telemetry_off()
+            wait(100, MSEC)
+            sys.exit(0)
+        if not telemetry_enabled:
+            coast_drive()
+            if now_ms - last_screen_ms >= SCREEN_KEEPALIVE_INTERVAL_MS:
+                display_telemetry_off()
+                last_screen_ms = now_ms
+            wait(50, MSEC)
+            continue
         if remote_takeover:
             if remote_command_active(now_ms):
                 active_motion = remote_motion
@@ -913,7 +1086,7 @@ def main():
             display_keepalive(source)
             last_screen_ms = now_ms
 
-        wait(20, MSEC)
+        wait(COMMAND_LOOP_INTERVAL_MS, MSEC)
 
 
 main()
@@ -1113,6 +1286,12 @@ class VexBaseBridge:
             return False
         return self._write_command_line(f"!mode {normalized}")
 
+    def send_pin5_servo_position(self, position: str) -> bool:
+        normalized = str(position or "").strip().lower()
+        if normalized not in VEX_PIN5_SERVO_POSITIONS:
+            return False
+        return self._write_command_line(f"!servo5 {normalized}")
+
     def send_ecu_targets(
         self,
         targets: dict[str, Any],
@@ -1239,6 +1418,10 @@ class VexBaseBridge:
 
         extra_state = {}
         for key, aliases in VEX_MOTOR_STATE_ALIASES.items():
+            value = _extract_optional_numeric(payload, aliases)
+            if value is not None:
+                extra_state[key] = value
+        for key, aliases in VEX_PIN5_SERVO_STATE_ALIASES.items():
             value = _extract_optional_numeric(payload, aliases)
             if value is not None:
                 extra_state[key] = value

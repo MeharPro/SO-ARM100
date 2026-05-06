@@ -502,7 +502,7 @@ This table is the desired behavior, not just current behavior.
 | Hold pose | VEX controller | Yes | Needed for row alignment. |
 | Hold pose | Keyboard base | Yes | Needed for row alignment from the Mac. |
 | Hold pose | Keyboard arm | No by default | Arm should stay locked until recording starts or hold is turned off. |
-| Hold pose | Leader arm | No by default | Optional only after explicit leader mimic/handoff. |
+| Hold pose | Leader arm | No | Release the hold before giving authority back to the leader. |
 | Replay | None/stationary base | Yes | Default safe replay. |
 | Replay | VEX replay | Yes, explicit | Only when "Replay VEX base with this move" is enabled. |
 | Replay | VEX controller | No | Controller should not fight Pi replay. |
@@ -616,7 +616,6 @@ Top area:
   - Keyboard arm
   - Hand-guide follower
   - Keyboard from active hold
-  - Leader from active hold, after leader mimic is implemented
 - Start Recording
 - Stop Recording
 - active hold indicator
@@ -773,8 +772,7 @@ type RecordingType =
   | "keyboardControl"
   | "leaderArm"
   | "followerHandGuide"
-  | "keyboardFromActiveHold"
-  | "leaderFromSyncedHold";
+  | "keyboardFromActiveHold";
 ```
 
 The exact TypeScript names can change, but the separation should not change:
@@ -912,7 +910,6 @@ Move-specific recording menu:
      - Leader arm
      - Follower arm hand-guide
      - Keyboard from active hold
-     - Leader from synced hold, only after leader-mimic is implemented
    - Record distance sensors checkbox
    - Record inertial sensor checkbox
    - Include VEX base samples checkbox
@@ -958,15 +955,6 @@ Recording type behavior:
   - On stop, the arm returns to the same hold pose.
   - This should be the P0 workflow for the fuse row because it avoids the leader
     snapping problem.
-
-- Leader from synced hold:
-  - Only available after "Sync Leader to Follower Pose" exists and passes
-    tolerance checks.
-  - The follower starts at the hold pose.
-  - The leader is commanded to the same pose.
-  - Leader torque is turned off after sync.
-  - The operator then moves the leader to record naturally.
-  - This is a P1 workflow, not the first contest dependency.
 
 Sensor recording behavior:
 
@@ -1161,7 +1149,6 @@ Mode switching risks:
   last leader sync.
 - Leader-follower control should not resume from that state unless the operator
   explicitly chooses one of these actions:
-  - sync leader to follower pose;
   - move follower to leader pose;
   - discard leader authority and stay in keyboard/follower mode.
 - Claw control has the same authority problem as the rest of the arm. If the
@@ -1385,63 +1372,6 @@ Remaining important gap:
 - Live control labels and modes must make it obvious when arm input is disabled.
 - Leader arm should not be reintroduced after a held replay or held recording
   unless explicitly requested.
-
-## Leader Mimics Follower Proposal
-
-The proposed leader-mimic workflow is technically possible, but it is higher
-risk than keyboard-from-hold for the immediate contest deadline.
-
-Problem:
-
-- If the follower is held at a row pose and the leader arm is physically in a
-  different pose, starting leader control will command the follower toward the
-  leader pose.
-- If the operator tries to use keyboard arm and leader arm together, the
-  follower may snap back to the leader pose.
-
-Proposed solution:
-
-1. Follower is moved to the desired hold pose.
-2. The leader arm is powered and commanded to mimic that follower pose.
-3. Wait until leader and follower joint positions are within tolerance.
-4. Disable torque on the leader arm only.
-5. The operator now moves the leader from the same starting pose.
-6. The follower follows the leader.
-7. Recording starts from aligned leader/follower poses.
-
-Benefits:
-
-- Leader and follower start at the same pose.
-- Recording can be more natural than keyboard arm control.
-- The follower should not jump when leader control starts.
-
-Risks:
-
-- The leader arm may resist or move unexpectedly while being aligned.
-- Exact pose matching may be imperfect due to torque, backlash, calibration, or
-  normalization differences.
-- A rushed implementation could create more physical risk than the keyboard
-  workflow.
-- This requires careful leader-side torque control and command verification.
-
-Recommendation:
-
-- For contest P0, use keyboard-from-hold.
-- For P1, implement leader-mimic as an explicit button:
-  "Sync Leader to Follower Pose".
-- Do not make leader-mimic automatic until tested.
-
-Implementation details for leader-mimic:
-
-- Read current follower arm pose from Pi host.
-- Convert follower joint keys to leader joint keys.
-- Connect to leader arm on Mac.
-- Enable leader torque temporarily.
-- Command leader goal positions to match follower pose.
-- Poll leader observation until within tolerance.
-- Disable leader torque.
-- Mark leader as aligned to active hold.
-- Only then allow leader recording from hold.
 
 ## VEX Positioning Requirements
 
@@ -2010,13 +1940,7 @@ Operator requirements:
    - Add `start-recording` and `stop-recording` warm-host commands.
    - Reduce the 2-4 second start/stop delay.
 
-2. Leader mimics follower.
-   - Add explicit "Sync Leader to Follower Pose".
-   - Temporarily torque leader on, command pose, verify tolerance, torque leader
-     off.
-   - Allow leader recording from active hold only after sync is verified.
-
-3. Recording timeline editor.
+2. Recording timeline editor.
    - Support window/keyframe edits instead of one timestamp at a time.
    - Support duplicate-before-edit.
    - Show command samples and observed samples separately.
@@ -2254,8 +2178,6 @@ strongest path is:
 11. Treat every move transition and every leader/claw mode switch as a possible
     snapback risk unless the start pose and authority state are verified.
 
-The leader-mimic idea is valid and can make leader recording from a hold pose
-much better, but it should not block the immediate keyboard-from-hold workflow.
 The 3D model editor is also valid and would solve the "hundreds of points and
 six text boxes" problem, but it is not the first reliability fix. The first
 reliability fix is control authority.

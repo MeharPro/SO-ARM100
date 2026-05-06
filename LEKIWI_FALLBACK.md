@@ -29,7 +29,7 @@ From the Mac, in a second terminal:
 source ~/miniforge3/etc/profile.d/conda.sh
 conda activate lerobot
 export LEKIWI_PI_HOST=10.42.0.1
-export LEKIWI_LEADER_PORT=/dev/tty.usbmodem5AE60840411
+export LEKIWI_LEADER_PORT=/dev/tty.usbmodem5B140320431
 ~/lekiwi_raw_relay --remote-host "$LEKIWI_PI_HOST" --print-every 1
 ```
 

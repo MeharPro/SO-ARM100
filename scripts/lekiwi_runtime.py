@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -134,6 +136,28 @@ ARM_SAFETY_LOG_PREFIX = "[safety]"
 ACTION_COMMAND_SOURCE_KEY = "__command_source__"
 COMMAND_SOURCE_KEYBOARD = "keyboard"
 VEX_CONTROL_MODE_KEY = "__vex_control_mode__"
+VEX_PIN5_SERVO_POSITION_KEY = "__vex_pin5_servo_position__"
+VEX_PIN5_SERVO_POSITIONS = ("start", "up", "down")
+LEKIWI_ROBOT_PORT_BY_ID_GLOB = "/dev/serial/by-id/*"
+LEKIWI_ROBOT_PORT_DEVICE_GLOBS = ("/dev/ttyACM*", "/dev/ttyUSB*")
+LEKIWI_ROBOT_PORT_EXCLUDED_MARKERS = (
+    "VEX_Robotics_V5_Brain",
+    "VEX-Robotics-V5-Brain",
+)
+LEKIWI_ROBOT_PORT_PREFERRED_MARKERS = (
+    "Feetech",
+    "FEETECH",
+    "STS",
+    "SCServo",
+    "USB2.0-Serial",
+    "QinHeng",
+    "1a86",
+    "CH340",
+    "CP210",
+    "Silicon_Labs",
+    "FTDI",
+)
+LEKIWI_ROBOT_PORT_UNSTABLE_PREFIXES = ("/dev/ttyACM", "/dev/ttyUSB")
 
 
 def wrap_degrees(value: float) -> float:
@@ -155,6 +179,66 @@ def normalize_arm_action(action: dict[str, float], *, wrap_wrist_roll: bool = Tr
     if wrap_wrist_roll and WRIST_ROLL_KEY in normalized:
         normalized[WRIST_ROLL_KEY] = wrap_degrees(normalized[WRIST_ROLL_KEY])
     return normalized
+
+
+def _robot_port_is_excluded(path: str) -> bool:
+    return any(marker in path for marker in LEKIWI_ROBOT_PORT_EXCLUDED_MARKERS)
+
+
+def _robot_port_preference_key(path: str) -> tuple[int, str]:
+    basename = os.path.basename(path)
+    for index, marker in enumerate(LEKIWI_ROBOT_PORT_PREFERRED_MARKERS):
+        if marker in basename:
+            return index, basename
+    return len(LEKIWI_ROBOT_PORT_PREFERRED_MARKERS), basename
+
+
+def _unstable_robot_port_requested(requested_port: str) -> bool:
+    return requested_port.startswith(LEKIWI_ROBOT_PORT_UNSTABLE_PREFIXES)
+
+
+def detect_lekiwi_robot_port() -> str | None:
+    by_id_candidates = [
+        path
+        for path in glob.glob(LEKIWI_ROBOT_PORT_BY_ID_GLOB)
+        if not _robot_port_is_excluded(path) and os.path.exists(path)
+    ]
+    by_id_candidates.sort(key=_robot_port_preference_key)
+    if by_id_candidates:
+        return by_id_candidates[0]
+
+    excluded_realpaths = {
+        os.path.realpath(path)
+        for path in glob.glob(LEKIWI_ROBOT_PORT_BY_ID_GLOB)
+        if _robot_port_is_excluded(path) and os.path.exists(path)
+    }
+    device_candidates: list[str] = []
+    for pattern in LEKIWI_ROBOT_PORT_DEVICE_GLOBS:
+        for path in glob.glob(pattern):
+            if not os.path.exists(path):
+                continue
+            if os.path.realpath(path) in excluded_realpaths:
+                continue
+            device_candidates.append(path)
+
+    return sorted(set(device_candidates))[0] if device_candidates else None
+
+
+def resolve_lekiwi_robot_port(requested_port: str | None) -> str:
+    requested = (requested_port or "auto").strip() or "auto"
+    requested_lower = requested.lower()
+    detected = detect_lekiwi_robot_port()
+
+    if requested_lower == "auto":
+        return detected or requested
+
+    if _unstable_robot_port_requested(requested) and detected is not None:
+        return detected
+
+    if os.path.exists(requested):
+        return requested
+
+    return detected or requested
 
 
 def build_safer_max_relative_target() -> dict[str, float]:
@@ -1280,21 +1364,8 @@ class ServoProtectionSupervisor:
                     ):
                         continue
 
-                current_text = ""
-                if current_ma is not None and current_limit_ma is not None:
-                    current_text = f", current {current_ma:.0f}mA >= {current_limit_ma:.0f}mA"
-                elif current_limit_ma is not None:
-                    current_text = ", no current sample available"
-                self._trip(
-                    motor,
-                    (
-                        f"{motor} stalled with {error:.2f}deg position error and no meaningful motion "
-                        f"for {duration_s:.2f}s{current_text}"
-                    ),
-                    observation,
-                    power_sample,
-                )
-                return True
+                state.candidate_since = now
+                continue
 
         return False
 
@@ -1418,6 +1489,9 @@ def _preserve_robot_action_metadata(
     requested_vex_mode = str(source_action.get(VEX_CONTROL_MODE_KEY, "")).strip().lower()
     if requested_vex_mode in {"drive", "ecu"}:
         enriched[VEX_CONTROL_MODE_KEY] = requested_vex_mode
+    requested_pin5_servo_position = str(source_action.get(VEX_PIN5_SERVO_POSITION_KEY, "")).strip().lower()
+    if requested_pin5_servo_position in VEX_PIN5_SERVO_POSITIONS:
+        enriched[VEX_PIN5_SERVO_POSITION_KEY] = requested_pin5_servo_position
     return enriched
 
 

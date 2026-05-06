@@ -981,11 +981,12 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("inertial_1.reset_heading()", source)
         self.assertIn("pose_epoch += 1", source)
         self.assertIn('"vex_pose_epoch":%d', source)
-        self.assertIn("VEX_MIXER_VERSION = 8", source)
+        self.assertIn("VEX_MIXER_VERSION = 16", source)
         self.assertIn('"vex_mixer_version":%d', source)
         self.assertIn('if command == "!mode"', source)
         self.assertIn('"vex_control_mode":"%s"', source)
         self.assertIn("SCREEN_KEEPALIVE_INTERVAL_MS = 1000", source)
+        self.assertIn("COMMAND_LOOP_INTERVAL_MS = 10", source)
         self.assertIn("def display_keepalive(source):", source)
         self.assertIn("display_keepalive(source)", source)
         self.assertIn('brain.screen.print("Hold power button to shut down")', source)
@@ -995,6 +996,55 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("base_released = False", source)
         self.assertIn("def idle_stop_mode():", source)
         self.assertIn("return COAST if base_released else HOLD", source)
+        self.assertIn("pin5_servo = Motor(Ports.PORT5, GearSetting.RATIO_36_1, False)", source)
+        self.assertIn('PIN5_SERVO_OFFSETS_DEG = {"start": 0.0, "up": -90.0, "down": -180.0}', source)
+        self.assertIn("PIN5_SERVO_DRIVE_SPEED_DPS = 180.0", source)
+        self.assertIn("PIN5_SERVO_ECU_SPEED_DPS = 30.0", source)
+        self.assertIn("PIN5_SERVO_START_POSITION_DEG = 0.0000", source)
+        self.assertIn("pin5_servo_start_position = PIN5_SERVO_START_POSITION_DEG", source)
+        self.assertIn("pin5_servo_speed_dps = PIN5_SERVO_DRIVE_SPEED_DPS", source)
+        self.assertIn("last_control_mode_toggle_pressed = False", source)
+        self.assertIn('last_pin5_servo_button_states = {"start": False, "up": False, "down": False}', source)
+        self.assertIn("pin5_servo_jog_active = False", source)
+        self.assertIn("def toggle_controller_control_mode():", source)
+        self.assertIn('if controller_control_mode == "ecu":', source)
+        self.assertIn('set_controller_control_mode("drive")', source)
+        self.assertIn('set_controller_control_mode("ecu")', source)
+        self.assertIn("def handle_controller_control_mode_button():", source)
+        self.assertIn("pressed = controller_1.buttonL1.pressing()", source)
+        self.assertIn("if pressed and not last_control_mode_toggle_pressed:", source)
+        self.assertIn("toggle_controller_control_mode()", source)
+        self.assertIn("def handle_pin5_servo_controller_buttons():", source)
+        self.assertIn("clockwise_pressed = controller_1.buttonR2.pressing()", source)
+        self.assertIn("counterclockwise_pressed = controller_1.buttonR1.pressing()", source)
+        self.assertIn("if clockwise_pressed != counterclockwise_pressed:", source)
+        self.assertIn("pin5_servo.set_velocity(pin5_servo_speed_dps, VelocityUnits.DPS)", source)
+        self.assertIn("pin5_servo.spin(FORWARD if clockwise_pressed else REVERSE)", source)
+        self.assertIn("pin5_servo.stop(HOLD)", source)
+        self.assertIn('("start", controller_1.buttonA.pressing())', source)
+        self.assertIn('("up", controller_1.buttonB.pressing())', source)
+        self.assertIn('("down", controller_1.buttonY.pressing())', source)
+        self.assertIn("if pressed and not was_pressed:", source)
+        self.assertIn("move_pin5_servo(position_name)", source)
+        self.assertIn("handle_pin5_servo_controller_buttons()", source)
+        self.assertIn("handle_controller_control_mode_button()", source)
+        self.assertIn("set_controller_control_mode(requested_mode)", source)
+        self.assertIn("pin5_servo_speed_dps", source)
+        self.assertNotIn("pin5_servo_start_position = pin5_servo.position(DEGREES)", source)
+        self.assertIn('"vex_pin5_servo.pos":%.4f', source)
+        self.assertIn('"vex_pin5_servo_start.pos":%.4f', source)
+        self.assertIn("pin5_servo.position(DEGREES)", source)
+        self.assertIn('if command == "!servo5" and len(parts) >= 2:', source)
+        self.assertIn("move_pin5_servo(parts[1].strip().lower())", source)
+        self.assertIn("telemetry_enabled = True", source)
+        self.assertIn("telemetry_shutdown_requested = False", source)
+        self.assertIn('if command == "!telemetry" and len(parts) >= 2:', source)
+        self.assertIn('requested_state == "off"', source)
+        self.assertIn("telemetry_shutdown_requested = True", source)
+        self.assertIn("program_running = False", source)
+        self.assertIn("if telemetry_shutdown_requested:", source)
+        self.assertIn("sys.exit(0)", source)
+        self.assertIn("if not telemetry_enabled:", source)
         self.assertIn(
             'if command == "!release":\n'
             '        clear_remote_command(release_controller=True)\n'
@@ -1124,6 +1174,52 @@ class SensorReplayTests(unittest.TestCase):
         self.assertIn("motor.spin(FORWARD if percent >= 0 else REVERSE)", source)
         self.assertIn("spin_drive_motor(front_right, front_right_pct)", source)
         self.assertNotIn("front_right.set_velocity(front_right_pct, PERCENT)", source)
+
+    def test_vex_bridge_sends_pin5_servo_position_command(self) -> None:
+        bridge = VexBaseBridge(
+            requested_port="auto",
+            baudrate=115200,
+            stale_after_s=0.35,
+            command_timeout_s=0.35,
+            logger=mock.Mock(),
+        )
+        bridge.serial_handle = mock.Mock()
+
+        self.assertTrue(bridge.send_pin5_servo_position("up"))
+        bridge.serial_handle.write.assert_called_once_with(b"!servo5 up\n")
+        self.assertFalse(bridge.send_pin5_servo_position("sideways"))
+
+    def test_generated_vex_program_uses_configured_pin5_servo_start(self) -> None:
+        source = build_vex_telemetry_program_source({"pin5Servo": {"startPositionDeg": 12.25}})
+
+        self.assertIn("PIN5_SERVO_START_POSITION_DEG = 12.2500", source)
+        self.assertIn("pin5_servo_start_position = PIN5_SERVO_START_POSITION_DEG", source)
+        self.assertNotIn("pin5_servo_start_position = pin5_servo.position(DEGREES)", source)
+
+    def test_host_go_home_uses_dual_ended_joint_batches(self) -> None:
+        source = (SCRIPTS_DIR / "lekiwi_host.py").read_text()
+
+        self.assertIn("def dual_ended_joint_batches", source)
+        self.assertIn("for joint_batch in dual_ended_joint_batches(ARM_SYNC_MOTION_KEYS):", source)
+        self.assertIn("Arm moved to saved home position in dual-ended joint order", source)
+
+    def test_vex_bridge_parses_pin5_servo_telemetry(self) -> None:
+        bridge = VexBaseBridge(
+            requested_port="auto",
+            baudrate=115200,
+            stale_after_s=0.35,
+            command_timeout_s=0.35,
+            logger=mock.Mock(),
+        )
+
+        bridge._handle_line(
+            '{"x.vel":0.0,"y.vel":0.0,"theta.vel":0.0,'
+            '"vex_pin5_servo.pos":37.5,"vex_pin5_servo_start.pos":12.25}'
+        )
+
+        state = bridge.current_state()
+        self.assertEqual(state["vex_pin5_servo.pos"], 37.5)
+        self.assertEqual(state["vex_pin5_servo_start.pos"], 12.25)
 
     def test_generated_vex_program_allows_controller_override_after_remote_timeout(self) -> None:
         source = build_vex_telemetry_program_source({})
