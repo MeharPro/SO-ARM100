@@ -3,6 +3,7 @@ node_modules
 dist
 .lekiwi-ui
 .tmp
-.playwright-mcp/*.log
+.playwright-cli
+.playwright-mcp
 scripts/__pycache__
 tests/__pycache__
